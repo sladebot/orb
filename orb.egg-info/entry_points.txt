@@ -1,0 +1,2 @@
+[console_scripts]
+orb = orb.cli.main:main

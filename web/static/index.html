@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orb Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="stats-bar">
+        <div class="stat">
+            <span class="stat-label">Messages</span>
+            <span id="stat-messages" class="stat-value">0</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Budget</span>
+            <span id="stat-budget" class="stat-value">200</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Elapsed</span>
+            <span id="stat-elapsed" class="stat-value">0.0s</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Status</span>
+            <span id="stat-status" class="stat-value status-waiting">Waiting</span>
+        </div>
+        <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+    </div>
+
+    <div id="main-layout">
+        <div id="graph-panel">
+            <canvas id="graph-canvas"></canvas>
+        </div>
+        <div id="sidebar">
+            <h2>Message Log</h2>
+            <div id="message-log"></div>
+        </div>
+    </div>
+
+    <div id="agent-detail-panel">
+        <div id="agent-details">
+            <span class="detail-placeholder">Click an agent node to see details</span>
+        </div>
+    </div>
+
+    <script src="/static/graph.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
