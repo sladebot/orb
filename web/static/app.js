@@ -3,16 +3,20 @@
  */
 
 const AGENT_CSS_CLASS = {
-    coder:    'agent-coder',
-    reviewer: 'agent-reviewer',
-    tester:   'agent-tester',
-    user:     'agent-user',
+    coder:      'agent-coder',
+    reviewer:   'agent-reviewer',
+    reviewer_a: 'agent-reviewer',
+    reviewer_b: 'agent-reviewer-b',
+    tester:     'agent-tester',
+    user:       'agent-user',
 };
 
 const AGENT_CARD_CLASS = {
-    coder:    'agent-card-coder',
-    reviewer: 'agent-card-reviewer',
-    tester:   'agent-card-tester',
+    coder:      'agent-card-coder',
+    reviewer:   'agent-card-reviewer',
+    reviewer_a: 'agent-card-reviewer',
+    reviewer_b: 'agent-card-reviewer-b',
+    tester:     'agent-card-tester',
 };
 
 const MSG_TYPE_BADGE_CLASS = {
@@ -47,6 +51,37 @@ class Dashboard {
         document.getElementById('chat-send').addEventListener('click', () => this._sendChatMessage());
         document.getElementById('chat-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') this._sendChatMessage();
+        });
+
+        // Launch panel wiring
+        document.getElementById('launch-btn').addEventListener('click', () => this._startRun());
+        document.getElementById('launch-query').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey) this._startRun();
+        });
+
+        // New Run button
+        document.getElementById('new-run-btn').addEventListener('click', () => this._showLaunchPanel());
+
+        // Stop button
+        document.getElementById('stop-btn').addEventListener('click', () => this._stopRun());
+
+        // Result panel close
+        document.getElementById('result-close').addEventListener('click', () => {
+            document.getElementById('result-panel').classList.add('hidden');
+        });
+
+        // Result panel copy
+        document.getElementById('result-copy').addEventListener('click', () => {
+            const text = document.getElementById('result-body').innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.getElementById('result-copy');
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'Copy';
+                    btn.classList.remove('copied');
+                }, 1500);
+            });
         });
 
         this._connect();
@@ -96,6 +131,7 @@ class Dashboard {
             case 'agent_stats':   this._handleAgentStats(data);  break;
             case 'complete':      this._handleComplete(data);    break;
             case 'stats':         this._handleStats(data);       break;
+            case 'stopped':       this._handleStopped();         break;
         }
     }
 
@@ -125,6 +161,32 @@ class Dashboard {
         this._updateStatusIndicator();
 
         if (data.stats) this._handleStats(data.stats);
+
+        // Determine UI panel to show based on run state
+        if (data.run_active === true) {
+            // Mid-run reconnect: show the graph, hide launch panel
+            this._hideLaunchPanel();
+        } else if (data.completed === true) {
+            // Reconnect after a finished run: show result panel with first completed agent's result
+            this._hideLaunchPanel();
+            const completedAgent = data.agents.find(a =>
+                a.status === 'completed' && a.completed_result && !a.completed_result.startsWith('Consensus:')
+            );
+            if (completedAgent) {
+                document.getElementById('result-agent').textContent = completedAgent.role;
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').innerHTML = this._renderResult(completedAgent.completed_result);
+                document.getElementById('result-panel').classList.remove('hidden');
+                const bodyEl = document.getElementById('result-body');
+                const wrap = document.getElementById('result-body-wrap');
+                requestAnimationFrame(() => {
+                    wrap.classList.toggle('no-overflow', bodyEl.scrollHeight <= bodyEl.clientHeight);
+                });
+            }
+        } else {
+            // Fresh open or no active run: always show launch panel
+            document.getElementById('launch-panel').style.display = 'flex';
+        }
     }
 
     _handleMessage(data) {
@@ -161,12 +223,49 @@ class Dashboard {
         this.graph.updateAgentStatus(data.agent, 'completed');
         this._updateAgentCard(data.agent);
         this._updateStatusIndicator();
+
+        // Show result panel for the first real completion (not a consensus relay)
+        const isConsensus = data.result && data.result.startsWith('Consensus:');
+        const panel = document.getElementById('result-panel');
+        if (!isConsensus && panel.classList.contains('hidden')) {
+            const agent = this.agents[data.agent];
+            document.getElementById('result-agent').textContent =
+                (agent ? agent.role : data.agent);
+
+            // Show elapsed time from last stats update
+            const elapsedEl = document.getElementById('result-elapsed');
+            if (this._lastElapsed !== undefined) {
+                elapsedEl.textContent = this._lastElapsed.toFixed(1) + 's';
+            } else {
+                elapsedEl.textContent = '';
+            }
+
+            // Render markdown-like formatting
+            const bodyEl = document.getElementById('result-body');
+            bodyEl.innerHTML = this._renderResult(data.result || '');
+
+            panel.classList.remove('hidden');
+
+            // Check overflow to control the fade gradient
+            const wrap = document.getElementById('result-body-wrap');
+            // Use rAF so the DOM has painted and scrollHeight is accurate
+            requestAnimationFrame(() => {
+                const overflows = bodyEl.scrollHeight > bodyEl.clientHeight;
+                wrap.classList.toggle('no-overflow', !overflows);
+                // Also hide fade when user scrolls to the bottom
+                bodyEl.addEventListener('scroll', () => {
+                    const atBottom = bodyEl.scrollHeight - bodyEl.scrollTop <= bodyEl.clientHeight + 2;
+                    wrap.classList.toggle('no-overflow', atBottom);
+                }, { passive: true });
+            });
+        }
     }
 
     _handleStats(data) {
         document.getElementById('stat-messages').textContent = data.message_count;
         document.getElementById('stat-budget').textContent   = data.budget_remaining;
         document.getElementById('stat-elapsed').textContent  = data.elapsed.toFixed(1) + 's';
+        this._lastElapsed = data.elapsed;
     }
 
     _updateStatusIndicator() {
@@ -178,6 +277,9 @@ class Dashboard {
         if (statuses.every(s => s === 'completed')) {
             el.textContent = 'Done';
             el.className   = 'stat-value status-done';
+            // Run is finished — swap stop button back to new-run button
+            document.getElementById('stop-btn').classList.add('hidden');
+            document.getElementById('new-run-btn').classList.remove('hidden');
         } else if (statuses.some(s => s === 'running')) {
             el.textContent = 'Running';
             el.className   = 'stat-value status-running';
@@ -214,7 +316,8 @@ class Dashboard {
 
         // Build context section HTML
         let contextHtml = '';
-        const slices = msg.context_slice || [];
+        const slices = Array.isArray(msg.context_slice) ? msg.context_slice :
+                       (msg.context_slice ? [String(msg.context_slice)] : []);
         if (slices.length > 0) {
             const items = slices.map((s, i) =>
                 `<div class="msg-context-item">[${i}] ${this._escapeHtml(s)}</div>`
@@ -399,7 +502,121 @@ class Dashboard {
         }
     }
 
+    // ── Launch panel ──────────────────────────────────────────
+
+    _hideLaunchPanel() {
+        document.getElementById('launch-panel').style.display = 'none';
+        // Show stop button, hide new-run button while a run is active
+        document.getElementById('stop-btn').classList.remove('hidden');
+        document.getElementById('new-run-btn').classList.add('hidden');
+    }
+
+    _showLaunchPanel() {
+        // Reset UI state
+        document.getElementById('launch-error').textContent = '';
+        document.getElementById('launch-btn').disabled = false;
+        document.getElementById('launch-btn').textContent = 'Run';
+        this.messageLog.innerHTML = '';
+        this.agentCards.innerHTML = '';
+        this.agents = {};
+        this.graph.setTopology([], []);
+        document.getElementById('result-panel').classList.add('hidden');
+        this._handleStats({ message_count: 0, budget_remaining: 200, elapsed: 0 });
+        const statusEl = document.getElementById('stat-status');
+        statusEl.textContent = 'Waiting';
+        statusEl.className = 'stat-value status-waiting';
+        // Hide stop button, show new-run button
+        const stopBtn = document.getElementById('stop-btn');
+        stopBtn.classList.add('hidden');
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Stop';
+        document.getElementById('new-run-btn').classList.remove('hidden');
+        document.getElementById('launch-panel').style.display = 'flex';
+        document.getElementById('launch-query').focus();
+    }
+
+    async _startRun() {
+        const query = document.getElementById('launch-query').value.trim();
+        const topology = document.getElementById('launch-topology').value;
+        const errorEl = document.getElementById('launch-error');
+        const btn = document.getElementById('launch-btn');
+
+        errorEl.textContent = '';
+
+        if (!query) {
+            errorEl.textContent = 'Please enter a task query.';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Starting…';
+
+        try {
+            const res = await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, topology }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                this._hideLaunchPanel();
+            } else {
+                errorEl.textContent = data.error || 'Failed to start run.';
+                btn.disabled = false;
+                btn.textContent = 'Run';
+            }
+        } catch (err) {
+            errorEl.textContent = `Network error: ${err.message}`;
+            btn.disabled = false;
+            btn.textContent = 'Run';
+        }
+    }
+
+    // ── Stop run ──────────────────────────────────────────────
+
+    async _stopRun() {
+        const btn = document.getElementById('stop-btn');
+        btn.disabled = true;
+        btn.textContent = 'Stopping…';
+        try {
+            await fetch('/api/stop', { method: 'POST' });
+        } catch(e) {}
+    }
+
+    _handleStopped() {
+        const stopBtn = document.getElementById('stop-btn');
+        stopBtn.classList.add('hidden');
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Stop';
+        document.getElementById('new-run-btn').classList.remove('hidden');
+        // Update status indicator
+        const el = document.getElementById('stat-status');
+        el.textContent = 'Stopped';
+        el.className = 'stat-value status-error';
+    }
+
     // ── Utilities ─────────────────────────────────────────────
+
+    _renderResult(text) {
+        // Basic markdown-like rendering: bold, code blocks, bullets, paragraphs
+        let html = this._escapeHtml(text);
+        // Code blocks (``` ... ```)
+        html = html.replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) =>
+            `<pre style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;font-size:11px;overflow-x:auto;margin:6px 0">${code}</pre>`
+        );
+        // Inline code
+        html = html.replace(/`([^`]+)`/g, '<code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:1px 5px;font-size:11px">$1</code>');
+        // Bold
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        // Bullet lists
+        html = html.replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>');
+        html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+        // Paragraphs (double newline)
+        html = html.replace(/\n{2,}/g, '</p><p>');
+        html = `<p>${html}</p>`;
+        html = html.replace(/<p>\s*<\/p>/g, '');
+        return html;
+    }
 
     _escapeHtml(text) {
         const div = document.createElement('div');

@@ -75,11 +75,15 @@ class LLMAgent(AgentNode):
         # Store in memory
         self._store_memory(msg)
 
-        # Select model
-        tier = self._tier_override or self._selector.select(msg)
-        model_config = self._model_overrides.get(tier, DEFAULT_MODELS.get(tier))
-        if not model_config:
-            model_config = DEFAULT_MODELS[ModelTier.CLOUD_FAST]
+        # Select model — pinned_model takes highest priority
+        if self.config.pinned_model:
+            tier = self.config.pinned_model.tier
+            model_config = self.config.pinned_model
+        else:
+            tier = self._tier_override or self._selector.select(msg)
+            model_config = self._model_overrides.get(tier, DEFAULT_MODELS.get(tier))
+            if not model_config:
+                model_config = DEFAULT_MODELS[ModelTier.CLOUD_FAST]
 
         provider = self._providers.get(model_config.provider)
         if not provider:
@@ -110,9 +114,9 @@ class LLMAgent(AgentNode):
             response = await provider.complete(request)
         except Exception as exc:
             logger.warning(f"LLM call failed for agent {self.node_id} ({model_config.provider}): {exc}")
-            # Try cloud fallback
+            # Try cloud fallback — skip the tier that already failed
             fallback_response = None
-            for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
+            for fallback_tier in [t for t in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG] if t != tier]:
                 fallback_config = self._model_overrides.get(fallback_tier, DEFAULT_MODELS.get(fallback_tier))
                 if (
                     fallback_config

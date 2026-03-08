@@ -211,7 +211,8 @@ class OllamaProvider(LLMClient):
             ]
 
         resp = await self._client.post(f"{self._base_url}/api/chat", json=payload)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise Exception(f"Ollama {resp.status_code}: {resp.text[:500]}")
         data = resp.json()
 
         msg = data.get("message", {})

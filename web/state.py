@@ -45,10 +45,22 @@ class DashboardState:
     budget: int = 200
     budget_remaining: int = 200
     start_time: float = field(default_factory=time.time)
+    completed: bool = False
+
+    def reset(self) -> None:
+        """Reset all state back to defaults (called before starting a new run)."""
+        self.agents = {}
+        self.edges = []
+        self.messages = []
+        self.message_count = 0
+        self.budget_remaining = self.budget
+        self.start_time = time.time()
+        self.completed = False
 
     def to_init_event(self) -> dict:
         return {
             "type": "init",
+            "completed": self.completed,
             "agents": [
                 {
                     "id": a.node_id,

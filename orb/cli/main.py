@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-model", type=str, default=os.environ.get("OLLAMA_MODEL"), help="Ollama model to use for all local tiers (e.g. qwen3.5:9b)")
     parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
+    parser.add_argument("--topology", choices=["triangle", "dual-review"], default="triangle", help="Agent topology to use")
     return parser.parse_args()
 
 
@@ -88,6 +89,48 @@ async def async_main() -> None:
     elif args.cloud_only:
         tier_override = ModelTier.CLOUD_FAST
 
+    # --dashboard without a query: serve the UI and wait for the browser to start a run
+    if args.dashboard and args.query is None and not args.interactive:
+        from web.server import DashboardServer
+        from web.state import DashboardState
+
+        dash_state = DashboardState()
+        dashboard_server = DashboardServer(dash_state, port=args.dashboard_port)
+        dashboard_server.set_providers(
+            providers=providers,
+            config=config,
+            model_overrides=model_overrides or None,
+            tier_override=tier_override,
+        )
+
+        await dashboard_server.start()
+
+        import webbrowser
+        webbrowser.open(f"http://localhost:{args.dashboard_port}")
+
+        print_header()
+        print(f"  Dashboard running at http://localhost:{args.dashboard_port}")
+        print("  Open the URL in your browser, type a task, and click Run.")
+        print("  Press Enter here to shut down.\n")
+
+        # Keep server alive until Ctrl-C
+        stop_event = asyncio.Event()
+        try:
+            import signal
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, AttributeError):
+            pass  # Windows fallback — will still stop on KeyboardInterrupt
+
+        try:
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await dashboard_server.stop()
+        return
+
     if args.interactive or args.query is None:
         await run_repl(
             providers=providers,
@@ -98,13 +141,23 @@ async def async_main() -> None:
         )
     else:
         print_header()
-        orchestrator = create_triangle(
-            providers=providers,
-            config=config,
-            model_overrides=model_overrides or None,
-            trace=False,  # we register our own listener below
-            tier_override=tier_override,
-        )
+        if args.topology == "dual-review":
+            from ..topologies.dual_review import create_dual_review
+            orchestrator = create_dual_review(
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                trace=False,  # we register our own listener below
+                tier_override=tier_override,
+            )
+        else:
+            orchestrator = create_triangle(
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                trace=False,  # we register our own listener below
+                tier_override=tier_override,
+            )
 
         live_display = None
         dashboard_server = None
@@ -134,20 +187,6 @@ async def async_main() -> None:
 
             # Wire bridge into bus events
             orchestrator.bus.on_event(bridge.on_message_routed)
-
-            # Wire completion callbacks through bridge
-            for agent in orchestrator.agents.values():
-                original_cb = agent._on_complete
-                async def make_complete_cb(bridge_ref, orig):
-                    async def cb(agent_id, result):
-                        await bridge_ref.on_agent_complete(agent_id, result)
-                        if orig:
-                            r = orig(agent_id, result)
-                            if asyncio.iscoroutine(r):
-                                await r
-                    return cb
-                # This will be overwritten by orchestrator.run() anyway,
-                # so we hook into the orchestrator instead
 
             dashboard_server.set_agents(orchestrator.agents)
             await dashboard_server.start()

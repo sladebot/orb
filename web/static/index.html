@@ -38,10 +38,30 @@
         </div>
 
         <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+        <button id="stop-btn" class="hidden" title="Stop the current run">Stop</button>
+        <button id="new-run-btn" title="Start a new run">New Run</button>
     </div>
 
     <!-- Main layout -->
     <div id="main-layout">
+        <!-- Launch panel overlay (shown on first load, hidden once run starts) -->
+        <div id="launch-panel">
+            <div id="launch-card">
+                <div id="launch-title">ORB Agent Network</div>
+                <div id="launch-subtitle">Start a multi-agent task</div>
+                <textarea id="launch-query" placeholder="Describe a programming task…" rows="3"></textarea>
+                <div id="launch-options">
+                    <label>Topology</label>
+                    <select id="launch-topology">
+                        <option value="triangle">Triangle (Coder &rarr; Reviewer &rarr; Tester)</option>
+                        <option value="dual-review">Dual Review (2&times; Opus reviewers)</option>
+                    </select>
+                </div>
+                <button id="launch-btn">Run</button>
+                <div id="launch-error"></div>
+            </div>
+        </div>
+
         <!-- Left: graph canvas -->
         <div id="graph-panel">
             <canvas id="graph-canvas"></canvas>
@@ -53,6 +73,20 @@
             <div id="tab-bar">
                 <button class="tab-btn active" data-tab="messages">Messages</button>
                 <button class="tab-btn" data-tab="agents">Agents</button>
+            </div>
+
+            <!-- Result banner (hidden until run completes) -->
+            <div id="result-panel" class="hidden">
+                <div id="result-header">
+                    <span id="result-badge">✓ Complete</span>
+                    <span id="result-agent"></span>
+                    <span id="result-elapsed"></span>
+                    <button id="result-copy" title="Copy to clipboard">Copy</button>
+                    <button id="result-close" title="Dismiss">×</button>
+                </div>
+                <div id="result-body-wrap">
+                    <div id="result-body"></div>
+                </div>
             </div>
 
             <!-- Tab content -->

@@ -113,6 +113,7 @@ class DashboardBridge:
         })
 
     async def on_agent_complete(self, agent_id: str, result: str) -> None:
+        is_consensus = result.startswith("Consensus:")
         if agent_id in self.state.agents:
             self.state.agents[agent_id].status = "completed"
             self.state.agents[agent_id].completed_result = result
@@ -120,5 +121,6 @@ class DashboardBridge:
         await self._send({
             "type": "complete",
             "agent": agent_id,
-            "result": result[:1000],
+            "result": result,
+            "is_consensus": is_consensus,
         })
