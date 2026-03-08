@@ -38,6 +38,7 @@ class DashboardBridge:
     async def on_message_routed(self, event: str, msg: Message) -> None:
         """Called by MessageBus event system."""
         elapsed = time.time() - self.state.start_time
+        context_slice = list(msg.context_slice) if msg.context_slice else []
 
         record = MessageRecord(
             id=msg.id,
@@ -49,16 +50,22 @@ class DashboardBridge:
             elapsed=elapsed,
             chain_id=msg.chain_id,
             msg_type=msg.type.value,
+            context_slice=context_slice,
         )
         self.state.messages.append(record)
         self.state.message_count += 1
         self.state.budget_remaining = max(0, self.state.budget - self.state.message_count)
 
-        # Update agent status
+        # Update agent status and msg_count for sender
         if msg.from_ in self.state.agents:
             agent = self.state.agents[msg.from_]
             agent.status = "running"
             agent.model = msg.metadata.get("model", agent.model)
+            agent.msg_count += 1
+
+        # Increment msg_count for receiver
+        if msg.to in self.state.agents:
+            self.state.agents[msg.to].msg_count += 1
 
         await self._send({
             "type": "message",
@@ -70,6 +77,7 @@ class DashboardBridge:
             "elapsed": round(elapsed, 2),
             "chain_id": msg.chain_id,
             "msg_type": msg.type.value,
+            "context_slice": context_slice,
         })
 
         await self._send({
@@ -78,6 +86,18 @@ class DashboardBridge:
             "budget_remaining": self.state.budget_remaining,
             "elapsed": round(elapsed, 2),
         })
+
+        # Broadcast updated agent stats for both sender and receiver
+        for agent_id in {msg.from_, msg.to}:
+            if agent_id in self.state.agents:
+                a = self.state.agents[agent_id]
+                await self._send({
+                    "type": "agent_stats",
+                    "agent": agent_id,
+                    "msg_count": a.msg_count,
+                    "status": a.status,
+                    "model": a.model,
+                })
 
     async def on_agent_status(self, agent_id: str, status: str, model: str = "") -> None:
         if agent_id in self.state.agents:

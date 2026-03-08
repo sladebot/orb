@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from aiohttp import web
@@ -24,11 +25,17 @@ class DashboardServer:
         self._app = web.Application()
         self._clients: set[web.WebSocketResponse] = set()
         self._runner: web.AppRunner | None = None
+        self._agents: dict = {}  # live agent objects keyed by agent_id
 
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/api/state", self._state_handler)
+        self._app.router.add_post("/api/inject", self._inject_handler)
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
+
+    def set_agents(self, agents: dict) -> None:
+        """Store a reference to live agent objects for direct message injection."""
+        self._agents = agents
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self._app)
@@ -60,6 +67,44 @@ class DashboardServer:
 
     async def _state_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.state.to_init_event())
+
+    async def _inject_handler(self, request: web.Request) -> web.Response:
+        """POST /api/inject — send a message directly to an agent's channel."""
+        from orb.messaging.message import Message, MessageType
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+        target_id = body.get("to", "").strip()
+        text = body.get("message", "").strip()
+
+        if not target_id:
+            return web.json_response({"ok": False, "error": "Missing 'to' field"}, status=400)
+        if not text:
+            return web.json_response({"ok": False, "error": "Missing 'message' field"}, status=400)
+
+        agent = self._agents.get(target_id)
+        if agent is None:
+            return web.json_response(
+                {"ok": False, "error": f"Unknown agent: {target_id}"}, status=404
+            )
+
+        msg = Message(
+            from_="user",
+            to=target_id,
+            type=MessageType.TASK,
+            payload=text,
+        )
+
+        try:
+            await agent.channel.send(msg)
+        except Exception as exc:
+            logger.exception("Failed to inject message")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+        return web.json_response({"ok": True})
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()

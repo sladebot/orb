@@ -5,30 +5,16 @@ import asyncio
 import os
 import sys
 
-from ..llm.providers import AnthropicProvider, OpenAIProvider, OllamaProvider
+from dotenv import load_dotenv
+load_dotenv()
+
+from ..llm.registry import build_providers
 from ..llm.types import ModelTier, ModelConfig, DEFAULT_MODELS
 from ..orchestrator.types import OrchestratorConfig
 from ..topologies.triangle import create_triangle
 from .display import print_header, print_result, print_error
 from .repl import run_repl
 
-
-def build_providers(
-    local_only: bool = False,
-    cloud_only: bool = False,
-) -> dict[str, object]:
-    providers = {}
-
-    if not local_only:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            providers["anthropic"] = AnthropicProvider()
-        if os.environ.get("OPENAI_API_KEY"):
-            providers["openai"] = OpenAIProvider()
-
-    if not cloud_only:
-        providers["ollama"] = OllamaProvider()
-
-    return providers
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, help="Override default cloud model")
     parser.add_argument("--local-only", action="store_true", help="Use only local models")
     parser.add_argument("--cloud-only", action="store_true", help="Use only cloud models")
+    parser.add_argument("--ollama-model", type=str, default=os.environ.get("OLLAMA_MODEL"), help="Ollama model to use for all local tiers (e.g. qwen3.5:9b)")
     parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
     return parser.parse_args()
@@ -73,7 +60,12 @@ async def async_main() -> None:
         max_depth=args.max_depth,
     )
 
-    model_overrides = None
+    model_overrides: dict[ModelTier, ModelConfig] = {}
+
+    if args.ollama_model:
+        for tier in (ModelTier.LOCAL_SMALL, ModelTier.LOCAL_MEDIUM, ModelTier.LOCAL_LARGE):
+            model_overrides[tier] = ModelConfig(tier=tier, model_id=args.ollama_model, provider="ollama")
+
     if args.model:
         # Determine provider from model name
         if "claude" in args.model:
@@ -87,7 +79,8 @@ async def async_main() -> None:
             model_id=args.model,
             provider=provider,
         )
-        model_overrides = {ModelTier.CLOUD_FAST: override_config, ModelTier.CLOUD_STRONG: override_config}
+        model_overrides[ModelTier.CLOUD_FAST] = override_config
+        model_overrides[ModelTier.CLOUD_STRONG] = override_config
 
     tier_override = None
     if args.local_only:
@@ -99,7 +92,7 @@ async def async_main() -> None:
         await run_repl(
             providers=providers,
             config=config,
-            model_overrides=model_overrides,
+            model_overrides=model_overrides or None,
             trace=trace,
             tier_override=tier_override,
         )
@@ -108,12 +101,20 @@ async def async_main() -> None:
         orchestrator = create_triangle(
             providers=providers,
             config=config,
-            model_overrides=model_overrides,
-            trace=trace,
+            model_overrides=model_overrides or None,
+            trace=False,  # we register our own listener below
             tier_override=tier_override,
         )
 
+        live_display = None
         dashboard_server = None
+
+        if not args.dashboard and trace:
+            from .live_display import LiveDisplay
+            live_display = LiveDisplay(budget=args.budget)
+            orchestrator.bus.on_event(live_display.on_event)
+            live_display.start()
+
         if args.dashboard:
             from web.server import DashboardServer
             from web.bridge import DashboardBridge
@@ -148,6 +149,7 @@ async def async_main() -> None:
                 # This will be overwritten by orchestrator.run() anyway,
                 # so we hook into the orchestrator instead
 
+            dashboard_server.set_agents(orchestrator.agents)
             await dashboard_server.start()
 
             import webbrowser
@@ -161,6 +163,9 @@ async def async_main() -> None:
             orchestrator._on_agent_complete = wrapped_on_complete
 
         result = await orchestrator.run(args.query)
+
+        if live_display:
+            live_display.stop()
 
         if dashboard_server:
             # Keep dashboard open for a bit so user can inspect

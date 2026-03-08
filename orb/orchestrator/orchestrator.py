@@ -29,6 +29,7 @@ class Orchestrator:
         self._completions: dict[str, str] = {}
         self._event_logger = event_logger
         self._completion_event = asyncio.Event()
+        self._consensus_sent = False
 
         if self._event_logger:
             self.bus.on_event(self._event_logger)
@@ -36,6 +37,25 @@ class Orchestrator:
     async def _on_agent_complete(self, agent_id: str, result: str) -> None:
         self._completions[agent_id] = result
         logger.info(f"Agent {agent_id} completed ({len(self._completions)}/{len(self.agents)})")
+
+        # On the first completion, broadcast a COMPLETE message to all other agents
+        # so they can shut down cleanly without making further LLM calls.
+        if not self._consensus_sent:
+            self._consensus_sent = True
+            for other_id, other_agent in self.agents.items():
+                if other_id != agent_id:
+                    consensus_msg = Message(
+                        from_="orchestrator",
+                        to=other_id,
+                        type=MessageType.COMPLETE,
+                        payload=f"Consensus: task completed by {agent_id}. {result[:200]}",
+                    )
+                    try:
+                        await other_agent.channel.send(consensus_msg)
+                    except Exception:
+                        logger.warning(f"Could not send consensus COMPLETE to {other_id}")
+
+        # Only signal overall completion once ALL agents have completed.
         if len(self._completions) >= len(self.agents):
             self._completion_event.set()
 
@@ -43,6 +63,7 @@ class Orchestrator:
         """Run the agent graph with the given query."""
         self._completions.clear()
         self._completion_event.clear()
+        self._consensus_sent = False
 
         if self._event_logger:
             self._event_logger.reset()

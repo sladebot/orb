@@ -62,6 +62,12 @@ class LLMAgent(AgentNode):
         ]
 
     async def process(self, msg: Message) -> None:
+        # Handle consensus shutdown: skip LLM and auto-complete immediately.
+        if msg.type == MessageType.COMPLETE:
+            if self.status != AgentStatus.COMPLETED:
+                await self._handle_complete("consensus", {"result": msg.payload})
+            return
+
         # Build user message from incoming
         user_content = self._format_incoming(msg)
         self._conversation.add_user(user_content)
@@ -77,7 +83,19 @@ class LLMAgent(AgentNode):
 
         provider = self._providers.get(model_config.provider)
         if not provider:
-            logger.error(f"No provider for {model_config.provider!r}")
+            # Fall back through cloud tiers to find an available provider
+            for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
+                fallback_config = self._model_overrides.get(fallback_tier, DEFAULT_MODELS.get(fallback_tier))
+                if fallback_config and fallback_config.provider in self._providers:
+                    logger.warning(
+                        f"Provider {model_config.provider!r} unavailable, "
+                        f"falling back to {fallback_config.provider!r}"
+                    )
+                    provider = self._providers[fallback_config.provider]
+                    model_config = fallback_config
+                    break
+        if not provider:
+            logger.error(f"No provider for {model_config.provider!r} and no fallback available")
             return
 
         # Call LLM
@@ -90,9 +108,34 @@ class LLMAgent(AgentNode):
 
         try:
             response = await provider.complete(request)
-        except Exception:
-            logger.exception(f"LLM call failed for agent {self.node_id}")
-            return
+        except Exception as exc:
+            logger.warning(f"LLM call failed for agent {self.node_id} ({model_config.provider}): {exc}")
+            # Try cloud fallback
+            fallback_response = None
+            for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
+                fallback_config = self._model_overrides.get(fallback_tier, DEFAULT_MODELS.get(fallback_tier))
+                if (
+                    fallback_config
+                    and fallback_config.provider != model_config.provider
+                    and fallback_config.provider in self._providers
+                ):
+                    logger.warning(f"Retrying with fallback {fallback_config.provider!r}")
+                    fallback_request = CompletionRequest(
+                        messages=request.messages,
+                        tools=request.tools,
+                        system=request.system,
+                        model_config=fallback_config,
+                    )
+                    try:
+                        fallback_response = await self._providers[fallback_config.provider].complete(fallback_request)
+                        model_config = fallback_config
+                        break
+                    except Exception as exc2:
+                        logger.warning(f"Fallback also failed: {exc2}")
+            if fallback_response is None:
+                logger.error(f"All providers failed for agent {self.node_id}")
+                return
+            response = fallback_response
 
         logger.info(
             f"Agent {self.node_id} used model {response.model} "

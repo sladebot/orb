@@ -4,42 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Orb Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Stats bar -->
     <div id="stats-bar">
-        <div class="stat">
-            <span class="stat-label">Messages</span>
-            <span id="stat-messages" class="stat-value">0</span>
+        <!-- Brand -->
+        <div id="brand">
+            <span id="brand-badge">ORB</span>
+            <span id="brand-subtitle">Agent Network</span>
         </div>
-        <div class="stat">
-            <span class="stat-label">Budget</span>
-            <span id="stat-budget" class="stat-value">200</span>
+
+        <div id="stats-group">
+            <div class="stat">
+                <span class="stat-label">Messages</span>
+                <span id="stat-messages" class="stat-value">0</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Budget</span>
+                <span id="stat-budget" class="stat-value">200</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Elapsed</span>
+                <span id="stat-elapsed" class="stat-value">0.0s</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Status</span>
+                <span id="stat-status" class="stat-value status-waiting">Waiting</span>
+            </div>
         </div>
-        <div class="stat">
-            <span class="stat-label">Elapsed</span>
-            <span id="stat-elapsed" class="stat-value">0.0s</span>
-        </div>
-        <div class="stat">
-            <span class="stat-label">Status</span>
-            <span id="stat-status" class="stat-value status-waiting">Waiting</span>
-        </div>
+
         <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
     </div>
 
+    <!-- Main layout -->
     <div id="main-layout">
+        <!-- Left: graph canvas -->
         <div id="graph-panel">
             <canvas id="graph-canvas"></canvas>
         </div>
-        <div id="sidebar">
-            <h2>Message Log</h2>
-            <div id="message-log"></div>
-        </div>
-    </div>
 
-    <div id="agent-detail-panel">
-        <div id="agent-details">
-            <span class="detail-placeholder">Click an agent node to see details</span>
+        <!-- Right: sidebar -->
+        <div id="sidebar">
+            <!-- Tab bar -->
+            <div id="tab-bar">
+                <button class="tab-btn active" data-tab="messages">Messages</button>
+                <button class="tab-btn" data-tab="agents">Agents</button>
+            </div>
+
+            <!-- Tab content -->
+            <div id="tab-content">
+                <!-- Messages tab -->
+                <div id="tab-messages" class="tab-pane active">
+                    <div id="message-log"></div>
+                </div>
+
+                <!-- Agents tab -->
+                <div id="tab-agents" class="tab-pane">
+                    <div id="agent-cards"></div>
+                </div>
+            </div>
+
+            <!-- Agent chat panel (hidden until agent selected) -->
+            <div id="chat-panel" class="hidden">
+                <div id="chat-header">
+                    <span id="chat-title">Chat with …</span>
+                    <button id="chat-close" title="Close">×</button>
+                </div>
+                <div id="chat-messages"></div>
+                <div id="chat-input-row">
+                    <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off">
+                    <button id="chat-send">Send</button>
+                </div>
+            </div>
         </div>
     </div>
 

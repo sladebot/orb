@@ -53,11 +53,13 @@ class ModelSelector:
     def _tier_from_score(score: int) -> ModelTier:
         if score <= 30:
             return ModelTier.LOCAL_SMALL
-        elif score <= 60:
+        elif score <= 55:
             return ModelTier.LOCAL_MEDIUM
-        elif score <= 80:
+        elif score <= 70:
             return ModelTier.LOCAL_LARGE
-        elif score <= 95:
+        elif score <= 80:
+            return ModelTier.CLOUD_LITE
+        elif score <= 92:
             return ModelTier.CLOUD_FAST
         else:
             return ModelTier.CLOUD_STRONG

@@ -21,7 +21,7 @@ AGENT_DEFS = {
             "Send your implementation to the Reviewer for feedback and to the Tester for validation. "
             "When you receive feedback, iterate on your code and share the updated version."
         ),
-        base_complexity=50,
+        base_complexity=85,  # → CLOUD_FAST (Sonnet)
     ),
     "reviewer": AgentConfig(
         node_id="reviewer",
@@ -32,7 +32,7 @@ AGENT_DEFS = {
             "You can also suggest test cases to the Tester. "
             "Approve the code by completing your task when it meets your standards."
         ),
-        base_complexity=60,
+        base_complexity=95,  # → CLOUD_STRONG (Opus)
     ),
     "tester": AgentConfig(
         node_id="tester",
@@ -43,7 +43,7 @@ AGENT_DEFS = {
             "Share test coverage summaries with the Reviewer. "
             "Complete your task when all tests pass."
         ),
-        base_complexity=30,
+        base_complexity=75,  # → CLOUD_LITE (Haiku)
     ),
 }
 

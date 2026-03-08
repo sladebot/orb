@@ -3,24 +3,24 @@
  */
 
 const AGENT_COLORS = {
-    coder: { fill: '#1a3a5c', stroke: '#79c0ff', text: '#79c0ff' },
-    reviewer: { fill: '#3d3219', stroke: '#e3b341', text: '#e3b341' },
-    tester: { fill: '#1a3d26', stroke: '#56d364', text: '#56d364' },
-    user: { fill: '#2d1f4e', stroke: '#bc8cff', text: '#bc8cff' },
+    coder:    { fill: '#e8f0fd', stroke: '#0550ae', text: '#0550ae' },
+    reviewer: { fill: '#fdf6e3', stroke: '#7d4e00', text: '#7d4e00' },
+    tester:   { fill: '#e6f4ea', stroke: '#1a7f37', text: '#1a7f37' },
+    user:     { fill: '#f3effe', stroke: '#8250df', text: '#8250df' },
 };
 
 const STATUS_COLORS = {
-    idle: '#484f58',
-    running: '#58a6ff',
-    completed: '#3fb950',
-    error: '#f85149',
+    idle:      '#9198a1',
+    running:   '#0969da',
+    completed: '#1a7f37',
+    error:     '#cf222e',
 };
 
 class GraphRenderer {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
-        this.nodes = {};       // {id: {x, y, role, status, model, radius}}
+        this.nodes = {};       // {id: {x, y, role, status, model, radius, msgCount, spinAngle}}
         this.edges = [];       // [{source, target}]
         this.activeEdges = []; // [{source, target, progress, startTime}]
         this.pulsingNodes = {}; // {id: startTime}
@@ -74,7 +74,9 @@ class GraphRenderer {
                 role: agent.role,
                 status: agent.status || 'idle',
                 model: agent.model || '',
-                radius: 40,
+                radius: 48,
+                msgCount: agent.msg_count || 0,
+                spinAngle: 0,
             };
         }
         this.edges = edges;
@@ -119,6 +121,10 @@ class GraphRenderer {
         });
         // Pulse the receiving node
         this.pulsingNodes[target] = performance.now();
+        // Increment msg count on source node
+        if (this.nodes[source]) {
+            this.nodes[source].msgCount = (this.nodes[source].msgCount || 0) + 1;
+        }
     }
 
     startAnimation() {
@@ -131,11 +137,40 @@ class GraphRenderer {
         }
     }
 
+    _drawDotGrid() {
+        const ctx = this.ctx;
+        const spacing = 28;
+        const dotRadius = 0.8;
+
+        // Light background
+        ctx.fillStyle = '#f6f8fa';
+        ctx.fillRect(0, 0, this.width, this.height);
+
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = '#d0d7de';
+
+        const startX = spacing / 2;
+        const startY = spacing / 2;
+
+        for (let x = startX; x < this.width; x += spacing) {
+            for (let y = startY; y < this.height; y += spacing) {
+                ctx.beginPath();
+                ctx.arc(x, y, dotRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        ctx.globalAlpha = 1;
+    }
+
     _draw() {
         const ctx = this.ctx;
         const now = performance.now();
 
         ctx.clearRect(0, 0, this.width, this.height);
+
+        // Subtle dot grid background
+        this._drawDotGrid();
 
         // Draw edges
         for (const edge of this.edges) {
@@ -143,11 +178,14 @@ class GraphRenderer {
             const tgt = this.nodes[edge.target];
             if (!src || !tgt) continue;
 
+            const srcColors = AGENT_COLORS[edge.source] || AGENT_COLORS.user;
+            const tgtColors = AGENT_COLORS[edge.target] || AGENT_COLORS.user;
+
             ctx.beginPath();
             ctx.moveTo(src.x, src.y);
             ctx.lineTo(tgt.x, tgt.y);
-            ctx.strokeStyle = '#21262d';
-            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#d0d7de';
+            ctx.lineWidth = 3;
             ctx.stroke();
         }
 
@@ -166,7 +204,7 @@ class GraphRenderer {
 
                 // Glowing line
                 const grad = ctx.createLinearGradient(src.x, src.y, tgt.x, tgt.y);
-                const srcColor = AGENT_COLORS[ae.source]?.stroke || '#58a6ff';
+                const srcColor = AGENT_COLORS[ae.source]?.stroke || '#0969da';
                 grad.addColorStop(Math.max(0, progress - 0.15), 'transparent');
                 grad.addColorStop(progress, srcColor);
                 grad.addColorStop(Math.min(1, progress + 0.05), 'transparent');
@@ -185,10 +223,10 @@ class GraphRenderer {
                 const dotY = src.y + dy * progress;
 
                 ctx.beginPath();
-                ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+                ctx.arc(dotX, dotY, 7, 0, Math.PI * 2);
                 ctx.fillStyle = srcColor;
                 ctx.shadowColor = srcColor;
-                ctx.shadowBlur = 12;
+                ctx.shadowBlur = 20;
                 ctx.fill();
                 ctx.shadowBlur = 0;
             }
@@ -213,26 +251,55 @@ class GraphRenderer {
 
             const r = node.radius * pulseScale;
 
-            // Outer status ring
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, r + 4, 0, Math.PI * 2);
-            ctx.strokeStyle = statusColor;
-            ctx.lineWidth = 3;
-            ctx.stroke();
+            // Node shadow
+            ctx.shadowColor = colors.stroke + '4d'; // ~30% opacity
+            ctx.shadowBlur = 10;
 
-            // Node body
+            // Node body with radial gradient
+            const radGrad = ctx.createRadialGradient(
+                node.x - r * 0.25, node.y - r * 0.25, r * 0.05,
+                node.x, node.y, r
+            );
+            radGrad.addColorStop(0, colors.fill + 'ff');
+            radGrad.addColorStop(0.6, colors.fill + 'ee');
+            radGrad.addColorStop(1, colors.fill + '88');
+
             ctx.beginPath();
             ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
-            ctx.fillStyle = colors.fill;
+            ctx.fillStyle = radGrad;
             ctx.fill();
+            ctx.shadowBlur = 0;
+
             ctx.strokeStyle = colors.stroke;
             ctx.lineWidth = 2;
             ctx.stroke();
 
+            // Outer status ring — animated arc for "running", full ring otherwise
+            if (node.status === 'running') {
+                node.spinAngle = (node.spinAngle || 0) + 0.04;
+                const arcStart = node.spinAngle;
+                const arcEnd   = arcStart + Math.PI * 1.4;
+
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, r + 5, arcStart, arcEnd);
+                ctx.strokeStyle = statusColor;
+                ctx.lineWidth = 2.5;
+                ctx.shadowColor = statusColor;
+                ctx.shadowBlur = 8;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            } else {
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, r + 5, 0, Math.PI * 2);
+                ctx.strokeStyle = statusColor;
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+            }
+
             // Selected highlight
             if (this.selectedNode === id) {
                 ctx.beginPath();
-                ctx.arc(node.x, node.y, r + 8, 0, Math.PI * 2);
+                ctx.arc(node.x, node.y, r + 10, 0, Math.PI * 2);
                 ctx.strokeStyle = colors.stroke;
                 ctx.lineWidth = 1;
                 ctx.setLineDash([4, 4]);
@@ -242,20 +309,27 @@ class GraphRenderer {
 
             // Role label
             ctx.fillStyle = colors.text;
-            ctx.font = 'bold 14px "SF Mono", "Fira Code", monospace';
+            ctx.font = 'bold 15px "JetBrains Mono", "SF Mono", monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(node.role, node.x, node.y - 6);
+            ctx.fillText(node.role, node.x, node.y - 8);
 
             // Status text
             ctx.fillStyle = statusColor;
-            ctx.font = '10px "SF Mono", "Fira Code", monospace';
-            ctx.fillText(node.status, node.x, node.y + 12);
+            ctx.font = '11px "JetBrains Mono", "SF Mono", monospace';
+            ctx.fillText(node.status, node.x, node.y + 10);
+
+            // Message count at bottom of circle
+            if (node.msgCount > 0) {
+                ctx.fillStyle = 'rgba(139, 148, 158, 0.7)';
+                ctx.font = '9px "JetBrains Mono", monospace';
+                ctx.fillText(node.msgCount + ' msg' + (node.msgCount !== 1 ? 's' : ''), node.x, node.y + r - 9);
+            }
 
             // Model below node
             if (node.model) {
-                ctx.fillStyle = '#484f58';
-                ctx.font = '9px "SF Mono", "Fira Code", monospace';
+                ctx.fillStyle = '#9198a1';
+                ctx.font = '9px "JetBrains Mono", "SF Mono", monospace';
                 const shortModel = node.model.length > 20 ? node.model.substring(0, 20) + '...' : node.model;
                 ctx.fillText(shortModel, node.x, node.y + r + 20);
             }

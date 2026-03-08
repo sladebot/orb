@@ -11,6 +11,7 @@ class AgentState:
     status: str = "idle"
     model: str = ""
     completed_result: str = ""
+    msg_count: int = 0
 
 
 @dataclass
@@ -30,6 +31,7 @@ class MessageRecord:
     elapsed: float
     chain_id: str
     msg_type: str
+    context_slice: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +55,8 @@ class DashboardState:
                     "role": a.role,
                     "status": a.status,
                     "model": a.model,
+                    "msg_count": a.msg_count,
+                    "completed_result": a.completed_result,
                 }
                 for a in self.agents.values()
             ],
@@ -68,6 +72,7 @@ class DashboardState:
                     "elapsed": m.elapsed,
                     "chain_id": m.chain_id,
                     "type": m.msg_type,
+                    "context_slice": m.context_slice,
                 }
                 for m in self.messages
             ],

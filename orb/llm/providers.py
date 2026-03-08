@@ -6,12 +6,25 @@ from .client import LLMClient
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 
+_ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+
+
+def _is_anthropic_oauth_token(token: str) -> bool:
+    return "sk-ant-oat" in token
+
+
 class AnthropicProvider(LLMClient):
     def __init__(self, api_key: str | None = None) -> None:
         import anthropic
-        self._client = anthropic.AsyncAnthropic(
-            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY")
-        )
+        token = api_key or os.environ.get("ANTHROPIC_OAUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
+        if token and _is_anthropic_oauth_token(token):
+            # OAuth tokens must use Authorization: Bearer, not x-api-key
+            self._client = anthropic.AsyncAnthropic(
+                auth_token=token,
+                default_headers={"anthropic-beta": _ANTHROPIC_OAUTH_BETAS},
+            )
+        else:
+            self._client = anthropic.AsyncAnthropic(api_key=token)
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
@@ -122,12 +135,61 @@ class OllamaProvider(LLMClient):
         self._base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=120.0)
 
+    @staticmethod
+    def _convert_messages(messages: list[dict]) -> list[dict]:
+        """Convert Anthropic-format messages to Ollama/OpenAI-compatible format."""
+        import json
+        converted: list[dict] = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            # Assistant message whose content is a list (may contain text + tool_use blocks)
+            if role == "assistant" and isinstance(content, list):
+                text_parts: list[str] = []
+                tool_calls: list[dict] = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            tool_calls.append({
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name", ""),
+                                    "arguments": json.dumps(block.get("input", {})),
+                                },
+                            })
+                out: dict = {"role": "assistant", "content": " ".join(text_parts)}
+                if tool_calls:
+                    out["tool_calls"] = tool_calls
+                converted.append(out)
+
+            # User message whose content is a list of tool_result blocks
+            elif role == "user" and isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                for block in content:
+                    converted.append({
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+
+            # All other messages pass through unchanged
+            else:
+                converted.append(msg)
+
+        return converted
+
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
         messages = []
         if request.system:
             messages.append({"role": "system", "content": request.system})
         messages.extend(request.messages)
+        messages = self._convert_messages(messages)
 
         payload = {
             "model": config.model_id if config else "llama3.2:latest",
