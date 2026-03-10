@@ -299,8 +299,35 @@ async def auth_openai() -> None:
     print(f"\nAuthenticated{who}! Credentials stored at {CREDS_PATH}")
 
 
+def save_anthropic_key(api_key: str) -> None:
+    """Store an Anthropic API key in the credentials file."""
+    _save_credentials("anthropic", {"api_key": api_key})
+
+
+def get_anthropic_key() -> str | None:
+    """Return stored Anthropic API key, or None if not stored."""
+    creds = load_credentials("anthropic")
+    return creds.get("api_key") if creds else None
+
+
+def revoke_anthropic_key() -> None:
+    """Remove stored Anthropic credentials."""
+    existing: dict = {}
+    if CREDS_PATH.exists():
+        try:
+            existing = json.loads(CREDS_PATH.read_text())
+        except Exception:
+            pass
+    existing.pop("anthropic", None)
+    if existing:
+        CREDS_PATH.write_text(json.dumps(existing, indent=2))
+    else:
+        CREDS_PATH.unlink(missing_ok=True)
+
+
 async def auth_status() -> None:
     """Print current auth status for all providers."""
+    # OpenAI
     creds = load_credentials("openai")
     if creds and creds.get("api_key"):
         k = creds["api_key"]
@@ -320,8 +347,12 @@ async def auth_status() -> None:
     else:
         print("  openai     not authenticated  (run: orb auth openai)")
 
-    ant_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
-    if ant_key:
-        print(f"  anthropic  API key set  (****{ant_key[-4:]})")
+    # Anthropic — check stored key first, then env var
+    stored_ant = get_anthropic_key()
+    env_ant    = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
+    if stored_ant:
+        print(f"  anthropic  API key stored  (****{stored_ant[-4:]})")
+    elif env_ant:
+        print(f"  anthropic  ANTHROPIC_API_KEY env var  (****{env_ant[-4:]})")
     else:
-        print("  anthropic  not authenticated")
+        print("  anthropic  not authenticated  (run: orb auth anthropic --api-key sk-ant-...)")

@@ -1,193 +1,353 @@
 # Orb
 
-An LLM agent harness where agents are **graph nodes** with **bidirectional communication** via Go-style async channels. Agents dynamically select models (local or cloud) based on task complexity.
+An LLM agent collaboration network. Agents are **graph nodes** that communicate via Go-style async channels over a **MessageBus**. Each agent selects its model tier dynamically based on task complexity — local models for simple work, cloud models for demanding tasks.
 
-## Quick Start
+---
 
-### Setup
+## Installation
 
 ```bash
-# Create conda environment
+# Create a Python 3.11+ environment (conda or venv)
 conda create -n orb python=3.12 -y
 conda activate orb
 
-# Install
-pip install -e ".[dev]"
+# Install in editable mode
+pip install -e .
 
-# Set API keys (at least one required for cloud models)
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
+# Install with dev dependencies (pytest, pytest-asyncio)
+pip install -e ".[dev]"
 ```
 
-### Run
+Requires Python 3.11+. At least one LLM provider must be reachable at runtime.
+
+---
+
+## Authentication
+
+Credentials are stored in `~/.orb/credentials.json` (mode 600).
 
 ```bash
-# Single query
-python -m orb "Write a fibonacci function in Python"
+# Store an Anthropic API key
+orb auth anthropic --api-key sk-ant-...
 
-# Interactive REPL
-python -m orb -i
+# Store an OpenAI API key directly
+orb auth openai --api-key sk-...
 
-# With live web dashboard
-python -m orb --dashboard "Write a fibonacci function"
+# OpenAI OAuth browser flow (opens browser, exchanges PKCE code)
+orb auth openai
+
+# Show current auth status for all providers
+orb auth status
+
+# Revoke all stored credentials
+orb auth logout
 ```
 
-## Architecture
+The auth system also reads `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` environment variables as fallbacks. `orb auth status` shows which source is active for each provider and whether OAuth tokens are still valid.
 
-Three agents collaborate in a fully-connected triangle:
+For remote/SSH sessions, `orb auth openai` prints the authorization URL and prompts you to paste the redirect URL from your browser instead of starting a local callback server.
+
+---
+
+## LLM Providers
+
+| Provider | Setup | Models |
+|----------|-------|--------|
+| **Anthropic** | `orb auth anthropic` or `ANTHROPIC_API_KEY` | Claude Sonnet, Opus |
+| **OpenAI** | `orb auth openai` or `OPENAI_API_KEY` | GPT-4o, GPT-4o-mini, o3 |
+| **Ollama** | Run Ollama locally on port 11434 | Llama, Qwen, DeepSeek, etc. |
+
+At least one provider must be available. The system detects configured providers automatically on startup.
+
+### Model tiers
+
+Agents select a model tier based on the task complexity score of their role:
+
+| Tier | Complexity | Example models |
+|------|-----------|----------------|
+| LOCAL_SMALL | 0–30 | llama3.2, qwen2.5:7b |
+| LOCAL_MEDIUM | 31–60 | qwen2.5:14b |
+| LOCAL_LARGE | 61–80 | qwen2.5:32b |
+| CLOUD_FAST | 81–95 | claude-sonnet, gpt-4o-mini |
+| CLOUD_STRONG | 96–100 | claude-opus, gpt-4o |
+
+---
+
+## Usage modes
+
+### 1. Single query
+
+```bash
+orb "write a snake game in Python"
+```
+
+Runs the agent topology once, prints a live trace to the terminal, then outputs the final synthesized result.
+
+### 2. Interactive REPL
+
+```bash
+orb -i
+```
+
+Opens a prompt loop. Submit tasks one at a time; agents are rebuilt fresh each run.
+
+### 3. Web dashboard
+
+```bash
+# Start dashboard and wait for a task from the browser
+orb --dashboard
+
+# Run a query and keep the dashboard open to inspect afterward
+orb --dashboard "build a REST API"
+
+# Custom port
+orb --dashboard --dashboard-port 3000
+```
+
+Opens a WebSocket-backed web UI at `http://localhost:8080`. The canvas graph shows agent nodes and animates edges as messages flow. A scrollable message log, stats bar, and agent detail panel update in real time.
+
+### 4. Terminal TUI
+
+```bash
+orb --tui
+```
+
+Launches a full-screen Textual TUI. Type tasks directly in the input bar. You can submit multiple tasks in sequence without restarting.
+
+### 5. TUI + Dashboard together
+
+```bash
+orb --tui --dashboard
+orb --tui --dashboard --dashboard-port 3000
+```
+
+Runs the TUI in the foreground and serves the web dashboard as a sidecar. Both views update from the same event stream.
+
+---
+
+## TUI Guide
+
+The TUI is built with [Textual](https://github.com/Textualize/textual).
+
+### Layout
 
 ```
-        Coder
-       /     \
-  Reviewer — Tester
+┌─────────────────────────────────────────────────────┐
+│  ORB  │  Triad  │  msgs 12  │  budget 188  │  Running │  ← stats bar
+├──────────────────────────────────┬──────────────────┤
+│  Topology graph (fixed)          │                  │
+│  ─────────────────────────────── │  Agent detail    │
+│  Agent nodes + latest activity   │  pane (opens     │
+│  (always visible, no scroll)     │  on selection)   │
+├──────────────────────────────────│                  │
+│  Message feed (scrollable)       │                  │
+│                                  │                  │
+├──────────────────────────────────┴──────────────────┤
+│  @ Coordinator [1]  Coder [2]  Reviewer [3] ...     │  ← agent bar
+├─────────────────────────────────────────────────────┤
+│  >  Describe a task…                                │  ← input
+└─────────────────────────────────────────────────────┘
 ```
 
-| Agent | Role | Base Complexity |
-|-------|------|----------------|
-| **Coder** | Writes code, iterates on feedback | 50 |
-| **Reviewer** | Reviews for correctness, style, edge cases | 60 |
-| **Tester** | Writes test cases, reports failures | 30 |
+The **live panel** (top section) is fixed — it always shows the topology graph and each agent's current status with their latest message activity. The **message feed** below it scrolls independently.
 
-Agents communicate by calling `send_message` (an LLM tool) to address neighbors. Each agent selects its model dynamically based on task complexity — simple tasks use local models, complex ones escalate to cloud.
+### Keyboard shortcuts
 
-### Model Selection
+| Key | Action |
+|-----|--------|
+| `1` | Select / inspect Coordinator |
+| `2` | Select / inspect Coder |
+| `3` | Select / inspect Reviewer (or Reviewer A in dual-review) |
+| `4` | Select / inspect Reviewer B |
+| `5` | Select / inspect Reviewer B (dual-review) |
+| `6` | Select / inspect Tester |
+| `Esc` | Deselect / close detail pane |
+| `Ctrl+C` | Quit |
 
-| Complexity | Tier | Example Models |
-|-----------|------|---------------|
-| 0-30 | LOCAL_SMALL | llama3.2, qwen2.5:7b |
-| 31-60 | LOCAL_MEDIUM | qwen2.5:14b |
-| 61-80 | LOCAL_LARGE | qwen2.5:32b |
-| 81-95 | CLOUD_FAST | claude-sonnet, gpt-4o-mini |
-| 96-100 | CLOUD_STRONG | claude-opus, gpt-4o |
+Selecting an agent opens the **detail pane** on the right showing the agent's full message thread and completion result.
 
-### Loop Prevention
+### @mention
 
-| Mechanism | Default |
-|-----------|---------|
-| Hop count per message chain | max 10 |
-| Global message budget | 200 messages |
-| Per-target cooldown per chain | 5 sends |
-| Timeout | 120 seconds |
+Type `@agentname` in the input bar to focus an agent. The agent bar at the bottom highlights all active agents when `@` is detected.
 
-## CLI Reference
+```
+@coder               # select Coder and open its detail pane
+@reviewer look again # select Reviewer, then forward "look again" as a query
+```
+
+### Mid-run injection
+
+If a run is active (status = **Running**), new input is forwarded directly to the coordinator's channel rather than starting a fresh run. This lets you steer the team mid-flight.
+
+---
+
+## CLI flags
 
 ```
 orb [OPTIONS] [QUERY]
-
-Arguments:
-  QUERY                     Task query (omit for interactive mode)
-
-Options:
-  -i, --interactive         Interactive REPL mode
-  --trace / --no-trace      Show/hide real-time message routing (default: on)
-  --budget N                Global message budget (default: 200)
-  --timeout N               Timeout in seconds (default: 120)
-  --max-depth N             Max message hop depth (default: 10)
-  --model MODEL             Override default cloud model (e.g. claude-sonnet-4-20250514)
-  --local-only              Force all agents to use local models only
-  --cloud-only              Force all agents to use cloud models only
-  --dashboard               Launch live web dashboard
-  --dashboard-port PORT     Dashboard server port (default: 8080)
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `query` | — | Task to run (omit for REPL) |
+| `-i`, `--interactive` | off | Interactive REPL mode |
+| `--topology` | `triangle` | Agent topology: `triangle` or `dual-review` |
+| `--budget N` | 200 | Global message budget (hard ceiling) |
+| `--timeout N` | 600.0 | Timeout in seconds |
+| `--max-depth N` | 10 | Max message hop depth per chain |
+| `--model MODEL` | — | Override cloud model for all tiers (e.g. `claude-sonnet-4-20250514`) |
+| `--local-only` | off | Force all agents to LOCAL_MEDIUM tier |
+| `--cloud-only` | off | Force all agents to CLOUD_FAST tier |
+| `--ollama-model MODEL` | `$OLLAMA_MODEL` | Ollama model to use for all local tiers (e.g. `qwen3.5:9b`) |
+| `--dashboard` | off | Launch live web dashboard |
+| `--dashboard-port PORT` | 8080 | Dashboard server port |
+| `--tui` | off | Launch interactive terminal TUI |
+| `--trace` / `--no-trace` | on | Show/hide real-time message routing in terminal |
+| `-v`, `--verbose` | on | Enable debug logging |
+| `-q`, `--quiet` | off | Suppress verbose logging |
+| `--dev` | off | Dev mode: auto-restart on changes to `orb/` or `web/` |
 
 ### Examples
 
 ```bash
-# Use a specific model
-python -m orb --model claude-sonnet-4-20250514 "Write a sort function"
+# Specific model
+orb --model claude-sonnet-4-20250514 "write a sort function"
 
-# Local models only with reduced budget
-python -m orb --local-only --budget 50 "Write hello world"
+# Local models only with a tighter budget
+orb --local-only --budget 50 "hello world"
 
-# Cloud models with dashboard on custom port
-python -m orb --cloud-only --dashboard --dashboard-port 3000 "Build a REST API"
+# Dual-review topology with dashboard on a custom port
+orb --topology dual-review --dashboard --dashboard-port 3000 "build a REST API"
+
+# TUI with a local Ollama model
+orb --tui --ollama-model qwen3.5:9b
+
+# Cloud only, no trace output
+orb --cloud-only --no-trace "explain merge sort"
 ```
 
-## Web Dashboard
+---
 
-The dashboard provides a real-time visualization of agent collaboration.
+## Topologies
 
-### Starting the Dashboard
+### Triangle (default)
+
+```
+Coordinator
+     │
+   Coder ─── Reviewer
+     │            │
+   Tester ────────╯
+```
+
+Four agents: Coordinator routes and synthesizes; Coder writes and iterates; Reviewer checks for correctness, style, and edge cases; Tester writes and runs test cases. All three worker agents communicate with each other directly.
 
 ```bash
-python -m orb --dashboard "Write a fibonacci function"
+orb --topology triangle "write a binary search tree"
 ```
 
-This starts a web server on port 8080 (or `--dashboard-port`) and opens your browser.
+| Agent | Base complexity | Filesystem |
+|-------|----------------|------------|
+| Coordinator | 20 | no |
+| Coder | 50 | yes |
+| Reviewer | 65 | yes |
+| Tester | 25 | yes |
 
-### Features
-
-- **Graph visualization** — Canvas-rendered node-link diagram showing the agent triangle. Nodes display role, status, and model. Edges animate when messages flow between agents.
-- **Message log** — Scrolling sidebar showing every message routed between agents, with timestamps, model info, and expandable content.
-- **Stats bar** — Live counters for messages sent, budget remaining, elapsed time, and overall status.
-- **Agent detail panel** — Click any agent node to see its current status, model, and completion result.
-- **Auto-reconnect** — WebSocket reconnects automatically if the connection drops. New connections receive the full current state.
-
-### Dashboard Architecture
+### Dual Review
 
 ```
-Browser (vanilla JS)  ←──WebSocket──→  aiohttp server  ←──events──→  MessageBus
-      Canvas graph                      /ws endpoint                    |
-      Message log                       /api/state                   agents
-      Stats bar                         / (static files)
+Coordinator
+     │
+   Coder
+  ╱     ╲
+Rev A   Rev B
+  ╲     ╱
+   Tester
 ```
 
-The dashboard uses no frontend build tools — it's vanilla HTML, CSS, and JavaScript served directly by the aiohttp server.
+Five agents. Two reviewers — Reviewer A and Reviewer B — are assigned to **different providers** when possible so they evaluate code from independent perspectives. They must reach explicit consensus before approving. Tester reports to both reviewers.
 
-## Project Structure
+```bash
+orb --topology dual-review "write a concurrent queue"
+```
+
+Reviewer provider priority: Anthropic → OpenAI → Ollama. Reviewer B is assigned the next available provider after Reviewer A.
+
+---
+
+## Architecture
+
+### MessageBus
+
+All inter-agent communication flows through a central `MessageBus`. The bus holds a directed `Graph` of allowed routes, enforces a global message budget, per-chain hop limits, and per-target cooldowns to prevent loops.
+
+Bus events (`injected`, `routed`) are emitted to registered listeners — the terminal live display, the web dashboard bridge, and the TUI all subscribe to these events.
+
+### Orchestrator
+
+The `Orchestrator` wires agents to channels, injects the initial task into the entry agent (`coordinator`), and monitors completion. When all agents have called `complete_task`, the orchestrator signals the synthesis agent to produce the final answer.
+
+### Agent
+
+Each `LLMAgent` holds an `AgentChannel` (async queue), a system prompt built from its role description and neighbor roster, and a rolling conversation history. On each turn, the agent calls the LLM with a tool set that includes `send_message`, `complete_task`, `write_file`, `read_file`, and `run_command`. The model tier is selected dynamically from the agent's `base_complexity` score unless overridden.
+
+### Sandbox
+
+Agents with `enable_filesystem=True` share a `Sandbox` scoped to the current working directory. File writes and command execution are routed through the sandbox.
+
+### Web dashboard
+
+```
+Browser (vanilla JS) ←─ WebSocket ─→ aiohttp server ←─ events ─→ MessageBus
+      canvas graph                    /ws endpoint                    │
+      message log                     /api/state                   agents
+      stats bar                       / (static files)
+```
+
+No frontend build step — plain HTML, CSS, and JS served directly by the aiohttp server. The `DashboardBridge` adapts raw bus events into JSON state updates broadcast to all connected clients. New connections receive a full state snapshot on connect.
+
+---
+
+## Project structure
 
 ```
 orb/
-├── graph/          # Undirected graph data structure
-├── messaging/      # Message types, async channels, message bus, middleware
-├── agent/          # Agent base class, LLM agent, tools, prompts, conversation
-├── llm/            # LLM client protocol, providers (Anthropic/OpenAI/Ollama), model selector
-├── memory/         # Per-agent graph-structured memory
-├── topologies/     # Topology factories (triangle)
-├── orchestrator/   # Lifecycle management, task injection, result collection
-├── tracing/        # Terminal-based event logging
-├── cli/            # CLI entry point, REPL, display formatting
+├── agent/          # LLMAgent, AgentConfig, tool definitions, prompt builder, conversation
+├── cli/            # CLI entry point (main.py), REPL, TUI (tui.py), auth (auth.py), display
+├── graph/          # Directed graph data structure
+├── llm/            # LLMClient protocol, Anthropic/OpenAI/Ollama providers, model registry
+├── messaging/      # Message types, async AgentChannel, MessageBus, middleware
+├── orchestrator/   # Orchestrator lifecycle, OrchestratorConfig, result types
+├── sandbox/        # Sandboxed filesystem and command execution
+├── topologies/     # Topology factories: triad.py (triangle), dual_review.py
+└── tracing/        # EventLogger for terminal tracing
 web/
-├── server.py       # aiohttp WebSocket server
-├── bridge.py       # Tracing-to-dashboard adapter
-├── state.py        # Dashboard state snapshot
-└── static/         # HTML, CSS, JS for the dashboard
-tests/              # Unit and integration tests
-talks/
-└── plan.md         # Sprint-based implementation plan
+├── server.py       # aiohttp WebSocket + HTTP server
+├── bridge.py       # MessageBus → dashboard state adapter
+├── state.py        # DashboardState snapshot
+└── static/         # index.html, app.js, graph.js, style.css
+tests/              # Unit and integration tests (pytest-asyncio)
 ```
+
+---
+
+## Loop prevention
+
+| Mechanism | Default |
+|-----------|---------|
+| Global message budget | 200 messages |
+| Max hop depth per chain | 10 |
+| Per-target cooldown per chain | configurable (`max_cooldown`) |
+| Run timeout | 600 seconds |
+
+---
 
 ## Testing
 
 ```bash
 conda activate orb
+pytest tests/ -v
 
-# Run all unit tests
-python -m pytest tests/ -v
-
-# Run integration test (requires API key)
-ANTHROPIC_API_KEY=sk-ant-... python -m pytest tests/integration/ -v
+# Integration tests (require a live API key)
+ANTHROPIC_API_KEY=sk-ant-... pytest tests/integration/ -v
 ```
-
-## LLM Providers
-
-Orb supports three LLM providers:
-
-| Provider | Setup | Used For |
-|----------|-------|----------|
-| **Anthropic** | Set `ANTHROPIC_API_KEY` | Claude models (Sonnet, Opus) |
-| **OpenAI** | Set `OPENAI_API_KEY` | GPT models (GPT-4o, GPT-4o-mini) |
-| **Ollama** | Run Ollama locally on port 11434 | Local models (Llama, Qwen, DeepSeek) |
-
-At least one provider must be available. The system automatically detects which providers are configured.
-
-## Selective Context Sharing
-
-Agents don't forward their full conversation history. Instead, the LLM decides what context each neighbor needs:
-
-- **Coder → Reviewer**: code + requirements
-- **Coder → Tester**: code + expected behavior
-- **Reviewer → Coder**: specific feedback + suggestions
-- **Tester → Coder**: failing test cases + error output
-
-This is guided by the system prompt, not hard-coded — the LLM chooses what's relevant per message.

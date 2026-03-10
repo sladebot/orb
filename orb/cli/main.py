@@ -30,8 +30,20 @@ def parse_args() -> argparse.Namespace:
     auth_sub = auth_parser.add_subparsers(dest="auth_provider")
     openai_auth = auth_sub.add_parser("openai", help="Log in with OpenAI via OAuth or store API key")
     openai_auth.add_argument("--api-key", metavar="SK", help="Store an API key directly (skips OAuth)")
+    anthropic_auth = auth_sub.add_parser("anthropic", help="Store an Anthropic API key")
+    anthropic_auth.add_argument("--api-key", metavar="SK", required=True, help="Anthropic API key (sk-ant-...)")
     auth_sub.add_parser("status", help="Show current auth status")
-    auth_sub.add_parser("logout", help="Revoke stored OpenAI credentials")
+    auth_sub.add_parser("logout", help="Revoke all stored credentials")
+
+    # orb config [get|set|show]
+    cfg_parser = subparsers.add_parser("config", help="View or change persistent settings")
+    cfg_sub = cfg_parser.add_subparsers(dest="config_action")
+    cfg_sub.add_parser("show", help="Print all settings")
+    cfg_get = cfg_sub.add_parser("get", help="Get a single setting")
+    cfg_get.add_argument("key", help="Setting name (e.g. local-models)")
+    cfg_set = cfg_sub.add_parser("set", help="Change a setting")
+    cfg_set.add_argument("key", help="Setting name (e.g. local-models)")
+    cfg_set.add_argument("value", help="New value (e.g. false)")
 
     # Main run args (attached to the root parser so 'orb <query>' still works)
     parser.add_argument("query", nargs="?", help="Task query (omit for interactive mode)")
@@ -49,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
     parser.add_argument("--topology", choices=["triangle", "dual-review"], default="triangle", help="Agent topology to use")
+    parser.add_argument("--tui", action="store_true", help="Launch interactive terminal TUI")
+    parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI (requires --tui)")
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="Enable verbose logging (default: on)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose logging")
     return parser.parse_args()
@@ -59,23 +73,47 @@ async def async_main() -> None:
 
     # ── auth subcommand ───────────────────────────────────────────────────────
     if args.subcommand == "auth":
-        from .auth import auth_openai, auth_status, revoke_openai_token
+        from .auth import auth_openai, auth_status, revoke_openai_token, save_anthropic_key, revoke_anthropic_key, CREDS_PATH
         provider = args.auth_provider
         if provider == "openai":
             api_key = getattr(args, "api_key", None)
             if api_key:
-                from .auth import _save_credentials, CREDS_PATH
+                from .auth import _save_credentials
                 _save_credentials("openai", {"api_key": api_key})
-                print(f"Key stored at {CREDS_PATH}")
+                print(f"OpenAI key stored at {CREDS_PATH}")
             else:
                 await auth_openai()
+        elif provider == "anthropic":
+            api_key = getattr(args, "api_key", None)
+            save_anthropic_key(api_key)
+            print(f"Anthropic key stored at {CREDS_PATH}")
         elif provider == "status" or provider is None:
             await auth_status()
         elif provider == "logout":
             revoke_openai_token()
-            print("OpenAI credentials revoked.")
+            revoke_anthropic_key()
+            print("All stored credentials revoked.")
         else:
             print(f"Unknown auth provider: {provider}")
+        return
+
+    # ── config subcommand ─────────────────────────────────────────────────────
+    if args.subcommand == "config":
+        from .config import get, set_value, show_config
+        action = getattr(args, "config_action", None) or "show"
+        if action == "show" or action is None:
+            show_config()
+        elif action == "get":
+            key = args.key.replace("-", "_")
+            print(get(key))
+        elif action == "set":
+            key = args.key.replace("-", "_")
+            try:
+                set_value(key, args.value)
+                print(f"  {key} = {args.value}")
+            except (KeyError, ValueError) as exc:
+                print_error(str(exc))
+                sys.exit(1)
         return
 
     if args.verbose and not args.quiet:
@@ -133,6 +171,32 @@ async def async_main() -> None:
         tier_override = ModelTier.LOCAL_MEDIUM
     elif args.cloud_only:
         tier_override = ModelTier.CLOUD_FAST
+
+    # --tui: launch interactive terminal TUI (optionally with dashboard sidecar)
+    if args.tui:
+        from .tui import run_tui_with_dashboard, run_tui
+        if args.dashboard:
+            await run_tui_with_dashboard(
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                tier_override=tier_override,
+                topology=args.topology,
+                budget=args.budget,
+                dashboard_port=args.dashboard_port,
+                show_logs=args.logs,
+            )
+        else:
+            run_tui(
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                tier_override=tier_override,
+                topology=args.topology,
+                budget=args.budget,
+                show_logs=args.logs,
+            )
+        return
 
     # --dashboard without a query: serve the UI and wait for the browser to start a run
     if args.dashboard and args.query is None and not args.interactive:

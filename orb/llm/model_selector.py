@@ -57,9 +57,31 @@ class ModelSelector:
             return ModelTier.LOCAL_MEDIUM
         elif score <= 70:
             return ModelTier.LOCAL_LARGE
-        elif score <= 80:
+        elif score <= 78:
             return ModelTier.CLOUD_LITE
-        elif score <= 92:
+        elif score <= 90:
             return ModelTier.CLOUD_FAST
         else:
             return ModelTier.CLOUD_STRONG
+
+    def select_with_available(self, msg: "Message", available_providers: set[str]) -> ModelTier:
+        """Like select(), but skips tiers whose provider isn't in available_providers."""
+        from .types import DEFAULT_MODELS
+        score = self._score(msg)
+        tier_order = [
+            ModelTier.LOCAL_SMALL, ModelTier.LOCAL_MEDIUM, ModelTier.LOCAL_LARGE,
+            ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG,
+        ]
+        preferred = self._tier_from_score(score)
+        # Start from preferred tier and walk up until we find an available one
+        start = tier_order.index(preferred)
+        for tier in tier_order[start:]:
+            cfg = DEFAULT_MODELS.get(tier)
+            if cfg and cfg.provider in available_providers:
+                return tier
+        # All tiers from preferred onward unavailable — walk down
+        for tier in reversed(tier_order[:start]):
+            cfg = DEFAULT_MODELS.get(tier)
+            if cfg and cfg.provider in available_providers:
+                return tier
+        return preferred

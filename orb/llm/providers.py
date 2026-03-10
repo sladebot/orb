@@ -10,7 +10,9 @@ _ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
 
 
 def _is_anthropic_oauth_token(token: str) -> bool:
-    return "sk-ant-oat" in token
+    # sk-ant-oat01-* keys are OAuth tokens issued by Claude.ai — must use Bearer auth.
+    # sk-ant-api03-* and similar are console API keys — use x-api-key.
+    return token.startswith("sk-ant-oat")
 
 
 class AnthropicProvider(LLMClient):
@@ -64,6 +66,21 @@ class AnthropicProvider(LLMClient):
         await self._client.close()
 
 
+def _tool_result_content_str(raw: object) -> str:
+    """Coerce Anthropic tool-result content to a plain string for OpenAI/Ollama."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                parts.append(item.get("text") or item.get("content") or "")
+            else:
+                parts.append(str(item))
+        return " ".join(p for p in parts if p)
+    return str(raw) if raw is not None else ""
+
+
 def _convert_to_openai_messages(messages: list[dict], system: str = "") -> list[dict]:
     """Convert Anthropic-format conversation history to OpenAI/Ollama chat format.
 
@@ -94,14 +111,18 @@ def _convert_to_openai_messages(messages: list[dict], system: str = "") -> list[
                         text_parts.append(block.get("text", ""))
                     elif block.get("type") == "tool_use":
                         tool_calls.append({
-                            "id": block.get("id", ""),
+                            "id": block.get("id") or f"call_{block.get('name','')}",
                             "type": "function",
                             "function": {
                                 "name": block.get("name", ""),
                                 "arguments": _json.dumps(block.get("input", {})),
                             },
                         })
-            out: dict = {"role": "assistant", "content": " ".join(text_parts)}
+            # Ollama rejects assistant messages with empty content + tool_calls
+            text = " ".join(text_parts) or (None if tool_calls else "")
+            out: dict = {"role": "assistant"}
+            if text is not None:
+                out["content"] = text
             if tool_calls:
                 out["tool_calls"] = tool_calls
             converted.append(out)
@@ -110,11 +131,19 @@ def _convert_to_openai_messages(messages: list[dict], system: str = "") -> list[
             isinstance(b, dict) and b.get("type") == "tool_result" for b in content
         ):
             for block in content:
+                tool_call_id = block.get("tool_use_id") or ""
+                result_content = _tool_result_content_str(block.get("content", ""))
+                # Skip tool results with no id — Ollama rejects them
+                if not tool_call_id:
+                    continue
                 converted.append({
                     "role": "tool",
-                    "tool_call_id": block.get("tool_use_id", ""),
-                    "content": block.get("content", ""),
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
                 })
+
+        elif isinstance(content, str):
+            converted.append({"role": role, "content": content})
 
         else:
             converted.append(msg)

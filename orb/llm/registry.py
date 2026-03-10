@@ -38,6 +38,12 @@ def _ollama_base_url() -> str:
 
 
 def _ollama_reachable() -> bool:
+    try:
+        from ..cli.config import local_models_enabled
+        if not local_models_enabled():
+            return False
+    except Exception:
+        pass
     import httpx
     try:
         httpx.get(f"{_ollama_base_url()}/api/tags", timeout=2.0)
@@ -90,14 +96,37 @@ def _codex_factory() -> "LLMClient":
     return OpenAICodexProvider(access_token=_codex_token())
 
 
+def _anthropic_api_key() -> str | None:
+    """Return an Anthropic API key: env var takes priority, then stored credentials."""
+    key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
+    if key:
+        return key
+    try:
+        from ..cli.auth import get_anthropic_key
+        return get_anthropic_key()
+    except Exception:
+        return None
+
+
+def _anthropic_available() -> bool:
+    return bool(_anthropic_api_key())
+
+
+def _anthropic_factory() -> "LLMClient":
+    from .providers import AnthropicProvider
+    key = _anthropic_api_key()
+    return AnthropicProvider(api_key=key)
+
+
 def _build_registry() -> list[ProviderSpec]:
-    from .providers import AnthropicProvider, OllamaProvider
+    from .providers import OllamaProvider
     return [
         ProviderSpec(
             name="anthropic",
             is_cloud=True,
-            env_vars=["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-            factory=AnthropicProvider,
+            env_vars=[],
+            check=_anthropic_available,
+            factory=_anthropic_factory,
         ),
         ProviderSpec(
             name="openai",

@@ -27,9 +27,9 @@ DEFAULT_MODELS: dict[ModelTier, ModelConfig] = {
     ModelTier.LOCAL_SMALL:  ModelConfig(ModelTier.LOCAL_SMALL,  "qwen3.5:9b",   "ollama"),
     ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen3.5:27b",  "ollama"),
     ModelTier.LOCAL_LARGE:  ModelConfig(ModelTier.LOCAL_LARGE,  "qwen3.5:27b",  "ollama"),
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001",  "anthropic"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-5-20251001",   "anthropic"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514",     "anthropic"),
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001", "anthropic"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-6",         "anthropic"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6",           "anthropic"),
 }
 
 # OpenAI API key models per tier

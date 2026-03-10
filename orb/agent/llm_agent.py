@@ -89,32 +89,44 @@ class LLMAgent(AgentNode):
         # Store in memory
         self._store_memory(msg)
 
-        # Select model — pinned_model takes highest priority
-        if self.config.pinned_model:
-            tier = self.config.pinned_model.tier
-            model_config = self.config.pinned_model
-        else:
-            tier = self._tier_override or self._selector.select(msg)
-            model_config = self._model_overrides.get(tier, DEFAULT_MODELS.get(tier))
-            if not model_config:
-                model_config = DEFAULT_MODELS[ModelTier.CLOUD_FAST]
+        # Build ordered candidate list: preferred tier first, then all cloud tiers as fallback.
+        # This ensures local-unavailable tiers are skipped transparently.
+        from ..llm.types import OPENAI_MODELS, CODEX_MODELS
 
-        provider = self._providers.get(model_config.provider)
-        if not provider:
-            # Fall back through cloud tiers to find an available provider
-            for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
-                fallback_config = self._model_overrides.get(fallback_tier, DEFAULT_MODELS.get(fallback_tier))
-                if fallback_config and fallback_config.provider in self._providers:
-                    logger.warning(
-                        f"Provider {model_config.provider!r} unavailable, "
-                        f"falling back to {fallback_config.provider!r}"
-                    )
-                    provider = self._providers[fallback_config.provider]
-                    model_config = fallback_config
-                    break
-        if not provider:
-            logger.error(f"No provider for {model_config.provider!r} and no fallback available")
+        def _candidate_configs() -> list:
+            seen: set[str] = set()
+            candidates = []
+            if self.config.pinned_model:
+                tiers = [self.config.pinned_model.tier]
+            else:
+                preferred = self._tier_override or self._selector.select_with_available(
+                    msg, set(self._providers.keys())
+                )
+                tiers = [preferred,
+                         ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]
+            for t in tiers:
+                for cfg in [
+                    self._model_overrides.get(t),
+                    DEFAULT_MODELS.get(t),
+                    OPENAI_MODELS.get(t),
+                    CODEX_MODELS.get(t),
+                ]:
+                    if cfg and cfg.provider in self._providers:
+                        key = f"{cfg.provider}:{cfg.model_id}"
+                        if key not in seen:
+                            seen.add(key)
+                            candidates.append(cfg)
+            return candidates
+
+        candidates = _candidate_configs()
+        if not candidates:
+            err = "No LLM provider available. Check your API keys (orb auth status)."
+            logger.error(f"[{self.node_id}] {err}")
+            await self._handle_complete("no_provider", {"result": f"[ERROR] {err}"})
             return
+
+        model_config = candidates[0]
+        provider = self._providers[model_config.provider]
 
         # Call LLM
         request = CompletionRequest(
@@ -141,45 +153,48 @@ class LLMAgent(AgentNode):
 
         MAX_TOOL_NUDGES = 3
         nudge_count = 0
+        # Track which candidate index we're on for mid-call fallback
+        candidate_idx = 0
 
         while True:
             await self._emit(f"Calling {model_config.model_id}…")
             try:
                 response = await provider.complete(request)
             except Exception as exc:
-                logger.warning(f"LLM call failed for agent {self.node_id} ({model_config.provider}): {exc}")
-                # Try cloud fallback — different provider, same or lower tier
-                from ..llm.types import OPENAI_MODELS, CODEX_MODELS
-                fallback_response = None
-                fallback_candidates = []
-                for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
-                    for cfg in [
-                        self._model_overrides.get(fallback_tier),
-                        DEFAULT_MODELS.get(fallback_tier),
-                        CODEX_MODELS.get(fallback_tier),
-                        OPENAI_MODELS.get(fallback_tier),
-                    ]:
-                        if cfg and cfg.provider != model_config.provider and cfg.provider in self._providers:
-                            fallback_candidates.append(cfg)
-
-                for fallback_config in fallback_candidates:
-                    logger.warning(f"Retrying with fallback {fallback_config.provider!r} / {fallback_config.model_id}")
-                    fallback_request = CompletionRequest(
-                        messages=request.messages,
-                        tools=request.tools,
-                        system=request.system,
-                        model_config=fallback_config,
+                logger.warning(
+                    f"[{self.node_id}] LLM call failed "
+                    f"({model_config.provider}/{model_config.model_id}): {exc}"
+                )
+                # Walk through remaining candidates in order
+                candidate_idx += 1
+                response = None
+                while candidate_idx < len(candidates):
+                    fallback_config = candidates[candidate_idx]
+                    logger.warning(
+                        f"[{self.node_id}] Retrying with "
+                        f"{fallback_config.provider}/{fallback_config.model_id}"
                     )
+                    await self._emit(f"Retrying with {fallback_config.model_id}…")
                     try:
-                        fallback_response = await self._providers[fallback_config.provider].complete(fallback_request)
+                        fb_request = CompletionRequest(
+                            messages=request.messages,
+                            tools=request.tools,
+                            system=request.system,
+                            model_config=fallback_config,
+                        )
+                        response = await self._providers[fallback_config.provider].complete(fb_request)
                         model_config = fallback_config
+                        provider = self._providers[model_config.provider]
+                        request = fb_request
                         break
                     except Exception as exc2:
-                        logger.warning(f"Fallback also failed: {exc2}")
-                if fallback_response is None:
-                    logger.error(f"All providers failed for agent {self.node_id}")
+                        logger.warning(f"[{self.node_id}] Fallback failed: {exc2}")
+                        candidate_idx += 1
+                if response is None:
+                    err = "All LLM providers failed. Check API keys and network access."
+                    logger.error(f"[{self.node_id}] {err}")
+                    await self._handle_complete("all_providers_failed", {"result": f"[ERROR] {err}"})
                     return
-                response = fallback_response
 
             logger.info(
                 f"Agent {self.node_id} used model {response.model} "
