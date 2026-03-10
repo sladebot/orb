@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..llm.types import ModelConfig
+    from ..sandbox.sandbox import Sandbox
 
 
 class AgentStatus(Enum):
@@ -23,3 +24,5 @@ class AgentConfig:
     base_complexity: int = 50
     max_history: int = 20
     pinned_model: ModelConfig | None = None  # bypasses tier selection when set
+    enable_filesystem: bool = False          # give agent read/write/run tools
+    sandbox: "Sandbox | None" = None        # shared sandbox for this run

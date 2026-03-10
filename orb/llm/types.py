@@ -18,18 +18,32 @@ class ModelConfig:
     tier: ModelTier
     model_id: str
     provider: str  # "anthropic", "openai", "ollama"
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.7
 
 
-# Default model configs per tier
+# Default model configs per tier (Anthropic-first; OpenAI alternatives listed separately)
 DEFAULT_MODELS: dict[ModelTier, ModelConfig] = {
-    ModelTier.LOCAL_SMALL: ModelConfig(ModelTier.LOCAL_SMALL, "llama3.2:latest", "ollama"),
-    ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen2.5:14b", "ollama"),
-    ModelTier.LOCAL_LARGE: ModelConfig(ModelTier.LOCAL_LARGE, "qwen2.5:32b", "ollama"),
-    ModelTier.CLOUD_LITE: ModelConfig(ModelTier.CLOUD_LITE, "claude-haiku-4-5-20251001", "anthropic"),
-    ModelTier.CLOUD_FAST: ModelConfig(ModelTier.CLOUD_FAST, "claude-sonnet-4-20250514", "anthropic"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514", "anthropic"),
+    ModelTier.LOCAL_SMALL:  ModelConfig(ModelTier.LOCAL_SMALL,  "qwen3.5:9b",   "ollama"),
+    ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen3.5:27b",  "ollama"),
+    ModelTier.LOCAL_LARGE:  ModelConfig(ModelTier.LOCAL_LARGE,  "qwen3.5:27b",  "ollama"),
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001",  "anthropic"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-5-20251001",   "anthropic"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514",     "anthropic"),
+}
+
+# OpenAI API key models per tier
+OPENAI_MODELS: dict[ModelTier, ModelConfig] = {
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-4o-mini",  "openai"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-4o",       "openai"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "o3",           "openai"),
+}
+
+# OpenAI Codex (ChatGPT subscription) — all tiers use gpt-5.4
+CODEX_MODELS: dict[ModelTier, ModelConfig] = {
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4",  "openai-codex"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4",  "openai-codex"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4",  "openai-codex"),
 }
 
 

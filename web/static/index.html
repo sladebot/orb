@@ -35,44 +35,36 @@
                 <span class="stat-label">Status</span>
                 <span id="stat-status" class="stat-value status-waiting">Waiting</span>
             </div>
+            <div class="stat">
+                <span class="stat-label">Model</span>
+                <span id="stat-model" class="stat-value">Auto</span>
+            </div>
         </div>
 
         <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
-        <button id="stop-btn" class="hidden" title="Stop the current run">Stop</button>
-        <button id="new-run-btn" title="Start a new run">New Run</button>
     </div>
 
     <!-- Main layout -->
     <div id="main-layout">
-        <!-- Launch panel overlay (shown on first load, hidden once run starts) -->
-        <div id="launch-panel">
-            <div id="launch-card">
-                <div id="launch-title">ORB Agent Network</div>
-                <div id="launch-subtitle">Start a multi-agent task</div>
-                <textarea id="launch-query" placeholder="Describe a programming task…" rows="3"></textarea>
-                <div id="launch-options">
-                    <label>Topology</label>
-                    <select id="launch-topology">
-                        <option value="triangle">Triangle (Coder &rarr; Reviewer &rarr; Tester)</option>
-                        <option value="dual-review">Dual Review (2&times; Opus reviewers)</option>
-                    </select>
-                </div>
-                <button id="launch-btn">Run</button>
-                <div id="launch-error"></div>
-            </div>
-        </div>
-
-        <!-- Left: graph canvas -->
-        <div id="graph-panel">
-            <canvas id="graph-canvas"></canvas>
-        </div>
-
-        <!-- Right: sidebar -->
+        <!-- Left: sidebar -->
         <div id="sidebar">
             <!-- Tab bar -->
             <div id="tab-bar">
                 <button class="tab-btn active" data-tab="messages">Messages</button>
                 <button class="tab-btn" data-tab="agents">Agents</button>
+            </div>
+
+            <!-- Question panel (shown when agent asks for clarification) -->
+            <div id="question-panel" class="hidden">
+                <div id="question-header">
+                    <span id="question-from">agent is asking</span>
+                    <button id="question-dismiss" title="Dismiss">×</button>
+                </div>
+                <div id="question-body"></div>
+                <div id="question-reply-row">
+                    <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                    <button id="question-send">Reply</button>
+                </div>
             </div>
 
             <!-- Result banner (hidden until run completes) -->
@@ -112,6 +104,82 @@
                 <div id="chat-input-row">
                     <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off">
                     <button id="chat-send">Send</button>
+                </div>
+            </div>
+
+            <!-- Query bar (bottom of sidebar) -->
+            <div id="query-bar">
+                <div id="query-container">
+                    <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
+                    <div id="query-actions">
+                        <div id="model-picker"></div>
+                        <button id="query-send" title="Run (Enter)">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <path d="M8 2L8 13M8 2L3 7M8 2L13 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                        <button id="query-stop" class="hidden" title="Stop run">
+                            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                <rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: graph canvas -->
+        <div id="graph-panel">
+            <canvas id="graph-canvas"></canvas>
+            <div id="graph-loader" class="hidden">
+                <div class="loader-ring"></div>
+                <div id="loader-text">Starting agents…</div>
+            </div>
+
+            <!-- Node detail panel — slides in from right on node click -->
+            <div id="node-detail-panel" class="ndp-closed">
+                <div id="ndp-header">
+                    <div id="ndp-accent"></div>
+                    <div id="ndp-header-body">
+                        <div id="ndp-title-row">
+                            <span id="ndp-role"></span>
+                            <span id="ndp-status-badge"></span>
+                        </div>
+                        <div id="ndp-meta"></div>
+                    </div>
+                    <button id="ndp-close" title="Close">×</button>
+                </div>
+
+                <div id="ndp-body">
+                    <!-- Live activity -->
+                    <div id="ndp-activity-section" class="ndp-section hidden">
+                        <div class="ndp-section-label">
+                            <span class="ndp-section-icon">⚙</span> Current Activity
+                        </div>
+                        <div id="ndp-activity-log"></div>
+                    </div>
+
+                    <!-- Recent messages -->
+                    <div id="ndp-messages-section" class="ndp-section">
+                        <div class="ndp-section-label">
+                            <span class="ndp-section-icon">✉</span> Recent Messages
+                        </div>
+                        <div id="ndp-message-list"></div>
+                    </div>
+
+                    <!-- Result -->
+                    <div id="ndp-result-section" class="ndp-section hidden">
+                        <div class="ndp-section-label">
+                            <span class="ndp-section-icon">✓</span> Result
+                        </div>
+                        <div id="ndp-result-body"></div>
+                    </div>
+                </div>
+
+                <!-- Chat input -->
+                <div id="ndp-chat-row">
+                    <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
+                    <button id="ndp-chat-send">Send</button>
                 </div>
             </div>
         </div>

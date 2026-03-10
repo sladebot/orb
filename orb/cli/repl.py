@@ -8,7 +8,7 @@ from rich.prompt import Prompt
 from ..llm.client import LLMClient
 from ..llm.types import ModelTier, ModelConfig
 from ..orchestrator.types import OrchestratorConfig
-from ..topologies.triangle import create_triangle
+from ..topologies.triad import create_triad
 from .display import print_header, print_result, print_error
 
 console = Console()
@@ -36,7 +36,7 @@ async def run_repl(
         if not query.strip():
             continue
 
-        orchestrator = create_triangle(
+        orchestrator = create_triad(
             providers=providers,
             config=config,
             model_overrides=model_overrides,

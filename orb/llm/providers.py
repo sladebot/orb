@@ -29,7 +29,7 @@ class AnthropicProvider(LLMClient):
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
         kwargs: dict = {
-            "model": config.model_id if config else "claude-sonnet-4-20250514",
+            "model": config.model_id if config else "claude-sonnet-4-5-20251001",
             "max_tokens": config.max_tokens if config else 4096,
             "messages": request.messages,
         }
@@ -64,6 +64,64 @@ class AnthropicProvider(LLMClient):
         await self._client.close()
 
 
+def _convert_to_openai_messages(messages: list[dict], system: str = "") -> list[dict]:
+    """Convert Anthropic-format conversation history to OpenAI/Ollama chat format.
+
+    Anthropic stores:
+      - assistant tool calls as content list with {"type": "tool_use", ...}
+      - tool results as user messages with content list of {"type": "tool_result", ...}
+
+    OpenAI/Ollama expect:
+      - assistant tool calls as message.tool_calls list
+      - tool results as {"role": "tool", "tool_call_id": ..., "content": ...}
+    """
+    import json as _json
+
+    converted: list[dict] = []
+    if system:
+        converted.append({"role": "system", "content": system})
+
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "assistant" and isinstance(content, list):
+            text_parts: list[str] = []
+            tool_calls: list[dict] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": block.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": _json.dumps(block.get("input", {})),
+                            },
+                        })
+            out: dict = {"role": "assistant", "content": " ".join(text_parts)}
+            if tool_calls:
+                out["tool_calls"] = tool_calls
+            converted.append(out)
+
+        elif role == "user" and isinstance(content, list) and content and all(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+        ):
+            for block in content:
+                converted.append({
+                    "role": "tool",
+                    "tool_call_id": block.get("tool_use_id", ""),
+                    "content": block.get("content", ""),
+                })
+
+        else:
+            converted.append(msg)
+
+    return converted
+
+
 class OpenAIProvider(LLMClient):
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
         import openai
@@ -77,10 +135,7 @@ class OpenAIProvider(LLMClient):
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         import json
         config = request.model_config
-        messages = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.extend(request.messages)
+        messages = _convert_to_openai_messages(request.messages, request.system)
 
         kwargs: dict = {
             "model": config.model_id if config else "gpt-4o",
@@ -89,7 +144,6 @@ class OpenAIProvider(LLMClient):
         }
 
         if request.tools:
-            # Convert Anthropic-style tool schema to OpenAI format
             kwargs["tools"] = [
                 {
                     "type": "function",
@@ -133,63 +187,12 @@ class OllamaProvider(LLMClient):
     def __init__(self, base_url: str = "http://localhost:11434") -> None:
         import httpx
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=120.0)
-
-    @staticmethod
-    def _convert_messages(messages: list[dict]) -> list[dict]:
-        """Convert Anthropic-format messages to Ollama/OpenAI-compatible format."""
-        import json
-        converted: list[dict] = []
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content")
-
-            # Assistant message whose content is a list (may contain text + tool_use blocks)
-            if role == "assistant" and isinstance(content, list):
-                text_parts: list[str] = []
-                tool_calls: list[dict] = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            tool_calls.append({
-                                "id": block.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
-                                },
-                            })
-                out: dict = {"role": "assistant", "content": " ".join(text_parts)}
-                if tool_calls:
-                    out["tool_calls"] = tool_calls
-                converted.append(out)
-
-            # User message whose content is a list of tool_result blocks
-            elif role == "user" and isinstance(content, list) and content and all(
-                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-            ):
-                for block in content:
-                    converted.append({
-                        "role": "tool",
-                        "tool_call_id": block.get("tool_use_id", ""),
-                        "content": block.get("content", ""),
-                    })
-
-            # All other messages pass through unchanged
-            else:
-                converted.append(msg)
-
-        return converted
+        # 600s — local models (qwen3.5:27b at 8192 tokens) can take several minutes
+        self._client = httpx.AsyncClient(timeout=600.0)
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
-        messages = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.extend(request.messages)
-        messages = self._convert_messages(messages)
+        messages = _convert_to_openai_messages(request.messages, request.system)
 
         payload = {
             "model": config.model_id if config else "llama3.2:latest",
@@ -218,12 +221,20 @@ class OllamaProvider(LLMClient):
         msg = data.get("message", {})
         tool_calls = []
         if msg.get("tool_calls"):
+            import uuid
+            import json as _json
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
+                raw_args = fn.get("arguments", {})
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = _json.loads(raw_args)
+                    except Exception:
+                        raw_args = {}
                 tool_calls.append(ToolCall(
-                    id=fn.get("name", ""),
+                    id=f"toolu_{uuid.uuid4().hex[:16]}",
                     name=fn.get("name", ""),
-                    input=fn.get("arguments", {}),
+                    input=raw_args,
                 ))
 
         return CompletionResponse(
@@ -235,6 +246,178 @@ class OllamaProvider(LLMClient):
                 "input": data.get("prompt_eval_count", 0),
                 "output": data.get("eval_count", 0),
             },
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+class OpenAICodexProvider(LLMClient):
+    """Provider for ChatGPT subscription users via the Responses API at chatgpt.com/backend-api.
+
+    Uses the OAuth access token from `orb auth openai` and the gpt-5.4 model.
+    This is free with a ChatGPT Plus/Pro subscription — no API credits needed.
+    """
+
+    _BASE_URL = "https://chatgpt.com/backend-api"
+    _DEFAULT_MODEL = "gpt-5.4"
+
+    def __init__(self, access_token: str) -> None:
+        import httpx
+        self._token = access_token
+        self._client = httpx.AsyncClient(timeout=120.0)
+
+    @staticmethod
+    def _to_responses_input(messages: list[dict]) -> list[dict]:
+        """Convert Anthropic-format conversation history to Responses API input items."""
+        import json as _json
+        items: list[dict] = []
+
+        for msg in messages:
+            role    = msg.get("role")
+            content = msg.get("content")
+
+            if role == "assistant" and isinstance(content, list):
+                # Emit text message first, then function_call items
+                text_parts: list[str] = []
+                func_calls: list[dict] = []
+                for block in content:
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        func_calls.append({
+                            "type":      "function_call",
+                            "call_id":   block.get("id", ""),
+                            "name":      block.get("name", ""),
+                            "arguments": _json.dumps(block.get("input", {})),
+                        })
+                if text_parts:
+                    items.append({"type": "message", "role": "assistant",
+                                  "content": " ".join(text_parts)})
+                items.extend(func_calls)
+
+            elif (role == "user" and isinstance(content, list)
+                  and all(b.get("type") == "tool_result" for b in content)):
+                # Tool results → function_call_output items
+                for block in content:
+                    items.append({
+                        "type":    "function_call_output",
+                        "call_id": block.get("tool_use_id", ""),
+                        "output":  block.get("content", ""),
+                    })
+
+            elif role == "assistant" and isinstance(content, str):
+                items.append({"type": "message", "role": "assistant", "content": content})
+
+            elif role == "user" and isinstance(content, str):
+                items.append({"type": "message", "role": "user", "content": content})
+
+        return items
+
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        import json as _json
+        config = request.model_config
+        model  = config.model_id if config else self._DEFAULT_MODEL
+
+        payload: dict = {
+            "model": model,
+            "store": False,
+            "stream": True,
+            "instructions": request.system or "You are a helpful assistant.",
+            "input": self._to_responses_input(request.messages),
+        }
+
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type":        "function",
+                    "name":        t["name"],
+                    "description": t.get("description", ""),
+                    "parameters":  t.get("input_schema", {}),
+                }
+                for t in request.tools
+            ]
+
+        # Streaming SSE response — collect all events then assemble final response
+        content_text = ""
+        tool_calls: list[ToolCall] = []
+        final_model = model
+        usage: dict = {}
+        # Track in-progress function calls by index
+        pending_calls: dict[int, dict] = {}
+
+        async with self._client.stream(
+            "POST",
+            f"{self._BASE_URL}/codex/responses",
+            json=payload,
+            headers={"Authorization": f"Bearer {self._token}"},
+        ) as stream:
+            if stream.status_code >= 400:
+                body = await stream.aread()
+                raise Exception(f"ChatGPT Codex API {stream.status_code}: {body.decode()[:500]}")
+
+            async for line in stream.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                raw = line[6:].strip()
+                if raw in ("", "[DONE]"):
+                    continue
+                try:
+                    event = _json.loads(raw)
+                except Exception:
+                    continue
+
+                etype = event.get("type", "")
+
+                if etype == "response.output_text.delta":
+                    content_text += event.get("delta", "")
+
+                elif etype == "response.output_item.added":
+                    item = event.get("item", {})
+                    if item.get("type") == "function_call":
+                        idx = event.get("output_index", 0)
+                        pending_calls[idx] = {
+                            "id":        item.get("call_id") or item.get("id", ""),
+                            "name":      item.get("name", ""),
+                            "arguments": item.get("arguments", ""),
+                        }
+
+                elif etype == "response.function_call_arguments.delta":
+                    idx = event.get("output_index", 0)
+                    if idx in pending_calls:
+                        pending_calls[idx]["arguments"] += event.get("delta", "")
+
+                elif etype == "response.output_item.done":
+                    item = event.get("item", {})
+                    if item.get("type") == "function_call":
+                        idx = event.get("output_index", 0)
+                        call = pending_calls.pop(idx, None)
+                        if call:
+                            try:
+                                args = _json.loads(call["arguments"] or "{}")
+                            except Exception:
+                                args = {}
+                            tool_calls.append(ToolCall(
+                                id=call["id"],
+                                name=call["name"],
+                                input=args,
+                            ))
+
+                elif etype == "response.completed":
+                    resp_obj = event.get("response", {})
+                    final_model = resp_obj.get("model", model)
+                    u = resp_obj.get("usage", {})
+                    usage = {
+                        "input":  u.get("input_tokens", 0),
+                        "output": u.get("output_tokens", 0),
+                    }
+
+        return CompletionResponse(
+            content=content_text,
+            tool_calls=tool_calls,
+            model=final_model,
+            stop_reason="completed",
+            usage=usage,
         )
 
     async def close(self) -> None:

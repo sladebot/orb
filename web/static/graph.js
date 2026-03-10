@@ -13,19 +13,19 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const NODE_W = 120;
-const NODE_H = 56;
-const NODE_RADIUS = 8;       // border-radius for rounded rect
-const NODE_BORDER = 4;       // left accent border width
+const NODE_W = 188;
+const NODE_H = 82;
+const NODE_RADIUS = 10;
 const PARTICLE_DURATION = 900; // ms
 
 const AGENT_COLORS = {
-    coder:      '#0550ae',
-    reviewer:   '#7d4e00',
-    reviewer_a: '#7d4e00',
-    reviewer_b: '#953800',
-    tester:     '#1a7f37',
-    user:       '#8250df',
+    coordinator: '#6e40c9',  // purple
+    coder:       '#0550ae',  // blue
+    reviewer:    '#7d4e00',  // amber
+    reviewer_a:  '#7d4e00',
+    reviewer_b:  '#953800',
+    tester:      '#1a7f37',  // green
+    user:        '#8250df',
 };
 
 const FALLBACK_COLORS = ['#9e1239', '#0369a1', '#92400e', '#6b21a8'];
@@ -37,28 +37,39 @@ const STATUS_COLORS = {
     error:     '#cf222e',
 };
 
-const STATUS_BG = {
-    idle:      '#f0f2f5',
-    running:   '#dbeafe',
-    completed: '#dcfce7',
-    error:     '#fee2e2',
+const STATUS_BADGE = {
+    idle:      { bg: '#f0f2f5', fg: '#8b949e' },
+    running:   { bg: '#dbeafe', fg: '#0969da' },
+    completed: { bg: '#dcfce7', fg: '#1a7f37' },
+    error:     { bg: '#fee2e2', fg: '#cf222e' },
+    thinking:  { bg: '#fef3c7', fg: '#9a6700' },
 };
 
 // Fractional canvas positions for known topologies
-const LAYOUT_TRIANGLE = {
-    coder:    [0.5,  0.2 ],
-    reviewer: [0.2,  0.75],
-    tester:   [0.8,  0.75],
+const LAYOUT_TRIAD = {
+    coordinator: [0.5,  0.15],
+    coder:       [0.5,  0.47],
+    reviewer:    [0.24, 0.81],
+    tester:      [0.76, 0.81],
 };
 
-const LAYOUT_4NODE = {
-    coder:      [0.5,  0.15],
-    reviewer_a: [0.2,  0.5 ],
-    reviewer_b: [0.8,  0.5 ],
-    tester:     [0.5,  0.85],
+const LAYOUT_DUAL_REVIEW = {
+    coordinator: [0.5,  0.10],
+    coder:       [0.5,  0.35],
+    reviewer_a:  [0.24, 0.65],
+    reviewer_b:  [0.76, 0.65],
+    tester:      [0.5,  0.88],
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+function _shortModel(modelId) {
+    if (!modelId) return '';
+    // claude-sonnet-4-5-20251001 → sonnet-4-5 · gpt-5.4 / qwen3.5:9b pass through
+    const m = modelId.match(/^claude-([a-z]+-[\d]+(?:-[\d]+)?)/i);
+    if (m) return m[1].toLowerCase();
+    return modelId;
+}
 
 function agentColor(id) {
     if (AGENT_COLORS[id]) return AGENT_COLORS[id];
@@ -163,13 +174,14 @@ class GraphRenderer {
             const id = agent.id;
             this.nodes[id] = {
                 id,
-                role:     agent.role || id,
-                status:   agent.status || 'idle',
-                model:    agent.model || '',
-                msgCount: agent.msg_count || 0,
-                // Layout positions are set by _layoutNodes()
+                role:         agent.role || id,
+                status:       agent.status || 'idle',
+                model:        agent.model || '',
+                msgCount:     agent.msg_count || 0,
+                lastActivity: '',
                 x: 0, y: 0,
                 pulseStart: null,
+                thinking:   false,
                 color: agentColor(id),
             };
         }
@@ -183,6 +195,16 @@ class GraphRenderer {
         if (!n) return;
         if (status) n.status = status;
         if (model)  n.model  = model;
+    }
+
+    updateAgentActivity(agentId, preview) {
+        const n = this.nodes[agentId];
+        if (n) n.lastActivity = preview || '';
+    }
+
+    setNodeThinking(agentId, thinking) {
+        const n = this.nodes[agentId];
+        if (n) n.thinking = thinking;
     }
 
     animateEdge(source, target) {
@@ -225,10 +247,10 @@ class GraphRenderer {
 
         // Choose layout map
         let layoutMap = null;
-        if (n === 3 && ids.every(id => id in LAYOUT_TRIANGLE)) {
-            layoutMap = LAYOUT_TRIANGLE;
-        } else if (n === 4 && ids.every(id => id in LAYOUT_4NODE)) {
-            layoutMap = LAYOUT_4NODE;
+        if (n === 4 && ids.every(id => id in LAYOUT_TRIAD)) {
+            layoutMap = LAYOUT_TRIAD;
+        } else if (n === 5 && ids.every(id => id in LAYOUT_DUAL_REVIEW)) {
+            layoutMap = LAYOUT_DUAL_REVIEW;
         }
 
         if (layoutMap) {
@@ -266,7 +288,7 @@ class GraphRenderer {
         if (this._gridCanvas) {
             ctx.drawImage(this._gridCanvas, 0, 0, W, H);
         } else {
-            ctx.fillStyle = '#f6f8fa';
+            ctx.fillStyle = '#f5f7fa';
             ctx.fillRect(0, 0, W, H);
         }
 
@@ -301,21 +323,25 @@ class GraphRenderer {
             const tgt = this.nodes[edge.target];
             if (!src || !tgt) continue;
 
+            const srcActive = src.status === 'running' || tgt.status === 'running';
+            const edgeColor = srcActive ? '#c8d8f4' : '#d8dde3';
+            const arrowColor = srcActive ? '#9ab5e8' : '#b8c0ca';
+
             const p0 = nodeEdgePoint(src, tgt);
             const p1 = nodeEdgePoint(tgt, src);
             const { cp1, cp2 } = edgeControlPoints(p0, p1);
 
             ctx.save();
-            ctx.strokeStyle = '#d0d7de';
-            ctx.lineWidth = 1.5;
-            ctx.lineCap = 'round';
+            ctx.strokeStyle = edgeColor;
+            ctx.lineWidth   = srcActive ? 2 : 1.5;
+            ctx.lineCap     = 'round';
             ctx.beginPath();
             ctx.moveTo(p0.x, p0.y);
             ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, p1.x, p1.y);
             ctx.stroke();
 
             // Arrowhead at target
-            this._drawArrow(ctx, cp2, p1, '#d0d7de');
+            this._drawArrow(ctx, cp2, p1, arrowColor);
             ctx.restore();
         }
     }
@@ -392,135 +418,182 @@ class GraphRenderer {
         const isSelected = this.selectedNode === node.id;
         const isHovered  = this._hoveredId   === node.id;
 
-        // Pulse animation
+        // Pulse on message receive
         let pulse = 0;
         if (node.pulseStart !== null) {
             const elapsed = now - node.pulseStart;
-            const dur = 600;
-            if (elapsed < dur) {
-                pulse = Math.sin((elapsed / dur) * Math.PI);
-            } else {
-                node.pulseStart = null;
-            }
+            if (elapsed < 600) pulse = Math.sin((elapsed / 600) * Math.PI);
+            else node.pulseStart = null;
         }
+
+        const runPhase = (now % 2000) / 2000;
+        const STRIPE   = 5;   // top accent stripe height
+        const DIVIDER  = 52;  // y-offset for content/stats divider
+        const PAD      = 13;  // horizontal padding
 
         ctx.save();
 
-        // Outer blue ring for selected node
-        if (isSelected) {
+        // ── Selected glow ring ───────────────────────────────────
+        if (isSelected || pulse > 0.15) {
             ctx.save();
-            ctx.strokeStyle = 'rgba(9, 105, 218, 0.45)';
-            ctx.lineWidth   = 3;
-            roundRect(ctx, x - 5, y - 5, w + 10, h + 10, r + 4);
+            ctx.shadowColor = col;
+            ctx.shadowBlur  = isSelected ? 20 : 10;
+            const ga = isSelected ? 0.6 : pulse * 0.4;
+            ctx.strokeStyle = col + Math.round(ga * 255).toString(16).padStart(2, '0');
+            ctx.lineWidth   = isSelected ? 2.5 : 1.5;
+            roundRect(ctx, x - 4, y - 4, w + 8, h + 8, r + 3);
             ctx.stroke();
             ctx.restore();
         }
 
-        // Drop shadow
+        // ── Drop shadow ──────────────────────────────────────────
         ctx.save();
-        ctx.shadowColor  = 'rgba(0,0,0,0.10)';
-        ctx.shadowBlur   = isHovered ? 14 : 8;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 2;
-        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor   = isSelected ? col + '28' : 'rgba(0,0,0,0.08)';
+        ctx.shadowBlur    = isHovered ? 18 : isSelected ? 24 : 7;
+        ctx.shadowOffsetY = isHovered ? 5 : 3;
+        ctx.fillStyle = '#fff';
         roundRect(ctx, x, y, w, h, r);
         ctx.fill();
         ctx.restore();
 
-        // White body (no shadow)
+        // ── White card body ──────────────────────────────────────
         ctx.fillStyle = '#ffffff';
         roundRect(ctx, x, y, w, h, r);
         ctx.fill();
 
-        // Border
-        const borderAlpha = isSelected ? 1 : (isHovered ? 0.8 : 0.5);
-        ctx.strokeStyle = `rgba(208,215,222,${borderAlpha})`;
-        ctx.lineWidth   = 1;
-        roundRect(ctx, x, y, w, h, r);
-        ctx.stroke();
-
-        // Left accent border
-        const accentIntensity = isSelected ? 1 : (pulse > 0 ? 0.6 + 0.4 * pulse : 0.85);
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(x + r,   y);
-        ctx.arcTo(x, y,     x, y + r,     r);
-        ctx.lineTo(x, y + h - r);
-        ctx.arcTo(x, y + h, x + r, y + h, r);
-        ctx.lineTo(x + NODE_BORDER, y + h - r);
-        ctx.arcTo(x + NODE_BORDER, y + h, x + NODE_BORDER, y + h - r, 0);
-        ctx.lineTo(x + NODE_BORDER, y + r);
-        ctx.arcTo(x + NODE_BORDER, y, x + r, y, 0);
-        ctx.closePath();
-        ctx.fillStyle = col + Math.round(accentIntensity * 255).toString(16).padStart(2, '0');
-        ctx.fill();
-        ctx.restore();
-
-        // Clean left border using clip + fillRect approach
+        // ── Stats tinted footer ──────────────────────────────────
         ctx.save();
         roundRect(ctx, x, y, w, h, r);
         ctx.clip();
-        ctx.fillStyle = col;
-        ctx.globalAlpha = accentIntensity;
-        ctx.fillRect(x, y, NODE_BORDER, h);
+        ctx.fillStyle = '#f6f8fa';
+        ctx.fillRect(x, y + DIVIDER, w, h - DIVIDER);
+        ctx.restore();
+
+        // ── Card border ──────────────────────────────────────────
+        ctx.strokeStyle = isSelected ? col + '80'
+            : isHovered  ? '#c0c8d2'
+            : '#dde1e7';
+        ctx.lineWidth = isSelected ? 1.5 : 1;
+        roundRect(ctx, x, y, w, h, r);
+        ctx.stroke();
+
+        // ── Top accent stripe ────────────────────────────────────
+        ctx.save();
+        roundRect(ctx, x, y, w, h, r);
+        ctx.clip();
+
+        if (node.status === 'running' || node.thinking) {
+            // Sweeping shimmer across the stripe
+            const sx = x + (runPhase * w * 2) - w * 0.5;
+            const g  = ctx.createLinearGradient(sx, y, sx + w * 0.7, y);
+            g.addColorStop(0,   col + 'cc');
+            g.addColorStop(0.3, col + 'ff');
+            g.addColorStop(0.7, col + 'ff');
+            g.addColorStop(1,   col + 'cc');
+            ctx.fillStyle = g;
+        } else if (node.status === 'completed') {
+            ctx.fillStyle = '#1a7f37';
+        } else if (node.status === 'error') {
+            ctx.fillStyle = '#cf222e';
+        } else {
+            ctx.fillStyle = col;
+            ctx.globalAlpha = pulse > 0 ? 0.75 + 0.25 * pulse : 0.9;
+        }
+        ctx.fillRect(x, y, w, STRIPE);
         ctx.globalAlpha = 1;
         ctx.restore();
 
-        // Text content
-        const textX = x + NODE_BORDER + 10;
-        const lineH  = 14;
-
-        // Agent name (bold, colored)
-        ctx.font      = 'bold 13px Inter, -apple-system, sans-serif';
-        ctx.fillStyle = col;
-        ctx.textBaseline = 'top';
-        ctx.fillText(node.role, textX, y + 8, w - NODE_BORDER - 14);
-
-        // Role label / subtitle (gray, smaller)
-        ctx.font      = '10px Inter, -apple-system, sans-serif';
-        ctx.fillStyle = '#656d76';
-        ctx.fillText(node.id !== node.role ? node.id : '', textX, y + 8 + lineH, w - NODE_BORDER - 14);
-
-        // Status badge
-        const badgeText  = node.status;
-        const badgeColor = STATUS_COLORS[node.status] || STATUS_COLORS.idle;
-        const badgeBg    = STATUS_BG[node.status]     || STATUS_BG.idle;
-        ctx.font = 'bold 8px JetBrains Mono, monospace';
-        const badgeW   = ctx.measureText(badgeText).width + 8;
-        const badgeH   = 12;
-        const badgeX   = x + w - badgeW - 6;
-        const badgeY   = y + 6;
-
-        ctx.fillStyle = badgeBg;
+        // ── Divider line ─────────────────────────────────────────
+        ctx.save();
+        ctx.strokeStyle = '#e4e8ec';
+        ctx.lineWidth   = 0.5;
         ctx.beginPath();
-        ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
-        ctx.fill();
-        ctx.fillStyle = badgeColor;
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + badgeH / 2);
+        ctx.moveTo(x + PAD, y + DIVIDER);
+        ctx.lineTo(x + w - PAD, y + DIVIDER);
+        ctx.stroke();
+        ctx.restore();
 
-        // Model name (muted, bottom row)
-        if (node.model) {
-            const modelStr = node.model.length > 18 ? node.model.slice(0, 18) + '…' : node.model;
-            ctx.font      = '9px JetBrains Mono, monospace';
-            ctx.fillStyle = '#9198a1';
-            ctx.textAlign    = 'left';
-            ctx.textBaseline = 'bottom';
-            ctx.fillText(modelStr, textX, y + h - 7, w - NODE_BORDER - 14);
+        // ── Role name ────────────────────────────────────────────
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        ctx.font         = '700 13px Inter, -apple-system, sans-serif';
+        ctx.fillStyle    = '#1c2128';
+        ctx.fillText(node.role, x + PAD, y + STRIPE + 8, w - PAD * 2 - 58);
+
+        // ── Status badge ─────────────────────────────────────────
+        const statusKey  = node.thinking ? 'thinking' : (node.status || 'idle');
+        const badge      = STATUS_BADGE[statusKey] || STATUS_BADGE.idle;
+        const statusText = statusKey;
+
+        ctx.font = '600 9px Inter, -apple-system, sans-serif';
+        const btw = ctx.measureText(statusText).width;
+        const bW  = btw + 18;   // dot (5px) + gap + text + h-padding
+        const bH  = 15;
+        const bX  = x + w - bW - PAD + 4;
+        const bY  = y + STRIPE + 7;
+
+        ctx.fillStyle = badge.bg;
+        ctx.beginPath();
+        ctx.roundRect(bX, bY, bW, bH, 7);
+        ctx.fill();
+
+        // Dot
+        const dCx = bX + 7;
+        const dCy = bY + bH / 2;
+        if (statusKey === 'running' || statusKey === 'thinking') {
+            ctx.save();
+            ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(runPhase * Math.PI * 2));
+            ctx.fillStyle   = badge.fg;
+            ctx.beginPath();
+            ctx.arc(dCx, dCy, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        } else {
+            ctx.fillStyle = badge.fg;
+            ctx.beginPath();
+            ctx.arc(dCx, dCy, 2.5, 0, Math.PI * 2);
+            ctx.fill();
         }
 
-        // Running pulse: animated border glow
-        if (node.status === 'running') {
-            const t   = (now % 1400) / 1400;
-            const glow = 0.25 + 0.25 * Math.sin(t * Math.PI * 2);
-            ctx.save();
-            ctx.strokeStyle = STATUS_COLORS.running;
-            ctx.lineWidth   = 1.5;
-            ctx.globalAlpha = glow;
-            roundRect(ctx, x, y, w, h, r);
-            ctx.stroke();
-            ctx.restore();
+        ctx.fillStyle    = badge.fg;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(statusText, bX + 13, bY + bH / 2);
+
+        // ── Model name ───────────────────────────────────────────
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'top';
+        if (node.model) {
+            ctx.font      = '10px "JetBrains Mono", monospace';
+            ctx.fillStyle = '#6b7280';
+            ctx.fillText(_shortModel(node.model), x + PAD, y + STRIPE + 26, w - PAD * 2);
+        } else {
+            ctx.font      = '10px Inter, -apple-system, sans-serif';
+            ctx.fillStyle = '#9198a1';
+            ctx.fillText('selecting model…', x + PAD, y + STRIPE + 26, w - PAD * 2);
+        }
+
+        // ── Footer: msg count + activity ─────────────────────────
+        const fY  = y + DIVIDER + (h - DIVIDER) / 2;  // vertical center of footer
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+
+        const msgStr = `↑${node.msgCount}`;
+        ctx.font      = '600 9px Inter, -apple-system, sans-serif';
+        ctx.fillStyle = '#8b949e';
+        ctx.fillText(msgStr, x + PAD, fY);
+
+        if (node.lastActivity) {
+            const mW  = ctx.measureText(msgStr).width + 7;
+            const avW = w - PAD * 2 - mW;
+            let act   = node.lastActivity;
+            ctx.font  = '9px Inter, -apple-system, sans-serif';
+            ctx.fillStyle = '#57606a';
+            if (ctx.measureText(act).width > avW) {
+                while (act.length && ctx.measureText(act + '…').width > avW) act = act.slice(0, -1);
+                act += '…';
+            }
+            ctx.fillText(act, x + PAD + mW, fY);
         }
 
         ctx.restore();
@@ -565,14 +638,14 @@ class GraphRenderer {
         offscreen.height = h * this._dpr;
         const ctx = offscreen.getContext('2d');
         ctx.scale(this._dpr, this._dpr);
-        ctx.fillStyle = '#f6f8fa';
+        ctx.fillStyle = '#f5f7fa';
         ctx.fillRect(0, 0, w, h);
-        const spacing = 28;
-        ctx.fillStyle = '#d0d7de';
+        const spacing = 26;
+        ctx.fillStyle = '#cdd1d6';
         for (let x = spacing / 2; x < w; x += spacing) {
             for (let y = spacing / 2; y < h; y += spacing) {
                 ctx.beginPath();
-                ctx.arc(x, y, 1, 0, Math.PI * 2);
+                ctx.arc(x, y, 0.9, 0, Math.PI * 2);
                 ctx.fill();
             }
         }

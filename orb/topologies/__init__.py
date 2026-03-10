@@ -1,3 +1,4 @@
-from .triangle import create_triangle
+from .triad import create_triad
+from .dual_review import create_dual_review
 
-__all__ = ["create_triangle"]
+__all__ = ["create_triad", "create_dual_review"]

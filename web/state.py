@@ -83,7 +83,7 @@ class DashboardState:
                     "depth": m.depth,
                     "elapsed": m.elapsed,
                     "chain_id": m.chain_id,
-                    "type": m.msg_type,
+                    "msg_type": m.msg_type,
                     "context_slice": m.context_slice,
                 }
                 for m in self.messages

@@ -15,13 +15,15 @@ from ..messaging.message import Message, MessageType
 from .base import AgentNode
 from .conversation import ConversationHistory
 from .prompt_builder import build_system_prompt
-from .tools import send_message_tool, complete_task_tool
+from .tools import send_message_tool, complete_task_tool, filesystem_tools
 from .types import AgentConfig, AgentStatus
 
 logger = logging.getLogger(__name__)
 
 # Callback for when an agent completes
 CompletionCallback = Callable[[str, str], Awaitable[None] | None]
+# Callback for agent activity updates (agent_id, activity_text)
+ActivityCallback = Callable[[str, str], Awaitable[None] | None]
 
 
 class LLMAgent(AgentNode):
@@ -35,6 +37,7 @@ class LLMAgent(AgentNode):
         providers: dict[str, LLMClient],
         model_overrides: dict[ModelTier, ModelConfig] | None = None,
         on_complete: CompletionCallback | None = None,
+        on_activity: ActivityCallback | None = None,
         tier_override: ModelTier | None = None,
     ) -> None:
         super().__init__(config, channel, bus)
@@ -44,10 +47,18 @@ class LLMAgent(AgentNode):
         self._conversation = ConversationHistory(max_messages=config.max_history)
         self._memory = MemoryGraph()
         self._on_complete = on_complete
+        self._on_activity = on_activity
         self._tier_override = tier_override
         self._system_prompt: str = ""
         self._tools: list[dict] = []
         self._memory_counter = 0
+
+    async def _emit(self, activity: str) -> None:
+        """Fire the activity callback if set."""
+        if self._on_activity:
+            cb = self._on_activity(self.node_id, activity)
+            if asyncio.iscoroutine(cb):
+                await cb
 
     def initialize(self, neighbor_roles: dict[str, str]) -> None:
         """Set up system prompt and tools after graph is configured."""
@@ -55,11 +66,14 @@ class LLMAgent(AgentNode):
             role=self.config.role,
             description=self.config.description,
             neighbors=neighbor_roles,
+            enable_filesystem=self.config.enable_filesystem,
         )
         self._tools = [
             send_message_tool(sorted(neighbor_roles.keys())),
             complete_task_tool(),
         ]
+        if self.config.enable_filesystem:
+            self._tools.extend(filesystem_tools())
 
     async def process(self, msg: Message) -> None:
         # Handle consensus shutdown: skip LLM and auto-complete immediately.
@@ -110,20 +124,46 @@ class LLMAgent(AgentNode):
             model_config=model_config,
         )
 
-        try:
-            response = await provider.complete(request)
-        except Exception as exc:
-            logger.warning(f"LLM call failed for agent {self.node_id} ({model_config.provider}): {exc}")
-            # Try cloud fallback — skip the tier that already failed
-            fallback_response = None
-            for fallback_tier in [t for t in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG] if t != tier]:
-                fallback_config = self._model_overrides.get(fallback_tier, DEFAULT_MODELS.get(fallback_tier))
-                if (
-                    fallback_config
-                    and fallback_config.provider != model_config.provider
-                    and fallback_config.provider in self._providers
-                ):
-                    logger.warning(f"Retrying with fallback {fallback_config.provider!r}")
+        logger.debug(
+            f"[{self.node_id}] LLM call → model={model_config.model_id} "
+            f"messages={len(request.messages)} system_len={len(self._system_prompt)}"
+        )
+        logger.debug(f"[{self.node_id}] system_prompt:\n{self._system_prompt}")
+        for i, m in enumerate(request.messages):
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = " | ".join(
+                    (c.get("text", "") if c.get("type") == "text" else f"[{c.get('type','?')}]")
+                    for c in content
+                )
+            logger.debug(f"[{self.node_id}] msg[{i}] {role}: {str(content)[:300]}")
+
+        MAX_TOOL_NUDGES = 3
+        nudge_count = 0
+
+        while True:
+            await self._emit(f"Calling {model_config.model_id}…")
+            try:
+                response = await provider.complete(request)
+            except Exception as exc:
+                logger.warning(f"LLM call failed for agent {self.node_id} ({model_config.provider}): {exc}")
+                # Try cloud fallback — different provider, same or lower tier
+                from ..llm.types import OPENAI_MODELS, CODEX_MODELS
+                fallback_response = None
+                fallback_candidates = []
+                for fallback_tier in [ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]:
+                    for cfg in [
+                        self._model_overrides.get(fallback_tier),
+                        DEFAULT_MODELS.get(fallback_tier),
+                        CODEX_MODELS.get(fallback_tier),
+                        OPENAI_MODELS.get(fallback_tier),
+                    ]:
+                        if cfg and cfg.provider != model_config.provider and cfg.provider in self._providers:
+                            fallback_candidates.append(cfg)
+
+                for fallback_config in fallback_candidates:
+                    logger.warning(f"Retrying with fallback {fallback_config.provider!r} / {fallback_config.model_id}")
                     fallback_request = CompletionRequest(
                         messages=request.messages,
                         tools=request.tools,
@@ -136,37 +176,103 @@ class LLMAgent(AgentNode):
                         break
                     except Exception as exc2:
                         logger.warning(f"Fallback also failed: {exc2}")
-            if fallback_response is None:
-                logger.error(f"All providers failed for agent {self.node_id}")
-                return
-            response = fallback_response
+                if fallback_response is None:
+                    logger.error(f"All providers failed for agent {self.node_id}")
+                    return
+                response = fallback_response
 
-        logger.info(
-            f"Agent {self.node_id} used model {response.model} "
-            f"(tier={tier.value}, tokens={response.usage})"
-        )
+            logger.info(
+                f"Agent {self.node_id} used model {response.model} "
+                f"(tier={tier.value}, tokens={response.usage})"
+            )
+            if response.content:
+                logger.debug(f"[{self.node_id}] response text: {response.content[:500]}")
+            for tc in response.tool_calls:
+                logger.debug(f"[{self.node_id}] tool_call: {tc.name}({tc.input})")
 
-        # Build assistant message content for history
-        assistant_content: list[dict] = []
-        if response.content:
-            assistant_content.append({"type": "text", "text": response.content})
-        for tc in response.tool_calls:
-            assistant_content.append({
-                "type": "tool_use",
-                "id": tc.id,
-                "name": tc.name,
-                "input": tc.input,
-            })
+            # Build assistant message content for history
+            assistant_content: list[dict] = []
+            if response.content:
+                assistant_content.append({"type": "text", "text": response.content})
+            for tc in response.tool_calls:
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input": tc.input,
+                })
 
-        if assistant_content:
-            self._conversation.add_assistant(assistant_content)
+            if assistant_content:
+                self._conversation.add_assistant(assistant_content)
 
-        # Process tool calls
-        for tc in response.tool_calls:
-            if tc.name == "send_message":
-                await self._handle_send(msg, tc.id, tc.input, response.model)
-            elif tc.name == "complete_task":
-                await self._handle_complete(tc.id, tc.input)
+            # If no tool calls were made, nudge the model to use one
+            if not response.tool_calls:
+                if nudge_count >= MAX_TOOL_NUDGES:
+                    logger.warning(
+                        f"Agent {self.node_id} produced {MAX_TOOL_NUDGES} text-only responses; "
+                        "giving up waiting for tool call"
+                    )
+                    break
+                nudge_count += 1
+                logger.info(f"Agent {self.node_id} returned text without tool call — nudging ({nudge_count}/{MAX_TOOL_NUDGES})")
+                nudge = (
+                    "You must use one of your tools to continue. "
+                    "Do NOT write a plain text reply. "
+                    "Call `send_message` to communicate with another agent, "
+                    "or call `complete_task` if your work is fully done."
+                )
+                self._conversation.add_user(nudge)
+                request = CompletionRequest(
+                    messages=self._conversation.get_messages(),
+                    tools=self._tools,
+                    system=self._system_prompt,
+                    model_config=model_config,
+                )
+                continue
+
+            # Process tool calls
+            for tc in response.tool_calls:
+                if tc.name == "send_message":
+                    to = tc.input.get("to", "?")
+                    await self._emit(f"Sending message to {to}…")
+                    await self._handle_send(msg, tc.id, tc.input, response.model)
+                elif tc.name == "complete_task":
+                    await self._emit("Completing task…")
+                    await self._handle_complete(tc.id, tc.input)
+                elif tc.name == "write_file":
+                    path = tc.input.get("path", "?")
+                    await self._emit(f"Writing {path}")
+                    await self._handle_write_file(tc.id, tc.input)
+                elif tc.name == "read_file":
+                    path = tc.input.get("path", "?")
+                    await self._emit(f"Reading {path}")
+                    await self._handle_read_file(tc.id, tc.input)
+                elif tc.name == "list_directory":
+                    path = tc.input.get("path", ".") or "."
+                    await self._emit(f"Listing {path}")
+                    await self._handle_list_directory(tc.id, tc.input)
+                elif tc.name == "run_command":
+                    cmd = tc.input.get("command", "")[:60]
+                    await self._emit(f"$ {cmd}")
+                    await self._handle_run_command(tc.id, tc.input)
+
+            # After filesystem tool calls (no send/complete), loop back so the
+            # agent can act on the results immediately (e.g. read → write → send)
+            has_action = any(
+                tc.name in ("send_message", "complete_task")
+                for tc in response.tool_calls
+            )
+            if not has_action and response.tool_calls:
+                # All calls were filesystem ops — add results and let the model continue
+                request = CompletionRequest(
+                    messages=self._conversation.get_messages(),
+                    tools=self._tools,
+                    system=self._system_prompt,
+                    model_config=model_config,
+                )
+                continue
+
+            break
 
         self._selector.reset_retries()
 
@@ -215,6 +321,55 @@ class LLMAgent(AgentNode):
             cb_result = self._on_complete(self.node_id, result)
             if asyncio.iscoroutine(cb_result):
                 await cb_result
+
+    def _sandbox(self):
+        """Return the agent's sandbox, creating a fallback if none was configured."""
+        if self.config.sandbox:
+            return self.config.sandbox
+        # Lazy fallback: create a per-agent sandbox if none was injected
+        if not hasattr(self, "_fallback_sandbox"):
+            from ..sandbox.sandbox import Sandbox
+            self._fallback_sandbox = Sandbox()
+        return self._fallback_sandbox
+
+    async def _handle_write_file(self, tool_id: str, input_data: dict) -> None:
+        path = input_data.get("path", "").strip()
+        content = input_data.get("content", "")
+        if not path:
+            self._conversation.add_tool_result(tool_id, "Error: path is required")
+            return
+        try:
+            result = self._sandbox().write_file(path, content)
+            self._conversation.add_tool_result(tool_id, result)
+        except Exception as e:
+            self._conversation.add_tool_result(tool_id, f"Error writing {path}: {e}")
+
+    async def _handle_read_file(self, tool_id: str, input_data: dict) -> None:
+        path = input_data.get("path", "").strip()
+        if not path:
+            self._conversation.add_tool_result(tool_id, "Error: path is required")
+            return
+        try:
+            content = self._sandbox().read_file(path)
+            self._conversation.add_tool_result(tool_id, content)
+        except Exception as e:
+            self._conversation.add_tool_result(tool_id, f"Error reading {path}: {e}")
+
+    async def _handle_list_directory(self, tool_id: str, input_data: dict) -> None:
+        path = input_data.get("path", ".").strip() or "."
+        try:
+            listing = self._sandbox().list_directory(path)
+            self._conversation.add_tool_result(tool_id, listing)
+        except Exception as e:
+            self._conversation.add_tool_result(tool_id, f"Error listing {path}: {e}")
+
+    async def _handle_run_command(self, tool_id: str, input_data: dict) -> None:
+        command = input_data.get("command", "").strip()
+        if not command:
+            self._conversation.add_tool_result(tool_id, "Error: command is required")
+            return
+        result = await self._sandbox().run_command(command)
+        self._conversation.add_tool_result(tool_id, result)
 
     def _store_memory(self, msg: Message) -> None:
         self._memory_counter += 1
