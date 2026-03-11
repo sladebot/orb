@@ -1199,6 +1199,63 @@ body {
     overflow-y: auto;
 }
 
+/* ── Diff section ───────────────────────────────────── */
+.diff-section {
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+}
+.diff-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+.diff-toggle {
+    font-size: 10px;
+    padding: 2px 7px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+.diff-toggle:hover { background: var(--bg-overlay); }
+.diff-stat { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.diff-file {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--text-secondary);
+}
+.diff-body {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    max-height: 400px;
+    overflow-y: auto;
+    margin: 0;
+    white-space: pre;
+}
+.diff-body.hidden { display: none; }
+.diff-add      { color: #3fb950; display: block; }
+.diff-del      { color: #f85149; display: block; }
+.diff-hunk     { color: #58a6ff; display: block; }
+.diff-file-hdr { color: #e3b341; font-weight: 600; display: block; }
+.diff-meta     { color: #6e7681; display: block; }
+.diff-ctx      { color: #8b949e; display: block; }
+
 /* ── Prediction card ────────────────────────────────── */
 .prediction-card {
     padding: 10px 12px;

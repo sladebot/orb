@@ -18,6 +18,7 @@ orb/agent/types.py
 orb/cli/__init__.py
 orb/cli/auth.py
 orb/cli/config.py
+orb/cli/diff_capture.py
 orb/cli/display.py
 orb/cli/live_display.py
 orb/cli/main.py

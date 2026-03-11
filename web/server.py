@@ -564,6 +564,10 @@ class DashboardServer:
         original_on_complete = orchestrator._on_agent_complete
 
         async def wrapped_on_complete(agent_id, result):
+            agent_obj = orchestrator.agents.get(agent_id)
+            model = getattr(agent_obj, "_last_model", "") or ""
+            if model:
+                await bridge.on_agent_status(agent_id, "completed", model)
             await bridge.on_agent_complete(agent_id, result)
             await original_on_complete(agent_id, result)
 
@@ -610,9 +614,15 @@ class DashboardServer:
         synthesis_id = orchestrator.config.synthesis_agent
         if result and synthesis_id and synthesis_id in result.completions:
             final_result = result.completions[synthesis_id]
+            try:
+                from orb.cli.diff_capture import capture_diff
+                diff = capture_diff()
+            except Exception:
+                diff = ""
             await self.broadcast(json.dumps({
                 "type": "run_complete",
                 "result": final_result,
+                "diff": diff,
                 "elapsed": round(elapsed, 2),
             }))
 

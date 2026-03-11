@@ -867,23 +867,46 @@ class Dashboard {
         const elapsed = data.elapsed !== undefined ? data.elapsed.toFixed(1) + 's' : '';
 
         // Render final result card in the message log
+        const diff = data.diff || '';
         const el = document.createElement('div');
         el.className = 'final-result-card';
         el.innerHTML = `
             <div class="final-result-header">
-                <span class="final-result-title">Final Result</span>
+                <span class="final-result-title">✓ Run Complete</span>
                 ${elapsed ? `<span class="final-result-elapsed">${elapsed}</span>` : ''}
-                <button class="final-result-copy">Copy</button>
+                <button class="final-result-copy">Copy result</button>
             </div>
             <div class="final-result-body">${this._renderResult(result)}</div>
+            ${diff ? `
+            <div class="diff-section">
+                <div class="diff-section-header">
+                    <span>Files Changed</span>
+                    <button class="diff-toggle">Show diff ▾</button>
+                </div>
+                <div class="diff-stat">${this._renderDiffStat(diff)}</div>
+                <pre class="diff-body hidden">${this._renderDiff(diff)}</pre>
+            </div>` : ''}
         `;
         el.querySelector('.final-result-copy').addEventListener('click', () => {
             navigator.clipboard.writeText(result).then(() => {
                 const btn = el.querySelector('.final-result-copy');
                 btn.textContent = 'Copied!';
-                setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+                setTimeout(() => { btn.textContent = 'Copy result'; }, 1500);
             });
         });
+        if (diff) {
+            el.querySelector('.diff-toggle').addEventListener('click', (e) => {
+                const pre = el.querySelector('.diff-body');
+                const btn = e.target;
+                if (pre.classList.contains('hidden')) {
+                    pre.classList.remove('hidden');
+                    btn.textContent = 'Hide diff ▴';
+                } else {
+                    pre.classList.add('hidden');
+                    btn.textContent = 'Show diff ▾';
+                }
+            });
+        }
         this.messageLog.appendChild(el);
         this.messageLog.scrollTop = this.messageLog.scrollHeight;
 
@@ -892,6 +915,40 @@ class Dashboard {
         document.getElementById('result-elapsed').textContent = elapsed;
         document.getElementById('result-body').innerHTML = this._renderResult(result);
         document.getElementById('result-panel').classList.remove('hidden');
+    }
+
+    _renderDiffStat(diff) {
+        const files = [];
+        let added = 0, removed = 0;
+        for (const line of diff.split('\n')) {
+            if (line.startsWith('diff --git ')) {
+                const m = line.match(/ b\/(.+)$/);
+                if (m) files.push(m[1]);
+                added = 0; removed = 0;
+            } else if (line.startsWith('+') && !line.startsWith('+++')) {
+                added++;
+            } else if (line.startsWith('-') && !line.startsWith('---')) {
+                removed++;
+            }
+        }
+        return files.map(f => `<span class="diff-file">${this._escapeHtml(f)}</span>`).join('');
+    }
+
+    _renderDiff(diff) {
+        return diff.split('\n').map(line => {
+            const esc = this._escapeHtml(line);
+            if (line.startsWith('diff --git') || line.startsWith('index '))
+                return `<span class="diff-meta">${esc}</span>`;
+            if (line.startsWith('--- ') || line.startsWith('+++ '))
+                return `<span class="diff-file-hdr">${esc}</span>`;
+            if (line.startsWith('@@'))
+                return `<span class="diff-hunk">${esc}</span>`;
+            if (line.startsWith('+'))
+                return `<span class="diff-add">${esc}</span>`;
+            if (line.startsWith('-'))
+                return `<span class="diff-del">${esc}</span>`;
+            return `<span class="diff-ctx">${esc}</span>`;
+        }).join('\n');
     }
 
     // ── Utilities ─────────────────────────────────────────────

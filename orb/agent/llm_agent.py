@@ -196,9 +196,10 @@ class LLMAgent(AgentNode):
                     await self._handle_complete("all_providers_failed", {"result": f"[ERROR] {err}"})
                     return
 
+            self._last_model = response.model  # track for completion metadata
             logger.info(
                 f"Agent {self.node_id} used model {response.model} "
-                f"(tier={tier.value}, tokens={response.usage})"
+                f"(tier={model_config.tier.value}, tokens={response.usage})"
             )
             if response.content:
                 logger.debug(f"[{self.node_id}] response text: {response.content[:500]}")
@@ -331,6 +332,9 @@ class LLMAgent(AgentNode):
         self.status = AgentStatus.COMPLETED
         self._conversation.add_tool_result(tool_id, "Task marked as complete")
         logger.info(f"Agent {self.node_id} completed: {result[:100]}")
+
+        if self._on_activity:
+            self._on_activity(self.node_id, "")  # clear activity text
 
         if self._on_complete:
             cb_result = self._on_complete(self.node_id, result)

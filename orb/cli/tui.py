@@ -174,10 +174,12 @@ class OrbBusEvent(TUIMessage):
 
 class OrbRunComplete(TUIMessage):
     def __init__(self, error: str | None = None,
-                 completions: dict[str, str] | None = None) -> None:
+                 completions: dict[str, str] | None = None,
+                 diff: str = "") -> None:
         super().__init__()
         self.error = error
         self.completions = completions or {}
+        self.diff = diff
 
 
 class OrbAgentComplete(TUIMessage):
@@ -240,12 +242,13 @@ class ResultScreen(Screen):
     """
 
     def __init__(self, task: str, completions: dict[str, str],
-                 elapsed: float, msg_count: int) -> None:
+                 elapsed: float, msg_count: int, diff: str = "") -> None:
         super().__init__()
         self._task = task
         self._completions = completions
         self._elapsed = elapsed
         self._msg_count = msg_count
+        self._diff = diff
 
     def compose(self) -> ComposeResult:
         yield Static(id="rs-header")
@@ -254,7 +257,6 @@ class ResultScreen(Screen):
         yield Static(id="rs-footer")
 
     def on_mount(self) -> None:
-        # Header
         hdr = self.query_one("#rs-header", Static)
         t = RichText()
         t.append("✓ Run Complete\n", style="bold green")
@@ -262,21 +264,47 @@ class ResultScreen(Screen):
         t.append(f"  {self._msg_count} messages  ·  {self._elapsed:.1f}s", style="dim")
         hdr.update(t)
 
-        # Footer
         ftr = self.query_one("#rs-footer", Static)
         ftr.update("[dim][q/Esc] back  [s] save to file[/dim]")
 
-        # Results per agent
         log = self.query_one("#rs-log", RichLog)
+
+        # ── Files changed (git diff) ──────────────────────────────────────
+        if self._diff:
+            from ..cli.diff_capture import parse_diff_files
+            files = parse_diff_files(self._diff)
+            log.write("[bold yellow]── Files Changed ────────────────────────[/bold yellow]")
+            for f in files:
+                log.write(f"  [cyan]{f['path']}[/cyan]  [dim]{f['stat']}[/dim]")
+            log.write("")
+            log.write("[bold yellow]── Diff ─────────────────────────────────[/bold yellow]")
+            for line in self._diff.splitlines():
+                if line.startswith("diff --git") or line.startswith("index "):
+                    log.write(f"[dim]{line}[/dim]")
+                elif line.startswith("--- ") or line.startswith("+++ "):
+                    log.write(f"[bold]{line}[/bold]")
+                elif line.startswith("@@"):
+                    log.write(f"[cyan]{line}[/cyan]")
+                elif line.startswith("+"):
+                    log.write(f"[green]{line}[/green]")
+                elif line.startswith("-"):
+                    log.write(f"[red]{line}[/red]")
+                else:
+                    log.write(f"[dim]{line}[/dim]")
+            log.write("")
+        else:
+            log.write("[dim]No file changes detected (git diff empty).[/dim]\n")
+
+        # ── Agent results ─────────────────────────────────────────────────
+        log.write("[bold white]── Agent Results ────────────────────────[/bold white]")
         ordered = [a for a in AGENT_ORDER if a in self._completions]
         ordered += [a for a in self._completions if a not in AGENT_ORDER]
         for agent_id in ordered:
             result = self._completions[agent_id]
             color  = AGENT_COLORS.get(agent_id, "white")
             label  = AGENT_LABELS.get(agent_id, agent_id.title())
-            log.write(f"[bold {color}]── {label} ──────────────────────────[/bold {color}]")
+            log.write(f"\n[bold {color}]── {label}[/bold {color}]")
             log.write(result)
-            log.write("")
 
     def action_dismiss_screen(self) -> None:
         self.app.pop_screen()
@@ -288,6 +316,8 @@ class ResultScreen(Screen):
         lines = [f"# Orb Result\n\n**Task:** {self._task}\n\n"
                  f"**Elapsed:** {self._elapsed:.1f}s  "
                  f"**Messages:** {self._msg_count}\n\n"]
+        if self._diff:
+            lines.append(f"## Files Changed\n\n```diff\n{self._diff}\n```\n\n")
         for agent_id, result in self._completions.items():
             label = AGENT_LABELS.get(agent_id, agent_id.title())
             lines.append(f"## {label}\n\n{result}\n\n")
@@ -732,6 +762,7 @@ class OrbTUI(App[None]):
         self._completions: dict[str, str] = {}
         self._last_query: str = ""
         self._last_elapsed: float = 0.0
+        self._last_diff: str = ""
 
         # Animation state
         self._tick_count: int = 0
@@ -755,7 +786,7 @@ class OrbTUI(App[None]):
         yield ModeBar(state=self, id="mode-bar")
 
         with Vertical(id="log-panel"):
-            yield Static(" 📋 Logs", id="log-panel-header")
+            yield Static(" Logs  [dim]~/.orb/run.log  ·  orb logs -f to stream outside TUI[/dim]", id="log-panel-header")
             yield RichLog(id="log-feed", highlight=False, markup=True, wrap=True)
 
         with Horizontal(id="query-bar"):
@@ -937,6 +968,12 @@ class OrbTUI(App[None]):
 
                     orig = orchestrator._on_agent_complete
                     async def patched_bridge(aid: str, res: str) -> None:
+                        # Propagate the model to the dashboard for agents that
+                        # complete without sending a message (e.g. tester/reviewer)
+                        agent_obj = orchestrator.agents.get(aid)
+                        model = getattr(agent_obj, "_last_model", "") or ""
+                        if model:
+                            await bridge.on_agent_status(aid, "completed", model)
                         await bridge.on_agent_complete(aid, res)
                         self.post_message(OrbAgentComplete(aid, res))
                         await orig(aid, res)
@@ -948,9 +985,12 @@ class OrbTUI(App[None]):
 
             self._refresh_all()
             run_result = await orchestrator.run(query)
+            from ..cli.diff_capture import capture_diff
+            diff = capture_diff()
             self.post_message(OrbRunComplete(
                 error=run_result.error,
                 completions=dict(run_result.completions),
+                diff=diff,
             ))
 
         except Exception as e:
@@ -1067,6 +1107,7 @@ class OrbTUI(App[None]):
     def on_orb_run_complete(self, event: OrbRunComplete) -> None:
         self._current_orchestrator = None
         self._completions = event.completions
+        self._last_diff = event.diff
 
         if self._run_start:
             self._last_elapsed = time() - self._run_start
@@ -1235,6 +1276,7 @@ class OrbTUI(App[None]):
             completions=self._completions,
             elapsed=self._last_elapsed,
             msg_count=self._routed,
+            diff=self._last_diff,
         ))
 
     def action_cancel_run(self) -> None:

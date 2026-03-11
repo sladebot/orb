@@ -18,6 +18,82 @@ from .repl import run_repl
 
 
 
+LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
+_LEVEL_COLORS = {
+    "DEBUG":    "\033[2m",       # dim
+    "INFO":     "\033[36m",      # cyan
+    "WARNING":  "\033[33m",      # yellow
+    "ERROR":    "\033[31m",      # red
+    "CRITICAL": "\033[1;31m",    # bold red
+}
+_RESET = "\033[0m"
+
+
+def _setup_log_file(fmt: str) -> None:
+    from logging.handlers import RotatingFileHandler
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(fh)
+
+
+def _cmd_logs(args: argparse.Namespace) -> None:
+    import collections
+
+    if args.clear:
+        open(LOG_FILE, "w").close()
+        print(f"Cleared {LOG_FILE}")
+        return
+
+    if not os.path.exists(LOG_FILE):
+        print(f"No log file yet. Run orb first. ({LOG_FILE})")
+        return
+
+    min_level = getattr(logging, args.level, logging.DEBUG)
+    follow = args.follow and not args.no_follow
+
+    def _matches(line: str) -> bool:
+        for lvl in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            if f" {lvl} " in line or f" {lvl}\t" in line:
+                return getattr(logging, lvl, 0) >= min_level
+        return min_level <= logging.DEBUG  # unknown format — show if DEBUG
+
+    def _colorize(line: str) -> str:
+        for lvl, color in _LEVEL_COLORS.items():
+            if f" {lvl} " in line or f" {lvl}\t" in line:
+                return f"{color}{line}{_RESET}"
+        return line
+
+    # Print last N lines first
+    with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+        tail = collections.deque(f, maxlen=args.lines)
+    for line in tail:
+        line = line.rstrip()
+        if _matches(line):
+            print(_colorize(line))
+
+    if not follow:
+        return
+
+    # Follow mode — stream new lines
+    print(f"\033[2m--- following {LOG_FILE} (Ctrl+C to stop) ---{_RESET}")
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # seek to end
+            while True:
+                line = f.readline()
+                if line:
+                    line = line.rstrip()
+                    if _matches(line):
+                        print(_colorize(line), flush=True)
+                else:
+                    import time
+                    time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="orb",
@@ -34,6 +110,14 @@ def parse_args() -> argparse.Namespace:
     anthropic_auth.add_argument("--api-key", metavar="SK", required=True, help="Anthropic API key (sk-ant-...)")
     auth_sub.add_parser("status", help="Show current auth status")
     auth_sub.add_parser("logout", help="Revoke all stored credentials")
+
+    # orb logs
+    logs_parser = subparsers.add_parser("logs", help="Stream logs from a running orb process")
+    logs_parser.add_argument("-f", "--follow", action="store_true", default=True, help="Follow log output (default: on)")
+    logs_parser.add_argument("--no-follow", action="store_true", help="Print existing logs and exit")
+    logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of past lines to show (default: 50)")
+    logs_parser.add_argument("--level", choices=["DEBUG","INFO","WARNING","ERROR"], default="DEBUG", help="Minimum log level to show")
+    logs_parser.add_argument("--clear", action="store_true", help="Clear the log file")
 
     # orb config [get|set|show]
     cfg_parser = subparsers.add_parser("config", help="View or change persistent settings")
@@ -116,14 +200,21 @@ async def async_main() -> None:
                 sys.exit(1)
         return
 
+    # ── logs subcommand ───────────────────────────────────────────────────────
+    if args.subcommand == "logs":
+        _cmd_logs(args)
+        return
+
+    fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
     if args.verbose and not args.quiet:
-        fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
         logging.basicConfig(level=logging.DEBUG, format=fmt)
-        # Silence noisy third-party libraries
         for noisy in ("httpx", "httpcore", "anthropic", "openai", "asyncio", "urllib3"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
     else:
         logging.basicConfig(level=logging.WARNING)
+
+    # Always write to ~/.orb/run.log so 'orb logs' can stream it
+    _setup_log_file(fmt)
 
     trace = args.trace and not args.no_trace
     providers = build_providers(
