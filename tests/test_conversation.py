@@ -219,6 +219,52 @@ class TestConversationHistory:
         )
         assert not is_tool_result, "History must not start with a tool_result"
 
+    def test_trim_parallel_tool_calls_no_orphan(self):
+        """Trim fires mid-parallel-tool-call; all tool_results must still match their tool_use.
+
+        This is the root cause of:
+          messages.0.content.1: unexpected tool_use_id in tool_result blocks
+        Trim was dropping the parent assistant:[tool_use(A,B)] and leaving tool_result(B) orphaned.
+        """
+        h = ConversationHistory(max_messages=6)
+        h.add_user("initial task")
+        # Fill to near limit with single-tool rounds
+        for i in range(4):
+            h.add_assistant([{"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}}])
+            h.add_tool_result(f"t{i}", f"result {i}")
+        # Now add a parallel tool call (2 tools in one response) — this should trigger trim
+        h.add_assistant([
+            {"type": "tool_use", "id": "tA", "name": "read_file", "input": {}},
+            {"type": "tool_use", "id": "tB", "name": "read_file", "input": {}},
+        ])
+        h.add_tool_result("tA", "file A content")
+        h.add_tool_result("tB", "file B content")
+
+        msgs = h.get_messages()
+
+        # Build a set of all tool_use ids present
+        tool_use_ids: set[str] = set()
+        for m in msgs:
+            if m["role"] == "assistant":
+                c = m.get("content", [])
+                if isinstance(c, list):
+                    for b in c:
+                        if b.get("type") == "tool_use":
+                            tool_use_ids.add(b["id"])
+
+        # Every tool_result must reference an existing tool_use
+        for i, m in enumerate(msgs):
+            if m["role"] == "user":
+                c = m.get("content", [])
+                if isinstance(c, list):
+                    for b in c:
+                        if b.get("type") == "tool_result":
+                            tid = b.get("tool_use_id", "")
+                            assert tid in tool_use_ids, (
+                                f"Orphaned tool_result {tid!r} at message {i}. "
+                                f"Known tool_use ids: {tool_use_ids}"
+                            )
+
     def test_trim_preserves_first_message(self):
         h = ConversationHistory(max_messages=4)
         h.add_user("ORIGINAL TASK")

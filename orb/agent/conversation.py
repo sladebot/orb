@@ -94,7 +94,21 @@ class ConversationHistory:
                 start = i
                 break
 
-        self.messages = [self.messages[0]] + tail[start:]
+        trimmed_tail = tail[start:]
+        if not trimmed_tail:
+            # Fallback dropped everything — preserve the last complete tool-call
+            # pair (assistant:[tool_use…] + user:[tool_result…]) so that pending
+            # parallel tool_results can still reference their parent tool_use.
+            # Walk backward in tail to find the latest valid slice (no orphans).
+            for j in range(len(tail) - 1, -1, -1):
+                candidate = tail[j:]
+                if not _has_orphan(candidate, _tool_use_ids(candidate)):
+                    trimmed_tail = candidate
+                    break
+            # Final safety: if still empty, at minimum keep the last message.
+            if not trimmed_tail and self.messages[-1] is not self.messages[0]:
+                trimmed_tail = [self.messages[-1]]
+        self.messages = [self.messages[0]] + trimmed_tail
 
     def clear(self) -> None:
         self.messages.clear()
