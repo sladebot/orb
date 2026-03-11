@@ -222,6 +222,7 @@ class ResultScreen(Screen):
         Binding("escape", "dismiss_screen", "Back"),
         Binding("q",      "dismiss_screen", "Back"),
         Binding("s",      "save_results",   "Save to file"),
+        Binding("y",      "copy_result",    "Copy result"),
     ]
 
     DEFAULT_CSS = """
@@ -274,7 +275,7 @@ class ResultScreen(Screen):
         hdr.update(t)
 
         ftr = self.query_one("#rs-footer", Static)
-        ftr.update("[dim][q/Esc] back  [s] save to file[/dim]")
+        ftr.update("[dim][q/Esc] back  [s] save  [y] copy result  [bold]shift+drag[/bold] terminal select[/dim]")
 
         log = self.query_one("#rs-log", RichLog)
 
@@ -317,6 +318,20 @@ class ResultScreen(Screen):
 
     def action_dismiss_screen(self) -> None:
         self.app.pop_screen()
+
+    def action_copy_result(self) -> None:
+        """Copy the coordinator/synthesis result to clipboard."""
+        synth_order = ["coordinator"] + [a for a in AGENT_ORDER if a != "coordinator"]
+        text = ""
+        for aid in synth_order:
+            if aid in self._completions:
+                text = self._completions[aid]
+                break
+        if text:
+            self.app.copy_to_clipboard(text)
+            self.app.notify("Result copied to clipboard", severity="information", timeout=2)
+        else:
+            self.app.notify("Nothing to copy", severity="warning", timeout=2)
 
     def action_save_results(self) -> None:
         import datetime
@@ -828,6 +843,7 @@ class OrbTUI(App[None]):
         Binding("r",          "show_results", "Results"),
         Binding("ctrl+k",     "cancel_run",   "Cancel run"),
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
+        Binding("y",          "copy_result",  "Copy result"),
         Binding("ctrl+enter", "submit_input", "Send", show=False),
         Binding("1", "select('coordinator')",         show=False),
         Binding("2", "select('coder')",               show=False),
@@ -919,7 +935,7 @@ class OrbTUI(App[None]):
 
     def on_mount(self) -> None:
         feed = self.query_one("#message-feed", RichLog)
-        feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line text freely.[/dim]")
+        feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line freely. [bold]y[/bold]=copy result  [bold]shift+drag[/bold]=terminal select[/dim]")
         self.query_one("#query-input", TextArea).focus()
         self._elapsed_task = asyncio.create_task(self._tick())
 
@@ -1655,6 +1671,35 @@ class OrbTUI(App[None]):
 
     def action_clear_feed(self) -> None:
         self.query_one("#message-feed", RichLog).clear()
+
+    def action_copy_result(self) -> None:
+        """Copy the selected agent's result (or synthesis result) to clipboard."""
+        text = ""
+
+        # Prefer selected agent's last completion result
+        if self._selected_agent and self._selected_agent in self._completions:
+            text = self._completions[self._selected_agent]
+
+        # Fall back to synthesis / first completion
+        if not text and self._completions:
+            synth = "coordinator"
+            text = self._completions.get(synth) or next(iter(self._completions.values()), "")
+
+        # Fall back to code panel content (last written file)
+        if not text:
+            try:
+                log = self.query_one("#code-log", RichLog)
+                # RichLog stores rendered lines; grab the plain text
+                lines = [seg.text for line in log._lines for seg in line._spans]
+                text = "".join(lines).strip()
+            except Exception:
+                pass
+
+        if text:
+            self.copy_to_clipboard(text)
+            self.notify("Copied to clipboard", severity="information", timeout=2)
+        else:
+            self.notify("Nothing to copy yet", severity="warning", timeout=2)
 
     def action_quit(self) -> None:
         if self._elapsed_task:
