@@ -865,15 +865,20 @@ class Dashboard {
 
         const result = data.result || '';
         const elapsed = data.elapsed !== undefined ? data.elapsed.toFixed(1) + 's' : '';
+        const sessionTurn = data.session_turn || 0;
 
         // Render final result card in the message log
         const diff = data.diff || '';
+        const followUpHint = sessionTurn > 0
+            ? `<span class="followup-hint">↩ type a follow-up to continue this session</span>`
+            : '';
         const el = document.createElement('div');
         el.className = 'final-result-card';
         el.innerHTML = `
             <div class="final-result-header">
                 <span class="final-result-title">✓ Run Complete</span>
                 ${elapsed ? `<span class="final-result-elapsed">${elapsed}</span>` : ''}
+                ${followUpHint}
                 <button class="final-result-copy">Copy result</button>
             </div>
             <div class="final-result-body">${this._renderResult(result)}</div>

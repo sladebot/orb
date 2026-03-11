@@ -1177,6 +1177,12 @@ body {
     color: var(--coordinator);
     flex: 1;
 }
+.followup-hint {
+    font-size: 11px;
+    color: #7ec8e3;
+    opacity: 0.8;
+    font-style: italic;
+}
 .final-result-elapsed {
     font-size: 11px;
     color: var(--text-muted);

@@ -35,6 +35,10 @@ class DashboardServer:
         self._model_overrides = None
         self._tier_override = None
 
+        # Conversational continuity across runs
+        self._session_history: list[dict] = []       # [{query, result}] per completed run
+        self._conv_carryover: dict[str, list] = {}   # agent_id → conversation messages
+
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/api/state", self._state_handler)
         self._app.router.add_post("/api/inject", self._inject_handler)
@@ -609,6 +613,23 @@ class DashboardServer:
         for agent in orchestrator.agents.values():
             agent._on_activity = on_agent_activity
 
+        # ── Conversational continuity ──────────────────────────────────────────
+        # Build context preamble from prior session runs
+        if self._session_history:
+            lines = ["=== Prior session context ==="]
+            for i, h in enumerate(self._session_history[-5:], 1):
+                lines.append(f"[{i}] User: {h['query']}")
+                if h["result"]:
+                    lines.append(f"     Result: {h['result'][:200]}")
+            lines.append("=== End of prior context ===\n")
+            query = "\n".join(lines) + query
+
+        # Restore agent conversation histories from the previous run
+        if self._conv_carryover:
+            for aid, agent in orchestrator.agents.items():
+                if aid in self._conv_carryover and self._conv_carryover[aid]:
+                    agent._conversation.messages = list(self._conv_carryover[aid])
+
         # Store agent refs for message injection
         self.set_agents(orchestrator.agents)
 
@@ -619,6 +640,21 @@ class DashboardServer:
             result = None
         else:
             self.state.completed = True
+
+        # Save conversation histories and session summary for next run
+        self._conv_carryover = {
+            aid: list(agent._conversation.messages)
+            for aid, agent in orchestrator.agents.items()
+        }
+        synthesis_id = orchestrator.config.synthesis_agent
+        if result:
+            summary = (
+                result.completions.get(synthesis_id, "")
+                or next(iter(result.completions.values()), "")
+            )
+        else:
+            summary = ""
+        self._session_history.append({"query": query.split("=== End of prior context ===\n")[-1], "result": summary[:300]})
 
         # Broadcast final stats
         elapsed = time.time() - self.state.start_time
@@ -649,6 +685,7 @@ class DashboardServer:
                 "result": final_result,
                 "diff": diff,
                 "elapsed": round(elapsed, 2),
+                "session_turn": len(self._session_history),
             }))
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:

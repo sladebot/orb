@@ -851,6 +851,10 @@ class OrbTUI(App[None]):
         self._last_elapsed: float = 0.0
         self._last_diff: str = ""
 
+        # Conversational continuity
+        self._session_history: list[dict] = []       # [{query, result}] per completed run
+        self._conv_carryover: dict[str, list] = {}   # agent_id → conversation messages
+
         # Animation state
         self._tick_count: int = 0
         self._active_edges: dict[tuple[str, str], int] = {}  # edge -> expiry tick
@@ -1028,6 +1032,24 @@ class OrbTUI(App[None]):
                     agent_id=agent_id, role=agent.config.role
                 )
 
+            # ── Conversational continuity ──────────────────────────────────
+            # Build a session context preamble so agents remember prior runs
+            if self._session_history:
+                lines = ["=== Prior session context ==="]
+                for i, h in enumerate(self._session_history[-5:], 1):
+                    lines.append(f"[{i}] User: {h['query']}")
+                    if h["result"]:
+                        lines.append(f"     Result: {h['result'][:200]}")
+                lines.append("=== End of prior context ===\n")
+                query = "\n".join(lines) + query
+
+            # Restore agent conversation histories from the previous run so the
+            # LLMs remember what they wrote / reviewed without re-reading files
+            if self._conv_carryover:
+                for aid, agent in orchestrator.agents.items():
+                    if aid in self._conv_carryover and self._conv_carryover[aid]:
+                        agent._conversation.messages = list(self._conv_carryover[aid])
+
             # Wire on_activity and on_file_write callbacks
             for agent_id, agent in orchestrator.agents.items():
                 aid = agent_id
@@ -1107,6 +1129,23 @@ class OrbTUI(App[None]):
 
             self._refresh_all()
             run_result = await orchestrator.run(query)
+
+            # Save conversation histories for next run before agents are GC'd
+            self._conv_carryover = {
+                aid: list(agent._conversation.messages)
+                for aid, agent in orchestrator.agents.items()
+            }
+            # Append to session history for context preamble
+            synthesis_id = orchestrator.config.synthesis_agent
+            summary = (
+                run_result.completions.get(synthesis_id, "")
+                or next(iter(run_result.completions.values()), "")
+            )
+            self._session_history.append({
+                "query": self._last_query,
+                "result": summary[:300],
+            })
+
             from ..cli.diff_capture import capture_diff
             diff = capture_diff()
             self.post_message(OrbRunComplete(
@@ -1325,10 +1364,13 @@ class OrbTUI(App[None]):
                     info.set_status("completed")
                 info.activity_text = ""
 
+            followup_hint = (
+                "  type to follow up" if self._session_history else ""
+            )
             feed.write(
                 f"\n[bold green]✓ Complete[/bold green]"
                 f"[dim]  {self._routed} messages · {self._last_elapsed:.1f}s"
-                f"  press [/dim][cyan]r[/cyan][dim] for full results[/dim]"
+                f"  press [/dim][cyan]r[/cyan][dim] for full results{followup_hint}[/dim]"
             )
 
             # Auto-select coordinator to show synthesis result
