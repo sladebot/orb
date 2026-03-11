@@ -1157,4 +1157,19 @@ class Dashboard {
 // Initialize on load
 window.addEventListener('DOMContentLoaded', () => {
     window.dashboard = new Dashboard();
+
+    // Mobile: graph toggle button
+    const graphToggleBtn = document.getElementById('graph-toggle-btn');
+    const graphPanel = document.getElementById('graph-panel');
+    const graphToggleLabel = document.getElementById('graph-toggle-label');
+    if (graphToggleBtn && graphPanel) {
+        graphToggleBtn.addEventListener('click', () => {
+            const visible = graphPanel.classList.toggle('mobile-visible');
+            graphToggleLabel.textContent = visible ? 'Hide Agent Graph' : 'Show Agent Graph';
+            if (visible && window.dashboard && window.dashboard.graph) {
+                // Wait for CSS height transition to finish, then resize canvas
+                setTimeout(() => window.dashboard.graph._resize(), 300);
+            }
+        });
+    }
 });

@@ -74,6 +74,7 @@ class LLMAgent(AgentNode):
             description=self.config.description,
             neighbors=all_neighbors,
             enable_filesystem=self.config.enable_filesystem,
+            suppress_context_guidelines=self.config.suppress_context_guidelines,
         )
         self._tools = [
             send_message_tool(sorted(all_neighbors.keys())),

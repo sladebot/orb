@@ -26,3 +26,4 @@ class AgentConfig:
     pinned_model: ModelConfig | None = None  # bypasses tier selection when set
     enable_filesystem: bool = False          # give agent read/write/run tools
     sandbox: "Sandbox | None" = None        # shared sandbox for this run
+    suppress_context_guidelines: bool = False  # omit generic context-sharing hints from system prompt

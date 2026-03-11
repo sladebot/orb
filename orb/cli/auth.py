@@ -13,6 +13,9 @@ from threading import Event, Thread
 
 import httpx
 
+# ── Anthropic OAuth beta header ──────────────────────────────────────────────
+_ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+
 # ── OAuth constants (OpenAI Codex CLI — same as pi-ai / openclaw) ─────────────
 _AUTH_URL     = "https://auth.openai.com/oauth/authorize"
 _TOKEN_URL    = "https://auth.openai.com/oauth/token"
@@ -325,34 +328,101 @@ def revoke_anthropic_key() -> None:
         CREDS_PATH.unlink(missing_ok=True)
 
 
+async def _check_anthropic(key: str) -> bool:
+    """Return True if the Anthropic key/token works (models list call)."""
+    try:
+        headers = {"anthropic-version": "2023-06-01"}
+        if key.startswith("sk-ant-oat"):
+            # OAuth token — requires Bearer auth + beta header
+            headers["Authorization"] = f"Bearer {key}"
+            headers["anthropic-beta"] = _ANTHROPIC_OAUTH_BETAS
+        else:
+            headers["x-api-key"] = key
+        resp = httpx.get(
+            "https://api.anthropic.com/v1/models",
+            headers=headers,
+            timeout=8.0,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _check_openai_key(key: str) -> bool:
+    """Return True if the OpenAI API key works."""
+    try:
+        resp = httpx.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=8.0,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _check_openai_oauth(token: str) -> bool:
+    """Return True if the ChatGPT OAuth token works.
+
+    The token is for chatgpt.com (Codex), not api.openai.com.  We make a
+    minimal request and consider any non-401/403 response as 'connected'.
+    """
+    try:
+        resp = httpx.post(
+            "https://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"model": "gpt-5.4", "store": False, "stream": False,
+                  "instructions": "hi", "input": []},
+            timeout=10.0,
+        )
+        # 400 = bad request format but auth succeeded; 401/403 = auth failed
+        return resp.status_code not in (401, 403)
+    except Exception:
+        return False
+
+
 async def auth_status() -> None:
-    """Print current auth status for all providers."""
+    """Print current auth status for all providers, verifying each credential with a live API call."""
+    import asyncio
+
+    def _ok(connected: bool) -> str:
+        return "CONNECTED" if connected else "FAILED (check key/network)"
+
+    tasks = {}
+
     # OpenAI
     creds = load_credentials("openai")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
     if creds and creds.get("api_key"):
         k = creds["api_key"]
-        print(f"  openai     API key stored  (****{k[-4:]})")
+        tasks["openai_key"] = (f"  openai     API key  (****{k[-4:]})", asyncio.create_task(_check_openai_key(k)))
     elif creds and creds.get("access_token"):
         exp       = creds.get("expires_at", 0)
         remaining = exp - time.time()
         email     = creds.get("email", "")
         who       = f"  {email}" if email else ""
         if remaining > 60:
-            print(f"  openai     OAuth token{who}  (expires in {int(remaining // 60)}m)")
+            token = creds["access_token"]
+            tasks["openai_oauth"] = (f"  openai     OAuth token{who}  (expires in {int(remaining // 60)}m)", asyncio.create_task(_check_openai_oauth(token)))
         else:
             print(f"  openai     OAuth token expired{who}  — run: orb auth openai")
-    elif os.environ.get("OPENAI_API_KEY"):
-        k = os.environ["OPENAI_API_KEY"]
-        print(f"  openai     OPENAI_API_KEY env var  (****{k[-4:]})")
+    elif openai_key:
+        tasks["openai_env"] = (f"  openai     OPENAI_API_KEY env  (****{openai_key[-4:]})", asyncio.create_task(_check_openai_key(openai_key)))
     else:
         print("  openai     not authenticated  (run: orb auth openai)")
 
-    # Anthropic — check stored key first, then env var
+    # Anthropic
     stored_ant = get_anthropic_key()
     env_ant    = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
-    if stored_ant:
-        print(f"  anthropic  API key stored  (****{stored_ant[-4:]})")
-    elif env_ant:
-        print(f"  anthropic  ANTHROPIC_API_KEY env var  (****{env_ant[-4:]})")
+    ant_key    = stored_ant or env_ant
+    ant_source = "API key stored" if stored_ant else "ANTHROPIC_API_KEY env"
+    if ant_key:
+        tasks["anthropic"] = (f"  anthropic  {ant_source}  (****{ant_key[-4:]})", asyncio.create_task(_check_anthropic(ant_key)))
     else:
         print("  anthropic  not authenticated  (run: orb auth anthropic --api-key sk-ant-...)")
+
+    # Await all checks concurrently and print results
+    print("  Checking connectivity…")
+    for key, (label, task) in tasks.items():
+        connected = await task
+        print(f"{label}  →  {_ok(connected)}")

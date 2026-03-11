@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -13,12 +14,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TUIMessage
 from textual.reactive import reactive
-from textual import events, on, work
+from textual import events, on
 from textual.widgets import Footer, Label, RichLog, Static, TextArea
-
-from ..messaging.message import Message as OrbMessage, MessageType
-from ..llm.types import ModelTier, ModelConfig
-from ..orchestrator.types import OrchestratorConfig
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -164,46 +161,6 @@ class AgentInfo:
 
 
 # ─── TUI Messages ─────────────────────────────────────────────────────────────
-
-class OrbBusEvent(TUIMessage):
-    def __init__(self, event_name: str, msg: OrbMessage) -> None:
-        super().__init__()
-        self.event_name = event_name
-        self.orb_msg = msg
-
-
-class OrbRunComplete(TUIMessage):
-    def __init__(self, error: str | None = None,
-                 completions: dict[str, str] | None = None,
-                 diff: str = "") -> None:
-        super().__init__()
-        self.error = error
-        self.completions = completions or {}
-        self.diff = diff
-
-
-class OrbAgentComplete(TUIMessage):
-    def __init__(self, agent_id: str, result: str) -> None:
-        super().__init__()
-        self.agent_id = agent_id
-        self.result = result
-
-
-class OrbActivityUpdate(TUIMessage):
-    def __init__(self, agent_id: str, text: str) -> None:
-        super().__init__()
-        self.agent_id = agent_id
-        self.text = text
-
-
-class OrbFileWrite(TUIMessage):
-    def __init__(self, agent_id: str, path: str, content: str, old_content: str = "") -> None:
-        super().__init__()
-        self.agent_id    = agent_id
-        self.path        = path
-        self.content     = content
-        self.old_content = old_content
-
 
 class OrbLogRecord(TUIMessage):
     def __init__(self, level: str, name: str, message: str) -> None:
@@ -388,6 +345,7 @@ class HeaderBar(Static):
         # Run status badge
         badge_style = {
             "Waiting":  ("dim",        "  ○ Ready   "),
+            "Idle":     ("dim",        "  ○ Ready   "),
             "Running":  ("bold green", "  ● Running "),
             "Complete": ("bold cyan",  "  ✓ Done    "),
             "Error":    ("bold red",   "  ✗ Error   "),
@@ -411,12 +369,12 @@ class HeaderBar(Static):
             t.append("  │  @", style="dim")
             t.append(label, style=f"bold {color}")
 
-        if s._run_status == "Complete":
+        if s._run_status in ("Complete", "Idle") and s._turn_count > 0:
             t.append("  │  ", style="dim")
             t.append("r=results  s=save", style="dim cyan")
 
-        if s._dashboard_server is not None:
-            t.append(f"  │  ::{s._dashboard_port}", style="dim")
+        if getattr(s, "_server_port", None):
+            t.append(f"  │  ::{s._server_port}", style="dim")
 
         return t
 
@@ -560,9 +518,9 @@ class ModeBar(Static):
         if s._run_status == "Running":
             t.append("  ↪ inject", style="bold cyan")
             t.append(" · new input goes to coordinator  ", style="dim")
-        elif s._run_status == "Complete":
+        elif s._run_status in ("Complete", "Idle") and s._turn_count > 0:
             t.append("  ✓ done", style="bold cyan")
-            t.append(" · enter new task  ", style="dim")
+            t.append(" · type a follow-up or new task  ", style="dim")
         else:
             t.append("  ○ ready", style="dim")
             t.append(" · type a task  ", style="dim")
@@ -855,52 +813,36 @@ class OrbTUI(App[None]):
 
     def __init__(
         self,
-        providers: dict,
-        config: OrchestratorConfig,
-        model_overrides: dict | None = None,
-        tier_override: ModelTier | None = None,
+        server_port: int = 8080,
         topology: str = "triangle",
-        budget: int = 200,
-        dashboard_server: Any = None,
-        dashboard_port: int = 8080,
         show_logs: bool = False,
     ) -> None:
         super().__init__()
-        self._providers        = providers
-        self._config           = config
-        self._model_overrides  = model_overrides
-        self._tier_override    = tier_override
-        self._topology_name    = topology
-        self._budget           = budget
-        self._dashboard_server = dashboard_server
-        self._dashboard_port   = dashboard_port
-        self._show_logs        = show_logs
-        self._dashboard_state: Any = None
+        self._server_port   = server_port
+        self._topology_name = topology
+        self._show_logs     = show_logs
 
-        # Run state
+        # Run state (populated by WebSocket events from backend)
         self._agents: dict[str, AgentInfo] = {}
         self._detail_feed: list[dict] = []
         self._routed: int = 0
         self._run_start: float | None = None
         self._run_status: str = "Waiting"
         self._selected_agent: str | None = None
-        self._current_orchestrator: Any = None
         self._completions: dict[str, str] = {}
         self._last_query: str = ""
         self._last_elapsed: float = 0.0
         self._last_diff: str = ""
+        self._turn_count: int = 0
 
-        # Conversational continuity
-        self._session_history: list[dict] = []       # [{query, result}] per completed run
-        self._conv_carryover: dict[str, list] = {}   # agent_id → conversation messages
-
-        # User-prompt handling — tracks which agent is waiting for human reply
+        # User-prompt handling — set when backend reports an agent waiting for user
         self._awaiting_user: str | None = None
 
         # Animation state
         self._tick_count: int = 0
-        self._active_edges: dict[tuple[str, str], int] = {}  # edge -> expiry tick
+        self._active_edges: dict[tuple[str, str], int] = {}
         self._elapsed_task: asyncio.Task | None = None
+        self._ws_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
         yield HeaderBar(state=self, id="header-bar")
@@ -938,6 +880,7 @@ class OrbTUI(App[None]):
         feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line freely. [bold]y[/bold]=copy result  [bold]shift+drag[/bold]=terminal select[/dim]")
         self.query_one("#query-input", TextArea).focus()
         self._elapsed_task = asyncio.create_task(self._tick())
+        self._ws_task = asyncio.create_task(self._start_ws_client())
 
         if self._show_logs:
             self.query_one("#log-panel").add_class("visible")
@@ -987,18 +930,23 @@ class OrbTUI(App[None]):
                 return
             raw = remainder
 
-        # Agent waiting for user — reply directly to that agent
-        if self._awaiting_user and self._current_orchestrator is not None:
-            await self._reply_to_agent(self._awaiting_user, raw)
+        # Agent waiting for user — reply via HTTP inject
+        if self._awaiting_user:
+            target = self._awaiting_user
+            self._awaiting_user = None
+            self.query_one("#query-label", Label).update(" >  ")
+            await self._post_json("/api/inject", {"to": target, "message": raw})
             return
 
-        # Mid-run: inject to coordinator
-        if self._current_orchestrator is not None and self._run_status == "Running":
-            await self._inject_to_coordinator(raw)
+        # Mid-run: inject to entry agent
+        if self._run_status == "Running":
+            entry = next((aid for aid in self._agents if aid == "coordinator"),
+                         next(iter(self._agents), "coordinator"))
+            await self._post_json("/api/inject", {"to": entry, "message": raw})
             return
 
         # New run
-        self._start_new_run(raw)
+        await self._start_new_run(raw)
 
     @on(TextArea.Changed, "#query-input")
     def on_input_changed(self, event: TextArea.Changed) -> None:
@@ -1013,330 +961,314 @@ class OrbTUI(App[None]):
             ta.remove_class("inject-mode")
             ta.remove_class("user-reply-mode")
 
-    def _start_new_run(self, query: str) -> None:
-        self._last_query      = query
-        self._agents          = {}
-        self._detail_feed     = []
-        self._completions     = {}
-        self._routed          = 0
-        self._run_start       = time()
-        self._run_status      = "Running"
-        self._active_edges    = {}
-        self._current_orchestrator = None
+    async def _start_new_run(self, query: str) -> None:
+        self._last_query   = query
+        self._agents       = {}
+        self._detail_feed  = []
+        self._completions  = {}
+        self._routed       = 0
+        self._run_start    = time()
+        self._run_status   = "Running"
+        self._active_edges = {}
 
-        # Reset detail pane
         self.query_one("#detail-log", RichLog).clear()
-
         feed = self.query_one("#message-feed", RichLog)
         feed.clear()
         feed.write(f"[bold cyan]▶ Task:[/bold cyan] {query}\n")
+        self._refresh_all()
+
+        resp = await self._post_json("/api/start", {
+            "query": query,
+            "topology": self._topology_name,
+        })
+        if not resp.get("ok"):
+            self._run_status = "Error"
+            feed.write(f"\n[bold red]✗ Error:[/bold red] {resp.get('error', 'start failed')}")
+            self._refresh_all()
+
+    # ── WebSocket client ──────────────────────────────────────────────────────
+
+    async def _post_json(self, path: str, payload: dict) -> dict:
+        import aiohttp
+        url = f"http://localhost:{self._server_port}{path}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as resp:
+                    return await resp.json()
+        except Exception as exc:
+            logger.warning("POST %s failed: %s", path, exc)
+            return {"ok": False, "error": str(exc)}
+
+    async def _start_ws_client(self) -> None:
+        import aiohttp
+        url = f"ws://localhost:{self._server_port}/ws"
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url, heartbeat=30) as ws:
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    self._handle_server_event(json.loads(msg.data))
+                                except Exception:
+                                    pass
+                            elif msg.type in (
+                                aiohttp.WSMsgType.CLOSED,
+                                aiohttp.WSMsgType.ERROR,
+                            ):
+                                break
+            except Exception:
+                pass
+            await asyncio.sleep(1)  # reconnect backoff
+
+    def _handle_server_event(self, data: dict) -> None:  # noqa: C901
+        t = data.get("type")
+        if t == "init":
+            self._on_server_init(data)
+        elif t == "message":
+            self._on_server_message(data)
+        elif t == "agent_status":
+            self._on_server_agent_status(data)
+        elif t == "agent_stats":
+            self._on_server_agent_stats(data)
+        elif t == "agent_activity":
+            self._on_server_agent_activity(data)
+        elif t == "complete":
+            self._on_server_complete(data)
+        elif t == "run_complete":
+            self._on_server_run_complete(data)
+        elif t == "file_write":
+            self._on_server_file_write(data)
+        elif t == "stopped":
+            self._run_status = "Error"
+            self.query_one("#message-feed", RichLog).write("\n[dim]Run cancelled.[/dim]")
+            self._refresh_all()
+        elif t == "stats":
+            self._routed = data.get("message_count", self._routed)
+            self._last_elapsed = data.get("elapsed", self._last_elapsed)
+
+    def _on_server_init(self, data: dict) -> None:
+        self._agents = {}
+        self._detail_feed = []
+        self._completions = {}
+        self._routed = 0
+        self._active_edges = {}
+
+        for agent_data in data.get("agents", []):
+            aid  = agent_data["id"]
+            info = AgentInfo(agent_id=aid, role=agent_data.get("role", aid))
+            info.status = agent_data.get("status", "idle")
+            info.model  = agent_data.get("model", "")
+            result = agent_data.get("completed_result", "")
+            if result:
+                info.result = result
+                self._completions[aid] = result
+            self._agents[aid] = info
+
+        self._topology_name = "dual-review" if "reviewer_a" in self._agents else "triangle"
+
+        stats = data.get("stats", {})
+        self._routed       = stats.get("message_count", 0)
+        self._last_elapsed = stats.get("elapsed", 0.0)
+
+        run_active = data.get("run_active", False)
+        completed  = data.get("completed", False)
+        if run_active:
+            self._run_status = "Running"
+            self._run_start  = time() - stats.get("elapsed", 0)
+        elif completed:
+            self._run_status = "Idle"
+
+        feed = self.query_one("#message-feed", RichLog)
+        feed.clear()
+        if self._last_query and run_active:
+            feed.write(f"[bold cyan]▶ Task:[/bold cyan] {self._last_query}\n")
+        for msg in data.get("messages", []):
+            msg_type = msg.get("msg_type", "")
+            if msg_type == "system":
+                continue
+            to_label = "[COMPLETE]" if msg_type == "complete" else msg.get("to", "")
+            entry = {
+                "elapsed": msg.get("elapsed", 0.0),
+                "from_":   msg.get("from", ""),
+                "to":      to_label,
+                "model":   msg.get("model", ""),
+                "preview": msg.get("content", "")[:120].replace("\n", " "),
+                "payload": msg.get("content", ""),
+                "type":    msg_type,
+            }
+            self._detail_feed.append(entry)
+            for aid in (entry["from_"], to_label):
+                if aid in self._agents:
+                    self._agents[aid].messages.append(entry)
+            self._write_feed(entry)
 
         self._refresh_all()
-        self._run_query(query)
 
-    async def _inject_to_coordinator(self, text: str) -> None:
-        orch  = self._current_orchestrator
-        entry = orch.config.entry_agent if orch else "coordinator"
-        if entry not in orch.agents:
-            entry = next(iter(orch.agents), None)
-        if not entry:
-            return
-        msg = OrbMessage(from_="user", to=entry,
-                         type=MessageType.RESPONSE, payload=text)
-        await orch.agents[entry].channel.send(msg)
-        feed  = self.query_one("#message-feed", RichLog)
-        color = AGENT_COLORS.get(entry, "white")
-        feed.write(
-            f"[dim]↪ user →[/dim] [{color}]{entry}[/{color}][dim]: {text}[/dim]"
-        )
+    def _on_server_message(self, data: dict) -> None:
+        from_id  = data.get("from", "")
+        to_id    = data.get("to", "")
+        msg_type = data.get("msg_type", "")
+        model    = data.get("model", "")
+        content  = data.get("content", "")
+        elapsed  = data.get("elapsed", 0.0)
 
-    async def _reply_to_agent(self, agent_id: str, text: str) -> None:
-        """Route a user reply directly to the agent that asked for it."""
-        orch = self._current_orchestrator
-        if not orch or agent_id not in orch.agents:
-            await self._inject_to_coordinator(text)
-            return
-        msg = OrbMessage(from_="user", to=agent_id,
-                         type=MessageType.RESPONSE, payload=text)
-        await orch.agents[agent_id].channel.send(msg)
-        # Clear awaiting state and reset label / input style
-        self._awaiting_user = None
-        self.query_one("#query-label", Label).update(" >  ")
-        self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
-        feed  = self.query_one("#message-feed", RichLog)
-        color = AGENT_COLORS.get(agent_id, "white")
-        feed.write(
-            f"[dim]↪ user →[/dim] [{color}]{agent_id}[/{color}][dim]: {text}[/dim]"
-        )
-
-    # ── Run worker ────────────────────────────────────────────────────────────
-
-    @work(exclusive=True)
-    async def _run_query(self, query: str) -> None:
-        from ..topologies.triad import create_triad
-        try:
-            from ..topologies.dual_review import create_dual_review
-            has_dual = True
-        except ImportError:
-            has_dual = False
-
-        try:
-            if self._topology_name == "dual-review" and has_dual:
-                orchestrator = create_dual_review(
-                    providers=self._providers, config=self._config,
-                    model_overrides=self._model_overrides,
-                    tier_override=self._tier_override, trace=False,
-                )
-            else:
-                orchestrator = create_triad(
-                    providers=self._providers, config=self._config,
-                    model_overrides=self._model_overrides,
-                    tier_override=self._tier_override, trace=False,
-                )
-
-            self._current_orchestrator = orchestrator
-
-            # Initialise agents in state
-            for agent_id, agent in orchestrator.agents.items():
-                self._agents[agent_id] = AgentInfo(
-                    agent_id=agent_id, role=agent.config.role
-                )
-
-            # ── Conversational continuity ──────────────────────────────────
-            # Build a session context preamble so agents remember prior runs
-            if self._session_history:
-                lines = ["=== Prior session context ==="]
-                for i, h in enumerate(self._session_history[-5:], 1):
-                    lines.append(f"[{i}] User: {h['query']}")
-                    if h["result"]:
-                        lines.append(f"     Result: {h['result'][:200]}")
-                lines.append("=== End of prior context ===\n")
-                query = "\n".join(lines) + query
-
-            # Restore agent conversation histories from the previous run so the
-            # LLMs remember what they wrote / reviewed without re-reading files
-            if self._conv_carryover:
-                for aid, agent in orchestrator.agents.items():
-                    if aid in self._conv_carryover and self._conv_carryover[aid]:
-                        agent._conversation.messages = list(self._conv_carryover[aid])
-
-            # Wire on_activity and on_file_write callbacks
-            for agent_id, agent in orchestrator.agents.items():
-                aid = agent_id
-                def make_activity_cb(a: str):
-                    def cb(_, text: str) -> None:
-                        self.post_message(OrbActivityUpdate(a, text))
-                    return cb
-                def make_file_cb(a: str):
-                    def cb(_, path: str, content: str, old_content: str = "") -> None:
-                        self.post_message(OrbFileWrite(a, path, content, old_content))
-                    return cb
-                agent._on_activity   = make_activity_cb(aid)
-                agent._on_file_write = make_file_cb(aid)
-
-            # Detect topology from actual graph edges
-            self._topology_name = (
-                "dual-review"
-                if "reviewer_a" in orchestrator.agents
-                else "triangle"
-            )
-
-            orchestrator.bus.on_event(self._on_bus_event)
-
-            # Dashboard bridge
-            if self._dashboard_server is not None:
-                try:
-                    from web.bridge import DashboardBridge
-                    dash_state = self._dashboard_state
-                    dash_state.reset()
-                    bridge = DashboardBridge(dash_state, self._dashboard_server.broadcast)
-                    agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
-                    bridge.setup_agents(agent_roles)
-                    bridge.setup_edges([(e.a, e.b) for e in orchestrator.bus.graph.edges])
-                    bridge.setup_budget(self._config.budget)
-                    orchestrator.bus.on_event(bridge.on_message_routed)
-                    self._dashboard_server.set_agents(orchestrator.agents)
-
-                    # Broadcast init event so already-connected clients see the new topology
-                    import json as _json
-                    init_ev = dash_state.to_init_event()
-                    init_ev["run_active"] = True
-                    await self._dashboard_server.broadcast(_json.dumps(init_ev))
-
-                    # Wire _on_activity to send to dashboard too (TUI callback already set above)
-                    _dash_bcast = self._dashboard_server.broadcast
-
-                    for aid2, agent2 in orchestrator.agents.items():
-                        _tui_cb = agent2._on_activity
-                        def make_combined(tui_cb, a_id):
-                            async def combined(_, text: str) -> None:
-                                if tui_cb:
-                                    tui_cb(_, text)
-                                await _dash_bcast(_json.dumps({
-                                    "type": "agent_activity",
-                                    "agent": a_id,
-                                    "activity": text,
-                                }))
-                            return combined
-                        agent2._on_activity = make_combined(_tui_cb, aid2)
-
-                    orig = orchestrator._on_agent_complete
-                    async def patched_bridge(aid: str, res: str) -> None:
-                        # Propagate the model to the dashboard for agents that
-                        # complete without sending a message (e.g. tester/reviewer)
-                        agent_obj = orchestrator.agents.get(aid)
-                        model = getattr(agent_obj, "_last_model", "") or ""
-                        if model:
-                            await bridge.on_agent_status(aid, "completed", model)
-                        await bridge.on_agent_complete(aid, res)
-                        self.post_message(OrbAgentComplete(aid, res))
-                        await orig(aid, res)
-                    orchestrator._on_agent_complete = patched_bridge
-                except Exception:
-                    self._wire_plain_complete(orchestrator)
-            else:
-                self._wire_plain_complete(orchestrator)
-
-            self._refresh_all()
-            run_result = await orchestrator.run(query)
-
-            # Save conversation histories for next run before agents are GC'd
-            self._conv_carryover = {
-                aid: list(agent._conversation.messages)
-                for aid, agent in orchestrator.agents.items()
-            }
-            # Append to session history for context preamble
-            synthesis_id = orchestrator.config.synthesis_agent
-            summary = (
-                run_result.completions.get(synthesis_id, "")
-                or next(iter(run_result.completions.values()), "")
-            )
-            self._session_history.append({
-                "query": self._last_query,
-                "result": summary[:300],
-            })
-
-            from ..cli.diff_capture import capture_diff
-            diff = capture_diff()
-            self.post_message(OrbRunComplete(
-                error=run_result.error,
-                completions=dict(run_result.completions),
-                diff=diff,
-            ))
-
-        except Exception as e:
-            self.post_message(OrbRunComplete(error=f"{type(e).__name__}: {e}"))
-
-    def _wire_plain_complete(self, orchestrator: Any) -> None:
-        orig = orchestrator._on_agent_complete
-        async def patched(aid: str, res: str) -> None:
-            self.post_message(OrbAgentComplete(aid, res))
-            await orig(aid, res)
-        orchestrator._on_agent_complete = patched
-
-    # ── Bus events ────────────────────────────────────────────────────────────
-
-    def _on_bus_event(self, event_name: str, msg: OrbMessage) -> None:
-        self.post_message(OrbBusEvent(event_name, msg))
-
-    def on_orb_bus_event(self, event: OrbBusEvent) -> None:  # noqa: C901
-        event_name = event.event_name
-        msg        = event.orb_msg
-
-        if msg.type == MessageType.SYSTEM:
+        if msg_type == "system":
             return
 
-        elapsed = time() - (self._run_start or time())
+        for aid in (from_id, to_id):
+            if aid and aid not in ("user", "orchestrator", "[COMPLETE]"):
+                if aid not in self._agents:
+                    self._agents[aid] = AgentInfo(agent_id=aid, role=aid)
 
-        for agent_id in (msg.from_, msg.to):
-            if agent_id and agent_id not in ("user", "orchestrator", "[COMPLETE]"):
-                if agent_id not in self._agents:
-                    self._agents[agent_id] = AgentInfo(agent_id=agent_id, role=agent_id)
+        if from_id in self._agents and model:
+            self._agents[from_id].model = model
 
-        model = msg.metadata.get("model", "")
-        if msg.from_ in self._agents and model:
-            self._agents[msg.from_].model = model
+        if msg_type != "complete":
+            self._active_edges[(from_id, to_id)] = self._tick_count + 3
 
-        # Mark edge as active (expires in 3 ticks ≈ 1.5s)
-        if event_name == "routed" and msg.type != MessageType.COMPLETE:
-            key = (msg.from_, msg.to)
-            self._active_edges[key] = self._tick_count + 3
-
-        # Status transitions
-        if event_name == "injected":
-            if msg.to in self._agents:
-                self._agents[msg.to].set_status("running")
-        elif event_name == "routed":
-            if msg.type == MessageType.COMPLETE:
-                for aid in (msg.from_, msg.to):
-                    if aid in self._agents:
-                        self._agents[aid].set_status("completed")
-            else:
-                if msg.from_ in self._agents:
-                    info = self._agents[msg.from_]
-                    info.set_status("running")
-                    info.msg_count += 1
-                if msg.to in self._agents:
-                    info = self._agents[msg.to]
-                    if info.status != "completed":
-                        info.set_status("waiting")
+        if msg_type == "complete":
+            for aid in (from_id, to_id):
+                if aid in self._agents:
+                    self._agents[aid].set_status("completed")
+        else:
+            if from_id in self._agents:
+                info = self._agents[from_id]
+                info.set_status("running")
+                info.msg_count += 1
+            if to_id in self._agents:
+                info = self._agents[to_id]
+                if info.status != "completed":
+                    info.set_status("waiting")
             self._routed += 1
 
-        # Feed entry — store full payload for detail pane, short preview for feed
-        to_label = "[COMPLETE]" if msg.type == MessageType.COMPLETE else msg.to
-        preview  = msg.payload[:120].replace("\n", " ")
+        to_label = "[COMPLETE]" if msg_type == "complete" else to_id
         entry = {
-            "elapsed":  elapsed,
-            "from_":    msg.from_,
-            "to":       to_label,
-            "model":    model,
-            "preview":  preview,
-            "payload":  msg.payload,   # full, untruncated
-            "type":     msg.type.value,
+            "elapsed": elapsed,
+            "from_":   from_id,
+            "to":      to_label,
+            "model":   model,
+            "preview": content[:120].replace("\n", " "),
+            "payload": content,
+            "type":    msg_type,
         }
         self._detail_feed.append(entry)
-
-        # Add to agent message history
-        for aid in (msg.from_, to_label):
+        for aid in (from_id, to_label):
             if aid in self._agents:
                 self._agents[aid].messages.append(entry)
-
         self._write_feed(entry)
 
-        # Update detail pane if this involves the selected agent
         if self._selected_agent and (
-            msg.from_ == self._selected_agent or msg.to == self._selected_agent
+            from_id == self._selected_agent or to_id == self._selected_agent
         ):
             self._append_to_detail(entry)
             self.query_one("#detail-scroll").scroll_end(animate=False)
 
         self._refresh_all()
 
-    def on_orb_file_write(self, event: OrbFileWrite) -> None:
+    def _on_server_agent_status(self, data: dict) -> None:
+        aid    = data.get("agent", "")
+        status = data.get("status", "")
+        model  = data.get("model", "")
+        if aid in self._agents:
+            if status:
+                self._agents[aid].set_status(status)
+            if model:
+                self._agents[aid].model = model
+        if self._selected_agent == aid:
+            self._update_detail_header()
+        self._refresh_all()
+
+    def _on_server_agent_stats(self, data: dict) -> None:
+        aid       = data.get("agent", "")
+        model     = data.get("model", "")
+        msg_count = data.get("msg_count")
+        if aid in self._agents:
+            if model:
+                self._agents[aid].model = model
+            if msg_count is not None:
+                self._agents[aid].msg_count = msg_count
+        self._refresh_all()
+
+    def _on_server_agent_activity(self, data: dict) -> None:
+        aid  = data.get("agent", "")
+        text = data.get("activity", "")
+        if aid in self._agents:
+            self._agents[aid].activity_text = text
+        self.query_one("#graph-panel", GraphPanel).bump()
+        if aid == self._selected_agent:
+            self._update_detail_header()
+
+        if text.startswith("⏳ Waiting for user"):
+            self._awaiting_user = aid
+            self.query_one("#query-label", Label).update(f" ↩ {aid}: ")
+            ta = self.query_one("#query-input", TextArea)
+            ta.add_class("user-reply-mode")
+            ta.remove_class("inject-mode")
+            ta.focus()
+        elif text == "" and self._awaiting_user == aid:
+            self._awaiting_user = None
+            self.query_one("#query-label", Label).update(" >  ")
+            self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
+
+    def _on_server_complete(self, data: dict) -> None:
+        aid    = data.get("agent", "")
+        result = data.get("result", "")
+        if aid in self._agents:
+            self._agents[aid].set_status("completed")
+            self._agents[aid].result        = result
+            self._agents[aid].activity_text = ""
+        if result and not result.startswith("Consensus:") and result != "[shutdown]":
+            self._completions[aid] = result
+        self._refresh_all()
+
+    def _on_server_run_complete(self, data: dict) -> None:
+        self._last_elapsed = data.get("elapsed", 0.0)
+        self._turn_count   = data.get("session_turn", self._turn_count)
+        self._last_diff    = data.get("diff", "")
+        self._routed       = data.get("routed", self._routed)
+        self._run_status   = "Idle"
+
+        for info in self._agents.values():
+            if info.status not in ("completed", "error"):
+                info.set_status("completed")
+            info.activity_text = ""
+
+        sep  = "─" * 48
+        feed = self.query_one("#message-feed", RichLog)
+        feed.write(
+            f"\n[dim]{sep}[/dim]\n"
+            f"[dim]── Turn {self._turn_count} complete"
+            f"  ({self._last_elapsed:.1f}s · {self._routed} messages) ──[/dim]\n"
+            f"[dim]Type your next message or question…[/dim]\n"
+        )
+
+        if "coordinator" in self._agents and not self._selected_agent:
+            self.action_select("coordinator")
+
+        self.query_one("#query-input", TextArea).focus()
+        self._refresh_all()
+
+    def _on_server_file_write(self, data: dict) -> None:
         import difflib
-        path        = event.path
-        content     = event.content
-        old_content = event.old_content
-        agent_id    = event.agent_id
-        color       = AGENT_COLORS.get(agent_id, "white")
-        is_new      = old_content == ""
+        agent_id    = data.get("agent", "")
+        path        = data.get("path", "")
+        content     = data.get("content", "")
+        old_content = data.get("old_content", "")
+        color  = AGENT_COLORS.get(agent_id, "white")
+        is_new = old_content == ""
 
-        new_lines = content.splitlines(keepends=True)
-        old_lines = old_content.splitlines(keepends=True)
-
-        # Build unified diff
+        new_lines  = content.splitlines(keepends=True)
+        old_lines  = old_content.splitlines(keepends=True)
         diff_lines = list(difflib.unified_diff(
             old_lines, new_lines,
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-            lineterm="",
+            fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="",
         ))
 
         added   = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
         removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
         stat    = f"+{added} -{removed}" if not is_new else f"+{len(new_lines)} (new file)"
 
-        # Compact feed entry
         feed = self.query_one("#message-feed", RichLog)
         feed.write(
             f"[{color}]{agent_id}[/{color}]"
@@ -1344,10 +1276,9 @@ class OrbTUI(App[None]):
             f"  [green]+{added}[/green] [red]-{removed}[/red]"
         )
 
-        # Code panel — show diff
         panel = self.query_one("#code-panel")
         panel.add_class("visible")
-        hdr = self.query_one("#code-panel-header", Static)
+        hdr  = self.query_one("#code-panel-header", Static)
         mode = "new file" if is_new else "modified"
         hdr.update(
             f" [{color}]{agent_id}[/{color}]"
@@ -1358,7 +1289,6 @@ class OrbTUI(App[None]):
 
         log = self.query_one("#code-log", RichLog)
         log.clear()
-
         if diff_lines:
             for line in diff_lines:
                 line = line.rstrip("\n")
@@ -1373,13 +1303,11 @@ class OrbTUI(App[None]):
                 else:
                     log.write(f"[dim]{line}[/dim]")
         else:
-            # No diff (file unchanged) — show full content for new files
             for i, l in enumerate(new_lines, 1):
                 log.write(f"[green]+{i:3} {l.rstrip()}[/green]")
 
         if agent_id in self._agents:
             self._agents[agent_id].activity_text = f"wrote {path} ({stat})"
-
         self._refresh_all()
 
     def on_orb_log_record(self, event: OrbLogRecord) -> None:
@@ -1399,70 +1327,6 @@ class OrbTUI(App[None]):
             f"[dim] {event.message}[/dim]"
         )
 
-    def on_orb_activity_update(self, event: OrbActivityUpdate) -> None:
-        if event.agent_id in self._agents:
-            self._agents[event.agent_id].activity_text = event.text
-        self.query_one("#graph-panel", GraphPanel).bump()
-        # Refresh detail header if this agent is selected
-        if event.agent_id == self._selected_agent:
-            self._update_detail_header()
-
-        # Detect when an agent is waiting for user input
-        if event.text.startswith("⏳ Waiting for user"):
-            self._awaiting_user = event.agent_id
-            self.query_one("#query-label", Label).update(f" ↩ {event.agent_id}: ")
-            ta = self.query_one("#query-input", TextArea)
-            ta.add_class("user-reply-mode")
-            ta.remove_class("inject-mode")
-            ta.focus()
-        elif event.text == "" and self._awaiting_user == event.agent_id:
-            # Agent resumed — clear waiting state
-            self._awaiting_user = None
-            self.query_one("#query-label", Label).update(" >  ")
-            self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
-
-    def on_orb_agent_complete(self, event: OrbAgentComplete) -> None:
-        if event.agent_id in self._agents:
-            self._agents[event.agent_id].set_status("completed")
-            self._agents[event.agent_id].result = event.result
-            self._agents[event.agent_id].activity_text = ""
-        self._refresh_all()
-
-    def on_orb_run_complete(self, event: OrbRunComplete) -> None:
-        self._current_orchestrator = None
-        self._completions = event.completions
-        self._last_diff = event.diff
-
-        if self._run_start:
-            self._last_elapsed = time() - self._run_start
-
-        feed = self.query_one("#message-feed", RichLog)
-
-        if event.error:
-            self._run_status = "Error"
-            feed.write(f"\n[bold red]✗ Error:[/bold red] {event.error}")
-        else:
-            self._run_status = "Complete"
-            for info in self._agents.values():
-                if info.status not in ("completed", "error"):
-                    info.set_status("completed")
-                info.activity_text = ""
-
-            followup_hint = (
-                "  type to follow up" if self._session_history else ""
-            )
-            feed.write(
-                f"\n[bold green]✓ Complete[/bold green]"
-                f"[dim]  {self._routed} messages · {self._last_elapsed:.1f}s"
-                f"  press [/dim][cyan]r[/cyan][dim] for full results{followup_hint}[/dim]"
-            )
-
-            # Auto-select coordinator to show synthesis result
-            if "coordinator" in self._agents and not self._selected_agent:
-                self.action_select("coordinator")
-
-        self.query_one("#query-input", TextArea).focus()
-        self._refresh_all()
 
     # ── Feed ──────────────────────────────────────────────────────────────────
 
@@ -1646,7 +1510,7 @@ class OrbTUI(App[None]):
         self.query_one("#query-input", TextArea).focus()
 
     def action_show_results(self) -> None:
-        if self._run_status != "Complete" or not self._completions:
+        if self._run_status not in ("Complete", "Idle") or not self._completions:
             return
         self.push_screen(ResultScreen(
             task=self._last_query,
@@ -1656,18 +1520,9 @@ class OrbTUI(App[None]):
             diff=self._last_diff,
         ))
 
-    def action_cancel_run(self) -> None:
-        if self._current_orchestrator:
-            # Signal cancellation by setting the completion event
-            try:
-                self._current_orchestrator._completion_event.set()
-            except Exception:
-                pass
-        self._run_status = "Waiting"
-        self._current_orchestrator = None
-        feed = self.query_one("#message-feed", RichLog)
-        feed.write("\n[dim]Run cancelled.[/dim]")
-        self._refresh_all()
+    async def action_cancel_run(self) -> None:
+        if self._run_status == "Running":
+            await self._post_json("/api/stop", {})
 
     def action_clear_feed(self) -> None:
         self.query_one("#message-feed", RichLog).clear()
@@ -1704,6 +1559,8 @@ class OrbTUI(App[None]):
     def action_quit(self) -> None:
         if self._elapsed_task:
             self._elapsed_task.cancel()
+        if self._ws_task:
+            self._ws_task.cancel()
         if self._log_handler:
             logging.getLogger().removeHandler(self._log_handler)
         self.exit()
@@ -1711,55 +1568,68 @@ class OrbTUI(App[None]):
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
 
-def run_tui(
+async def _launch(
     providers: dict,
-    config: OrchestratorConfig,
-    model_overrides: dict | None = None,
-    tier_override: ModelTier | None = None,
-    topology: str = "triangle",
-    budget: int = 200,
-    show_logs: bool = False,
-) -> None:
-    OrbTUI(
-        providers=providers, config=config,
-        model_overrides=model_overrides,
-        tier_override=tier_override,
-        topology=topology, budget=budget,
-        show_logs=show_logs,
-    ).run()
-
-
-async def run_tui_with_dashboard(
-    providers: dict,
-    config: OrchestratorConfig,
-    model_overrides: dict | None = None,
-    tier_override: ModelTier | None = None,
-    topology: str = "triangle",
-    budget: int = 200,
-    dashboard_port: int = 8080,
-    show_logs: bool = False,
+    config: Any,
+    model_overrides: dict | None,
+    tier_override: Any,
+    topology: str,
+    show_logs: bool,
+    server_port: int,
+    server_host: str = "0.0.0.0",
 ) -> None:
     from web.server import DashboardServer
     from web.state import DashboardState
 
     dash_state = DashboardState()
-    dashboard_server = DashboardServer(dash_state, port=dashboard_port)
-    dashboard_server.set_providers(
+    server = DashboardServer(dash_state, host=server_host, port=server_port)
+    server.set_providers(
         providers=providers, config=config,
-        model_overrides=model_overrides,
-        tier_override=tier_override,
+        model_overrides=model_overrides, tier_override=tier_override,
     )
-    await dashboard_server.start()
+    await server.start()
+    try:
+        await OrbTUI(
+            server_port=server_port, topology=topology, show_logs=show_logs,
+        ).run_async()
+    finally:
+        await server.stop()
 
-    app = OrbTUI(
+
+def run_tui(
+    providers: dict,
+    config: Any,
+    model_overrides: dict | None = None,
+    tier_override: Any = None,
+    topology: str = "triangle",
+    budget: int = 200,
+    show_logs: bool = False,
+    server_port: int = 18080,
+) -> None:
+    """TUI-only mode: backend runs on a local-only port."""
+    import asyncio
+    asyncio.run(_launch(
         providers=providers, config=config,
-        model_overrides=model_overrides,
-        tier_override=tier_override,
-        topology=topology, budget=budget,
-        dashboard_server=dashboard_server,
-        dashboard_port=dashboard_port,
-        show_logs=show_logs,
+        model_overrides=model_overrides, tier_override=tier_override,
+        topology=topology, show_logs=show_logs,
+        server_port=server_port, server_host="127.0.0.1",
+    ))
+
+
+async def run_tui_with_dashboard(
+    providers: dict,
+    config: Any,
+    model_overrides: dict | None = None,
+    tier_override: Any = None,
+    topology: str = "triangle",
+    budget: int = 200,
+    dashboard_port: int = 8080,
+    show_logs: bool = False,
+) -> None:
+    """TUI + public dashboard: backend serves both the TUI and the browser."""
+    await _launch(
+        providers=providers, config=config,
+        model_overrides=model_overrides, tier_override=tier_override,
+        topology=topology, show_logs=show_logs,
+        server_port=dashboard_port, server_host="0.0.0.0",
     )
-    app._dashboard_state = dash_state
-    await app.run_async()
-    await dashboard_server.stop()

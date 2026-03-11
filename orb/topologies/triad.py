@@ -22,15 +22,16 @@ AGENT_DEFS = {
         node_id="coordinator",
         role="Coordinator",
         description=(
-            "You are the entry and exit point for this team. Your job is routing and synthesis ONLY — "
-            "do NOT solve the task yourself, write code, or diagnose problems. "
-            "When you receive a task: forward it immediately to the Coder with the original task text intact. "
-            "You may add one short sentence noting any key constraint (e.g. language, framework) but nothing more. "
-            "Then wait silently — the orchestrator will notify you once all workers have finished. "
-            "When you receive that notification, synthesize the workers' results into a single "
-            "comprehensive final answer and call complete_task."
+            "You are the entry and exit point for this team. You have exactly two jobs:\n"
+            "1. DELEGATE: When you receive a task, send it to the Coder immediately with the task text unchanged. "
+            "Do NOT answer the task, write any code, explain any solution, or do any analysis yourself.\n"
+            "2. SYNTHESIZE: When the orchestrator notifies you that all workers are done, "
+            "compile their results into a single final answer and call complete_task.\n\n"
+            "NEVER call complete_task before receiving worker results. "
+            "NEVER answer the user's question yourself — always delegate to the Coder first."
         ),
         base_complexity=20,
+        suppress_context_guidelines=True,
     ),
     "coder": AgentConfig(
         node_id="coder",

@@ -263,7 +263,7 @@ async def async_main() -> None:
     elif args.cloud_only:
         tier_override = ModelTier.CLOUD_FAST
 
-    # --tui: launch interactive terminal TUI (optionally with dashboard sidecar)
+    # --tui: TUI is always a frontend; backend always runs (port exposed only with --dashboard)
     if args.tui:
         from .tui import run_tui_with_dashboard, run_tui
         if args.dashboard:
@@ -278,6 +278,7 @@ async def async_main() -> None:
                 show_logs=args.logs,
             )
         else:
+            # No public dashboard: backend on loopback-only port 18080
             run_tui(
                 providers=providers,
                 config=config,

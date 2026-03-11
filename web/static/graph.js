@@ -567,7 +567,7 @@ class GraphRenderer {
             ctx.font      = '10px "JetBrains Mono", monospace';
             ctx.fillStyle = '#6b7280';
             ctx.fillText(_shortModel(node.model), x + PAD, y + STRIPE + 26, w - PAD * 2);
-        } else {
+        } else if (node.status !== 'completed' && node.status !== 'error') {
             ctx.font      = '10px Inter, -apple-system, sans-serif';
             ctx.fillStyle = '#9198a1';
             ctx.fillText('selecting model…', x + PAD, y + STRIPE + 26, w - PAD * 2);

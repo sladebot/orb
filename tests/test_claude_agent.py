@@ -79,7 +79,8 @@ class TestLLMAgent:
         msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Write hello world")
         await agent_a.process(msg)
 
-        assert len(mock.requests) == 1
+        # Agent retries text-only responses up to MAX_TOOL_NUDGES times; verify at least 1 call was made
+        assert len(mock.requests) >= 1
         assert "Write hello world" in mock.requests[0].messages[0]["content"]
 
     async def test_process_send_message_tool(self):

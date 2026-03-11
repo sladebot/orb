@@ -93,7 +93,7 @@ def _openai_available() -> bool:
 
 def _openai_factory() -> "LLMClient":
     """Build OpenAIProvider with real API key (never Ollama shim vars)."""
-    from .providers import OpenAIProvider
+    from .openai import OpenAIProvider
     return OpenAIProvider(api_key=_real_openai_api_key(), base_url="https://api.openai.com/v1")
 
 
@@ -111,7 +111,7 @@ def _codex_available() -> bool:
 
 
 def _codex_factory() -> "LLMClient":
-    from .providers import OpenAICodexProvider
+    from .codex import OpenAICodexProvider
     return OpenAICodexProvider(access_token=_codex_token())
 
 
@@ -132,13 +132,12 @@ def _anthropic_available() -> bool:
 
 
 def _anthropic_factory() -> "LLMClient":
-    from .providers import AnthropicProvider
-    key = _anthropic_api_key()
-    return AnthropicProvider(api_key=key)
+    from .anthropic import AnthropicProvider
+    return AnthropicProvider(api_key=_anthropic_api_key())
 
 
 def _build_registry() -> list[ProviderSpec]:
-    from .providers import OllamaProvider
+    from .ollama import OllamaProvider
     return [
         ProviderSpec(
             name="anthropic",

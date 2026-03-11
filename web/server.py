@@ -14,6 +14,8 @@ from .state import DashboardState
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Cache-buster: changes every server restart so browsers always fetch fresh JS/CSS
+_BUILD_TS = str(int(time.time()))
 
 
 class DashboardServer:
@@ -38,6 +40,7 @@ class DashboardServer:
         # Conversational continuity across runs
         self._session_history: list[dict] = []       # [{query, result}] per completed run
         self._conv_carryover: dict[str, list] = {}   # agent_id → conversation messages
+        self._turn_count: int = 0                     # increments each run
 
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/api/state", self._state_handler)
@@ -93,8 +96,12 @@ class DashboardServer:
         for ws in closed:
             self._clients.discard(ws)
 
-    async def _index_handler(self, request: web.Request) -> web.FileResponse:
-        return web.FileResponse(STATIC_DIR / "index.html")
+    async def _index_handler(self, request: web.Request) -> web.Response:
+        html = (STATIC_DIR / "index.html").read_text()
+        html = html.replace("/static/style.css", f"/static/style.css?v={_BUILD_TS}")
+        html = html.replace("/static/graph.js",  f"/static/graph.js?v={_BUILD_TS}")
+        html = html.replace("/static/app.js",    f"/static/app.js?v={_BUILD_TS}")
+        return web.Response(text=html, content_type="text/html")
 
     async def _state_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.state.to_init_event())
@@ -118,6 +125,9 @@ class DashboardServer:
             return web.json_response({"ok": False, "error": "Missing 'to' field"}, status=400)
         if not text:
             return web.json_response({"ok": False, "error": "Missing 'message' field"}, status=400)
+
+        if self._run_task is None or self._run_task.done():
+            return web.json_response({"ok": False, "error": "No run in progress"}, status=400)
 
         agent = self._agents.get(target_id)
         if agent is None:
@@ -262,6 +272,15 @@ class DashboardServer:
                 force_provider = "openai"
             elif "qwen" in model_pin or "llama" in model_pin:
                 force_provider = "ollama"
+
+        # If the forced provider isn't actually available, fall back to auto mode
+        provider_available = {
+            "anthropic": has_anthropic, "openai": has_openai,
+            "openai-codex": has_codex, "ollama": has_ollama,
+        }
+        if force_provider and not provider_available.get(force_provider):
+            logger.warning(f"Forced provider '{force_provider}' not available; falling back to auto")
+            force_provider = None
 
         # Build available models per tier.
         q9  = ollama("qwen3.5:9b")  if has_ollama and force_provider in (None, "ollama") else None
@@ -536,6 +555,7 @@ class DashboardServer:
         """Build topology, wire dashboard bridge, and run the orchestrator."""
         from web.bridge import DashboardBridge
         from orb.llm.types import ModelTier, ModelConfig
+        self._turn_count += 1
 
         bridge = DashboardBridge(self.state, self.broadcast)
 
@@ -613,6 +633,21 @@ class DashboardServer:
         for agent in orchestrator.agents.values():
             agent._on_activity = on_agent_activity
 
+        # Wire file-write callbacks so the TUI (and any other WS client) sees diffs
+        def _make_file_write_cb(aid: str):
+            def cb(_, path: str, content: str, old_content: str = "") -> None:
+                asyncio.ensure_future(self.broadcast(json.dumps({
+                    "type": "file_write",
+                    "agent": aid,
+                    "path": path,
+                    "content": content,
+                    "old_content": old_content,
+                })))
+            return cb
+
+        for aid, agent in orchestrator.agents.items():
+            agent._on_file_write = _make_file_write_cb(aid)
+
         # ── Conversational continuity ──────────────────────────────────────────
         # Build context preamble from prior session runs
         if self._session_history:
@@ -624,11 +659,38 @@ class DashboardServer:
             lines.append("=== End of prior context ===\n")
             query = "\n".join(lines) + query
 
-        # Restore agent conversation histories from the previous run
+        # Restore agent conversation histories from the previous run.
+        # Strip backward from the end until the conversation is in a "clean" state:
+        # an assistant message with no tool_use blocks (pure text).  This prevents
+        # two classes of 400 errors from the Anthropic API:
+        #   1. Consecutive user messages — if we restore ending on a tool_result and
+        #      immediately add_user() for the new task.
+        #   2. Orphaned tool_use — if the last assistant message has tool_use blocks
+        #      whose corresponding tool_result was stripped, the API rejects the next
+        #      call with "unexpected tool_use_id in tool_result blocks".
         if self._conv_carryover:
             for aid, agent in orchestrator.agents.items():
-                if aid in self._conv_carryover and self._conv_carryover[aid]:
-                    agent._conversation.messages = list(self._conv_carryover[aid])
+                if aid not in self._conv_carryover or not self._conv_carryover[aid]:
+                    continue
+                msgs = list(self._conv_carryover[aid])
+                # Strip until we end on a clean assistant message (text, no tool_use)
+                while msgs:
+                    last = msgs[-1]
+                    role = last.get("role")
+                    content = last.get("content", "")
+                    if role == "user":
+                        # Trailing user messages (tool_results or plain text)
+                        msgs.pop()
+                        continue
+                    if role == "assistant" and isinstance(content, list) and any(
+                        b.get("type") == "tool_use" for b in content
+                    ):
+                        # Assistant has tool_use blocks whose tool_results were stripped
+                        msgs.pop()
+                        continue
+                    break  # Clean: assistant with text-only content
+                if msgs:
+                    agent._conversation.messages = msgs
 
         # Store agent refs for message injection
         self.set_agents(orchestrator.agents)
@@ -642,10 +704,15 @@ class DashboardServer:
             self.state.completed = True
 
         # Save conversation histories and session summary for next run
-        self._conv_carryover = {
-            aid: list(agent._conversation.messages)
-            for aid, agent in orchestrator.agents.items()
-        }
+        # Compact any agent whose history has grown large
+        from orb.agent.compaction import compact_history, COMPACT_THRESHOLD
+        new_carryover: dict[str, list] = {}
+        for aid, agent in orchestrator.agents.items():
+            msgs = list(agent._conversation.messages)
+            if len(msgs) >= COMPACT_THRESHOLD:
+                msgs = await compact_history(msgs, self._providers)
+            new_carryover[aid] = msgs
+        self._conv_carryover = new_carryover
         synthesis_id = orchestrator.config.synthesis_agent
         if result:
             summary = (
@@ -686,6 +753,7 @@ class DashboardServer:
                 "diff": diff,
                 "elapsed": round(elapsed, 2),
                 "session_turn": len(self._session_history),
+                "routed": self.state.message_count,
             }))
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:

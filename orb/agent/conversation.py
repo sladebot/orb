@@ -52,19 +52,48 @@ class ConversationHistory:
             return
         keep = self.max_messages
         tail = self.messages[-(keep - 1):]
-        # Find a safe start point: a plain user message (not a tool_result).
-        # Dropping mid-pair would leave orphaned tool_result blocks referencing
-        # tool_use IDs no longer present, causing Anthropic 400 errors.
-        start = 0
+
+        def _tool_use_ids(slice_: list) -> set[str]:
+            ids: set[str] = set()
+            for m in slice_:
+                if m["role"] == "assistant":
+                    c = m.get("content", [])
+                    if isinstance(c, list):
+                        for b in c:
+                            if isinstance(b, dict) and b.get("type") == "tool_use":
+                                ids.add(b.get("id", ""))
+            return ids
+
+        def _has_orphan(slice_: list, valid_ids: set[str]) -> bool:
+            for m in slice_:
+                if m["role"] == "user":
+                    c = m.get("content", [])
+                    if isinstance(c, list):
+                        for b in c:
+                            if isinstance(b, dict) and b.get("type") == "tool_result":
+                                if b.get("tool_use_id", "") not in valid_ids:
+                                    return True
+            return False
+
+        # Walk forward until we find a start position where:
+        # 1. The first message is a plain user message (not tool_result)
+        # 2. No tool_result in the resulting slice is orphaned
+        start = len(tail)  # fallback: drop everything except messages[0]
         for i, m in enumerate(tail):
-            if m["role"] == "user":
-                content = m.get("content", "")
-                is_tool_result = isinstance(content, list) and any(
-                    b.get("type") == "tool_result" for b in content
-                )
-                if not is_tool_result:
-                    start = i
-                    break
+            if m["role"] != "user":
+                continue
+            content = m.get("content", "")
+            is_tool_result = isinstance(content, list) and any(
+                b.get("type") == "tool_result" for b in content
+            )
+            if is_tool_result:
+                continue
+            # Candidate start — verify no orphaned tool_results in tail[i:]
+            candidate = tail[i:]
+            if not _has_orphan(candidate, _tool_use_ids(candidate)):
+                start = i
+                break
+
         self.messages = [self.messages[0]] + tail[start:]
 
     def clear(self) -> None:
