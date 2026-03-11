@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TUIMessage
 from textual.reactive import reactive
-from textual.widgets import Footer, Input, Label, RichLog, Static
+from textual.widgets import Footer, Label, RichLog, Static, TextArea
 from textual import on, work
 
 from ..messaging.message import Message as OrbMessage, MessageType
@@ -726,6 +726,9 @@ class OrbTUI(App[None]):
 
     #query-input {
         width: 1fr;
+        height: auto;
+        min-height: 1;
+        max-height: 8;
         background: #0d1117;
         border: solid #30363d;
         color: #c9d1d9;
@@ -737,6 +740,10 @@ class OrbTUI(App[None]):
 
     #query-input.inject-mode {
         border: solid #0d9373;
+    }
+
+    #query-input.user-reply-mode {
+        border: solid #e3b341;
     }
 
     Footer {
@@ -799,13 +806,14 @@ class OrbTUI(App[None]):
     """
 
     BINDINGS = [
-        Binding("ctrl+c",  "quit",                    "Quit"),
-        Binding("escape",  "deselect",                "Deselect"),
-        Binding("tab",     "next_agent",              "Next agent"),
-        Binding("slash",   "focus_input",             "Focus input", show=False),
-        Binding("r",       "show_results",            "Results"),
-        Binding("ctrl+k",  "cancel_run",              "Cancel run"),
-        Binding("ctrl+l",  "clear_feed",              "Clear feed"),
+        Binding("ctrl+c",     "quit",         "Quit"),
+        Binding("escape",     "deselect",     "Deselect"),
+        Binding("tab",        "next_agent",   "Next agent"),
+        Binding("slash",      "focus_input",  "Focus input", show=False),
+        Binding("r",          "show_results", "Results"),
+        Binding("ctrl+k",     "cancel_run",   "Cancel run"),
+        Binding("ctrl+l",     "clear_feed",   "Clear feed"),
+        Binding("ctrl+enter", "submit_input", "Send", show=True),
         Binding("1", "select('coordinator')",         show=False),
         Binding("2", "select('coder')",               show=False),
         Binding("3", "select('reviewer')",            show=False),
@@ -855,6 +863,9 @@ class OrbTUI(App[None]):
         self._session_history: list[dict] = []       # [{query, result}] per completed run
         self._conv_carryover: dict[str, list] = {}   # agent_id → conversation messages
 
+        # User-prompt handling — tracks which agent is waiting for human reply
+        self._awaiting_user: str | None = None
+
         # Animation state
         self._tick_count: int = 0
         self._active_edges: dict[tuple[str, str], int] = {}  # edge -> expiry tick
@@ -887,17 +898,14 @@ class OrbTUI(App[None]):
 
         with Horizontal(id="query-bar"):
             yield Label(" >  ", id="query-label")
-            yield Input(
-                placeholder="Describe a task… or @agentname  ·  tab=next  r=results  1-6=inspect",
-                id="query-input",
-            )
+            yield TextArea(id="query-input", soft_wrap=True)
 
         yield Footer()
 
     def on_mount(self) -> None:
         feed = self.query_one("#message-feed", RichLog)
-        feed.write("[dim]Ready. Type a task and press Enter.[/dim]")
-        self.query_one("#query-input", Input).focus()
+        feed.write("[dim]Ready. Type a task and press [bold]ctrl+enter[/bold] to send. Enter adds a new line.[/dim]")
+        self.query_one("#query-input", TextArea).focus()
         self._elapsed_task = asyncio.create_task(self._tick())
 
         if self._show_logs:
@@ -928,13 +936,15 @@ class OrbTUI(App[None]):
 
     # ── Input handling ────────────────────────────────────────────────────────
 
-    @on(Input.Submitted, "#query-input")
-    async def on_query_submitted(self, event: Input.Submitted) -> None:
-        raw = event.value.strip()
+    async def action_submit_input(self) -> None:
+        """Submit the textarea (ctrl+enter)."""
+        ta = self.query_one("#query-input", TextArea)
+        raw = ta.text.strip()
         if not raw:
             return
-        event.input.clear()
-        event.input.remove_class("inject-mode")
+        ta.clear()
+        ta.remove_class("inject-mode")
+        ta.remove_class("user-reply-mode")
 
         # @mention — select agent, run remainder as task
         mention = re.match(r'^@(\w+)\s*', raw)
@@ -946,6 +956,11 @@ class OrbTUI(App[None]):
                 return
             raw = remainder
 
+        # Agent waiting for user — reply directly to that agent
+        if self._awaiting_user and self._current_orchestrator is not None:
+            await self._reply_to_agent(self._awaiting_user, raw)
+            return
+
         # Mid-run: inject to coordinator
         if self._current_orchestrator is not None and self._run_status == "Running":
             await self._inject_to_coordinator(raw)
@@ -954,13 +969,18 @@ class OrbTUI(App[None]):
         # New run
         self._start_new_run(raw)
 
-    @on(Input.Changed, "#query-input")
-    def on_input_changed(self, event: Input.Changed) -> None:
-        inp = event.input
-        if self._run_status == "Running":
-            inp.add_class("inject-mode")
+    @on(TextArea.Changed, "#query-input")
+    def on_input_changed(self, event: TextArea.Changed) -> None:
+        ta = event.text_area
+        if self._awaiting_user:
+            ta.add_class("user-reply-mode")
+            ta.remove_class("inject-mode")
+        elif self._run_status == "Running":
+            ta.add_class("inject-mode")
+            ta.remove_class("user-reply-mode")
         else:
-            inp.remove_class("inject-mode")
+            ta.remove_class("inject-mode")
+            ta.remove_class("user-reply-mode")
 
     def _start_new_run(self, query: str) -> None:
         self._last_query      = query
@@ -997,6 +1017,25 @@ class OrbTUI(App[None]):
         color = AGENT_COLORS.get(entry, "white")
         feed.write(
             f"[dim]↪ user →[/dim] [{color}]{entry}[/{color}][dim]: {text}[/dim]"
+        )
+
+    async def _reply_to_agent(self, agent_id: str, text: str) -> None:
+        """Route a user reply directly to the agent that asked for it."""
+        orch = self._current_orchestrator
+        if not orch or agent_id not in orch.agents:
+            await self._inject_to_coordinator(text)
+            return
+        msg = OrbMessage(from_="user", to=agent_id,
+                         type=MessageType.RESPONSE, payload=text)
+        await orch.agents[agent_id].channel.send(msg)
+        # Clear awaiting state and reset label / input style
+        self._awaiting_user = None
+        self.query_one("#query-label", Label).update(" >  ")
+        self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
+        feed  = self.query_one("#message-feed", RichLog)
+        color = AGENT_COLORS.get(agent_id, "white")
+        feed.write(
+            f"[dim]↪ user →[/dim] [{color}]{agent_id}[/{color}][dim]: {text}[/dim]"
         )
 
     # ── Run worker ────────────────────────────────────────────────────────────
@@ -1337,6 +1376,20 @@ class OrbTUI(App[None]):
         if event.agent_id == self._selected_agent:
             self._update_detail_header()
 
+        # Detect when an agent is waiting for user input
+        if event.text.startswith("⏳ Waiting for user"):
+            self._awaiting_user = event.agent_id
+            self.query_one("#query-label", Label).update(f" ↩ {event.agent_id}: ")
+            ta = self.query_one("#query-input", TextArea)
+            ta.add_class("user-reply-mode")
+            ta.remove_class("inject-mode")
+            ta.focus()
+        elif event.text == "" and self._awaiting_user == event.agent_id:
+            # Agent resumed — clear waiting state
+            self._awaiting_user = None
+            self.query_one("#query-label", Label).update(" >  ")
+            self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
+
     def on_orb_agent_complete(self, event: OrbAgentComplete) -> None:
         if event.agent_id in self._agents:
             self._agents[event.agent_id].set_status("completed")
@@ -1377,7 +1430,7 @@ class OrbTUI(App[None]):
             if "coordinator" in self._agents and not self._selected_agent:
                 self.action_select("coordinator")
 
-        self.query_one("#query-input", Input).focus()
+        self.query_one("#query-input", TextArea).focus()
         self._refresh_all()
 
     # ── Feed ──────────────────────────────────────────────────────────────────
@@ -1559,7 +1612,7 @@ class OrbTUI(App[None]):
         self._refresh_all()
 
     def action_focus_input(self) -> None:
-        self.query_one("#query-input", Input).focus()
+        self.query_one("#query-input", TextArea).focus()
 
     def action_show_results(self) -> None:
         if self._run_status != "Complete" or not self._completions:
