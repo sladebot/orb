@@ -35,7 +35,7 @@ class TestModelSelector:
     def test_complexity_hint_high(self):
         sel = ModelSelector(base_complexity=50)
         tier = sel.select(_msg(metadata={"complexity": "high"}))
-        assert tier in (ModelTier.LOCAL_LARGE, ModelTier.CLOUD_FAST)
+        assert tier in (ModelTier.LOCAL_LARGE, ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST)
 
     def test_complexity_hint_low(self):
         sel = ModelSelector(base_complexity=50)

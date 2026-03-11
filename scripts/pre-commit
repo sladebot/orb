@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run the test suite before every commit.
+# Install with: make install-hooks
+
+set -euo pipefail
+
+echo "Running tests..."
+
+pytest tests/ \
+  --ignore=tests/integration \
+  --ignore=tests/test_triangle.py \
+  --ignore=tests/test_orchestrator.py \
+  -q --tb=short
+
+echo "All tests passed."

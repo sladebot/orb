@@ -4,7 +4,7 @@ from orb.graph import Graph
 from orb.messaging.bus import MessageBus, RoutingError
 from orb.messaging.channel import AgentChannel
 from orb.messaging.message import Message, MessageType
-from orb.messaging.middleware import HopLimitExceeded, BudgetExhausted
+from orb.messaging.middleware import HopLimitExceeded, BudgetExhausted, CooldownExceeded
 
 
 def _setup_bus(max_depth=10, budget=200, max_cooldown=5):
@@ -72,7 +72,7 @@ class TestMessageBus:
         bus, *_ = _setup_bus(max_cooldown=2)
         await bus.route(_msg("a", "b", chain_id="c1"))
         await bus.route(_msg("a", "b", chain_id="c1"))
-        with pytest.raises(HopLimitExceeded):
+        with pytest.raises(CooldownExceeded):
             await bus.route(_msg("a", "b", chain_id="c1"))
 
     async def test_cooldown_different_chains(self):
