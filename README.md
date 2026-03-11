@@ -62,9 +62,11 @@ orb auth status
 orb auth logout
 ```
 
-The auth system also reads `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` environment variables as fallbacks. `orb auth status` shows which source is active for each provider and whether OAuth tokens are still valid.
+The auth system also reads `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, and `OPENAI_API_KEY` environment variables as fallbacks. `orb auth status` shows which source is active for each provider and whether OAuth tokens are still valid.
 
 For remote or SSH sessions, `orb auth openai` prints the authorization URL and prompts you to paste the redirect URL from your browser instead of starting a local callback server.
+
+Running `orb auth` with no subcommand is equivalent to `orb auth status`.
 
 ---
 
@@ -257,10 +259,20 @@ Select any agent to open the detail pane on the right, which shows:
 | `Escape` | Deselect / close detail pane |
 | `r` | Open result screen (files changed + diff + agent results) |
 | `s` | Save results to file (from result screen) |
+| `y` | Copy result to clipboard (selected agent, or synthesis result) |
 | `Ctrl+K` | Cancel the current run |
 | `Ctrl+L` | Clear the message feed |
 | `/` | Focus the input bar |
 | `Ctrl+C` | Quit |
+
+To select and copy arbitrary text from the terminal, hold **Shift** while clicking and dragging. This bypasses the TUI's mouse capture and uses native terminal selection.
+
+### Input bar
+
+The input bar supports multi-line content:
+
+- **Enter** — submit the current text
+- **Paste** — newlines in pasted text are preserved; press Enter when ready to send
 
 ### Result screen
 
@@ -269,7 +281,22 @@ Press `r` after a run completes to open the full-screen result screen, which sho
 - Colored diff of all file changes
 - Each agent's final result
 
-Press `s` in the result screen to save the output to a timestamped markdown file (`orb_result_YYYYMMDD_HHMMSS.md`).
+Press `s` to save the output to a timestamped markdown file (`orb_result_YYYYMMDD_HHMMSS.md`). Press `y` to copy the synthesis result to the clipboard.
+
+### Conversational follow-ups
+
+After a run completes, typing a new task continues the session with full context. Each agent's conversation history is preserved across runs, and a session summary is prepended to the new task so agents remember what was built before.
+
+```
+orb --tui
+> write a snake game in Python       # first run
+> add a high score leaderboard       # follow-up — agents remember the code
+> now add sound effects              # and again
+```
+
+### Asking for clarification
+
+If an agent needs more information, it can send a message to `user` instead of calling `complete_task`. The run stays active, the input bar turns amber and shows which agent is waiting, and the next submission is routed directly to that agent as a reply.
 
 ### @mention
 
