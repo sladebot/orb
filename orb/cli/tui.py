@@ -196,6 +196,15 @@ class OrbActivityUpdate(TUIMessage):
         self.text = text
 
 
+class OrbFileWrite(TUIMessage):
+    def __init__(self, agent_id: str, path: str, content: str, old_content: str = "") -> None:
+        super().__init__()
+        self.agent_id    = agent_id
+        self.path        = path
+        self.content     = content
+        self.old_content = old_content
+
+
 class OrbLogRecord(TUIMessage):
     def __init__(self, level: str, name: str, message: str) -> None:
         super().__init__()
@@ -554,6 +563,55 @@ class ModeBar(Static):
         self._v += 1
 
 
+# ─── Code panel ──────────────────────────────────────────────────────────────
+
+# Simple extension→language hint for syntax coloring
+_EXT_LANG: dict[str, str] = {
+    "py": "python", "js": "javascript", "ts": "typescript",
+    "tsx": "tsx", "jsx": "jsx", "go": "go", "rs": "rust",
+    "java": "java", "kt": "kotlin", "swift": "swift",
+    "c": "c", "cpp": "c++", "h": "c", "hpp": "c++",
+    "sh": "bash", "zsh": "bash", "bash": "bash",
+    "json": "json", "yaml": "yaml", "yml": "yaml",
+    "toml": "toml", "md": "markdown", "html": "html",
+    "css": "css", "sql": "sql", "rb": "ruby",
+}
+
+
+def _lang_for(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return _EXT_LANG.get(ext, "text")
+
+
+def _colorize_code(lines: list[str], lang: str) -> list[str]:
+    """Very lightweight token coloring for common patterns."""
+    KW = {"def", "class", "return", "import", "from", "if", "else", "elif",
+          "for", "while", "with", "as", "try", "except", "raise", "pass",
+          "async", "await", "yield", "lambda", "in", "not", "and", "or",
+          "True", "False", "None", "const", "let", "var", "function",
+          "export", "default", "interface", "type", "extends", "implements"}
+    out = []
+    for raw in lines:
+        stripped = raw.rstrip()
+        # Comments
+        if stripped.lstrip().startswith(("#", "//", "--")):
+            out.append(f"[dim]{stripped}[/dim]")
+            continue
+        # Simple keyword coloring
+        result = ""
+        for word in re.split(r"(\W+)", stripped):
+            if word in KW:
+                result += f"[bold cyan]{word}[/bold cyan]"
+            elif re.match(r'^"[^"]*"$|^\'[^\']*\'$', word):
+                result += f"[green]{word}[/green]"
+            elif re.match(r'^\d+(\.\d+)?$', word):
+                result += f"[yellow]{word}[/yellow]"
+            else:
+                result += word
+        out.append(result)
+    return out
+
+
 # ─── Log handler ─────────────────────────────────────────────────────────────
 
 class TUILogHandler(logging.Handler):
@@ -686,6 +744,35 @@ class OrbTUI(App[None]):
         color: #484f58;
     }
 
+    /* Code panel */
+    #code-panel {
+        width: 60;
+        background: #0d1117;
+        border-left: solid #21262d;
+        display: none;
+        layout: vertical;
+    }
+
+    #code-panel.visible {
+        display: block;
+    }
+
+    #code-panel-header {
+        height: 1;
+        background: #161b22;
+        border-bottom: solid #21262d;
+        padding: 0 1;
+        color: #8b949e;
+    }
+
+    #code-scroll {
+        height: 1fr;
+    }
+
+    #code-log {
+        padding: 0 1;
+    }
+
     /* Log panel (--logs mode) */
     #log-panel {
         height: 10;
@@ -778,6 +865,11 @@ class OrbTUI(App[None]):
                 with VerticalScroll(id="feed-scroll"):
                     yield RichLog(id="message-feed", highlight=True, markup=True, wrap=True)
 
+            with Vertical(id="code-panel"):
+                yield Static("", id="code-panel-header")
+                with VerticalScroll(id="code-scroll"):
+                    yield RichLog(id="code-log", highlight=False, markup=True, wrap=False)
+
             with Vertical(id="detail-pane"):
                 yield Static(id="detail-header")
                 with VerticalScroll(id="detail-scroll"):
@@ -822,6 +914,8 @@ class OrbTUI(App[None]):
             self.query_one("#header-bar",  HeaderBar).bump()
             self.query_one("#graph-panel", GraphPanel).bump()
             self.query_one("#mode-bar",    ModeBar).bump()
+            if self._selected_agent:
+                self._update_detail_header()
 
     def _refresh_all(self) -> None:
         self.query_one("#header-bar",  HeaderBar).bump()
@@ -893,7 +987,7 @@ class OrbTUI(App[None]):
         if not entry:
             return
         msg = OrbMessage(from_="user", to=entry,
-                         type=MessageType.TASK, payload=text)
+                         type=MessageType.RESPONSE, payload=text)
         await orch.agents[entry].channel.send(msg)
         feed  = self.query_one("#message-feed", RichLog)
         color = AGENT_COLORS.get(entry, "white")
@@ -934,14 +1028,19 @@ class OrbTUI(App[None]):
                     agent_id=agent_id, role=agent.config.role
                 )
 
-            # Wire on_activity callbacks
+            # Wire on_activity and on_file_write callbacks
             for agent_id, agent in orchestrator.agents.items():
                 aid = agent_id
-                def make_cb(a: str):
+                def make_activity_cb(a: str):
                     def cb(_, text: str) -> None:
                         self.post_message(OrbActivityUpdate(a, text))
                     return cb
-                agent._on_activity = make_cb(aid)
+                def make_file_cb(a: str):
+                    def cb(_, path: str, content: str, old_content: str = "") -> None:
+                        self.post_message(OrbFileWrite(a, path, content, old_content))
+                    return cb
+                agent._on_activity   = make_activity_cb(aid)
+                agent._on_file_write = make_file_cb(aid)
 
             # Detect topology from actual graph edges
             self._topology_name = (
@@ -965,6 +1064,29 @@ class OrbTUI(App[None]):
                     bridge.setup_budget(self._config.budget)
                     orchestrator.bus.on_event(bridge.on_message_routed)
                     self._dashboard_server.set_agents(orchestrator.agents)
+
+                    # Broadcast init event so already-connected clients see the new topology
+                    import json as _json
+                    init_ev = dash_state.to_init_event()
+                    init_ev["run_active"] = True
+                    await self._dashboard_server.broadcast(_json.dumps(init_ev))
+
+                    # Wire _on_activity to send to dashboard too (TUI callback already set above)
+                    _dash_bcast = self._dashboard_server.broadcast
+
+                    for aid2, agent2 in orchestrator.agents.items():
+                        _tui_cb = agent2._on_activity
+                        def make_combined(tui_cb, a_id):
+                            async def combined(_, text: str) -> None:
+                                if tui_cb:
+                                    tui_cb(_, text)
+                                await _dash_bcast(_json.dumps({
+                                    "type": "agent_activity",
+                                    "agent": a_id,
+                                    "activity": text,
+                                }))
+                            return combined
+                        agent2._on_activity = make_combined(_tui_cb, aid2)
 
                     orig = orchestrator._on_agent_complete
                     async def patched_bridge(aid: str, res: str) -> None:
@@ -1051,12 +1173,17 @@ class OrbTUI(App[None]):
                         info.set_status("waiting")
             self._routed += 1
 
-        # Feed entry
+        # Feed entry — store full payload for detail pane, short preview for feed
         to_label = "[COMPLETE]" if msg.type == MessageType.COMPLETE else msg.to
-        preview  = msg.payload[:500].replace("\n", " ")
+        preview  = msg.payload[:120].replace("\n", " ")
         entry = {
-            "elapsed": elapsed, "from_": msg.from_, "to": to_label,
-            "model": model, "preview": preview, "type": msg.type.value,
+            "elapsed":  elapsed,
+            "from_":    msg.from_,
+            "to":       to_label,
+            "model":    model,
+            "preview":  preview,
+            "payload":  msg.payload,   # full, untruncated
+            "type":     msg.type.value,
         }
         self._detail_feed.append(entry)
 
@@ -1072,6 +1199,77 @@ class OrbTUI(App[None]):
             msg.from_ == self._selected_agent or msg.to == self._selected_agent
         ):
             self._append_to_detail(entry)
+            self.query_one("#detail-scroll").scroll_end(animate=False)
+
+        self._refresh_all()
+
+    def on_orb_file_write(self, event: OrbFileWrite) -> None:
+        import difflib
+        path        = event.path
+        content     = event.content
+        old_content = event.old_content
+        agent_id    = event.agent_id
+        color       = AGENT_COLORS.get(agent_id, "white")
+        is_new      = old_content == ""
+
+        new_lines = content.splitlines(keepends=True)
+        old_lines = old_content.splitlines(keepends=True)
+
+        # Build unified diff
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        ))
+
+        added   = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+        stat    = f"+{added} -{removed}" if not is_new else f"+{len(new_lines)} (new file)"
+
+        # Compact feed entry
+        feed = self.query_one("#message-feed", RichLog)
+        feed.write(
+            f"[{color}]{agent_id}[/{color}]"
+            f"[dim] wrote [/dim][cyan]{path}[/cyan]"
+            f"  [green]+{added}[/green] [red]-{removed}[/red]"
+        )
+
+        # Code panel — show diff
+        panel = self.query_one("#code-panel")
+        panel.add_class("visible")
+        hdr = self.query_one("#code-panel-header", Static)
+        mode = "new file" if is_new else "modified"
+        hdr.update(
+            f" [{color}]{agent_id}[/{color}]"
+            f"[dim] · [/dim][cyan]{path}[/cyan]"
+            f"[dim] · {mode} · [/dim]"
+            f"[green]+{added}[/green][dim]/[/dim][red]-{removed}[/red]"
+        )
+
+        log = self.query_one("#code-log", RichLog)
+        log.clear()
+
+        if diff_lines:
+            for line in diff_lines:
+                line = line.rstrip("\n")
+                if line.startswith("@@"):
+                    log.write(f"[cyan]{line}[/cyan]")
+                elif line.startswith("+++") or line.startswith("---"):
+                    log.write(f"[bold]{line}[/bold]")
+                elif line.startswith("+"):
+                    log.write(f"[green]{line}[/green]")
+                elif line.startswith("-"):
+                    log.write(f"[red]{line}[/red]")
+                else:
+                    log.write(f"[dim]{line}[/dim]")
+        else:
+            # No diff (file unchanged) — show full content for new files
+            for i, l in enumerate(new_lines, 1):
+                log.write(f"[green]+{i:3} {l.rstrip()}[/green]")
+
+        if agent_id in self._agents:
+            self._agents[agent_id].activity_text = f"wrote {path} ({stat})"
 
         self._refresh_all()
 
@@ -1096,6 +1294,9 @@ class OrbTUI(App[None]):
         if event.agent_id in self._agents:
             self._agents[event.agent_id].activity_text = event.text
         self.query_one("#graph-panel", GraphPanel).bump()
+        # Refresh detail header if this agent is selected
+        if event.agent_id == self._selected_agent:
+            self._update_detail_header()
 
     def on_orb_agent_complete(self, event: OrbAgentComplete) -> None:
         if event.agent_id in self._agents:
@@ -1162,35 +1363,45 @@ class OrbTUI(App[None]):
         )
 
     def _append_to_detail(self, entry: dict) -> None:
-        """Append one entry to the detail log."""
-        log     = self.query_one("#detail-log", RichLog)
-        info    = self._agents.get(self._selected_agent)
-        if not info:
+        """Append one entry to the detail log with full payload."""
+        log = self.query_one("#detail-log", RichLog)
+        if not self._agents.get(self._selected_agent):
             return
+
         from_id = entry["from_"]
         to_id   = entry["to"]
         elapsed = entry.get("elapsed", 0.0)
-        color   = AGENT_COLORS.get(self._selected_agent, "white")
+        ttype   = entry.get("type", "")
+        t_clr   = MSG_TYPE_COLOR.get(ttype, "dim")
 
         if from_id == self._selected_agent:
-            direction, other, arrow_s = "→", to_id, "bold cyan"
+            direction   = "▶ OUT"
+            other       = to_id
+            arrow_style = "bold cyan"
         else:
-            direction, other, arrow_s = "←", from_id, "bold magenta"
+            direction   = "◀ IN "
+            other       = from_id
+            arrow_style = "bold magenta"
 
-        other_label = AGENT_LABELS.get(other, other)
+        other_label = AGENT_LABELS.get(str(other).lower(), other)
         other_color = AGENT_COLORS.get(str(other).lower(), "white")
-        ttype = entry.get("type", "")
-        t_clr = MSG_TYPE_COLOR.get(ttype, "dim")
+        model_s = f"  [{_short_model(entry['model'])}]" if entry.get("model") else ""
 
+        # Header line
         log.write(
-            f"[dim][{elapsed:4.1f}s][/dim] "
-            f"[{arrow_s}]{direction}[/{arrow_s}] "
-            f"[{other_color}]{other_label}[/{other_color}]"
-            f"[dim] {{{ttype}}}[/dim]"
+            f"[dim]{'─' * 38}[/dim]"
         )
-        # Full content (not truncated in detail pane)
-        full = entry.get("preview", "")
-        log.write(f"[dim]{full[:400]}[/dim]\n")
+        log.write(
+            f"[{arrow_style}]{direction}[/{arrow_style}]"
+            f"  [{other_color}]{other_label}[/{other_color}]"
+            f"[dim]{model_s}  {{{ttype}}}  {elapsed:.1f}s[/dim]"
+        )
+
+        # Full payload — split into lines, preserve formatting
+        full = entry.get("payload") or entry.get("preview", "")
+        for line in full.splitlines():
+            log.write(f"  [dim]{line}[/dim]")
+        log.write("")
 
     def _populate_detail_pane(self) -> None:
         """Rebuild detail pane from scratch for the selected agent."""
@@ -1202,18 +1413,43 @@ class OrbTUI(App[None]):
         if not info:
             return
 
-        # Write all historical messages involving this agent
+        color = AGENT_COLORS.get(self._selected_agent, "white")
+        label = AGENT_LABELS.get(self._selected_agent, self._selected_agent)
+
+        # Agent summary header
+        log.write(f"[bold {color}]{'═' * 36}[/bold {color}]")
+        log.write(f"[bold {color}]  {label}[/bold {color}]  [dim]{info.role}[/dim]")
+        if info.model:
+            log.write(f"  [dim]model  {info.model}[/dim]")
+
+        # All messages (inbox + outbox) from _detail_feed
         agent_entries = [
             e for e in self._detail_feed
             if e.get("from_") == self._selected_agent
             or e.get("to") == self._selected_agent
         ]
+        n = len(agent_entries)
+        log.write(f"  [dim]queue  {n} message{'s' if n != 1 else ''}[/dim]")
+        log.write(f"[bold {color}]{'═' * 36}[/bold {color}]")
+        log.write("")
+
         for entry in agent_entries:
             self._append_to_detail(entry)
 
+        # Live activity line at the bottom
+        if info.activity_text:
+            log.write(f"[dim]⟳ {info.activity_text}[/dim]")
+
+        # Final result
         if info.result:
-            log.write(f"\n[bold green]── Result ──────────────────────[/bold green]")
-            log.write(info.result[:1000])
+            log.write(f"\n[bold green]{'─' * 36}[/bold green]")
+            log.write("[bold green]  Result[/bold green]")
+            log.write(f"[bold green]{'─' * 36}[/bold green]")
+            for line in info.result.splitlines():
+                log.write(f"  {line}")
+
+        # Scroll to bottom so latest message is visible
+        self.query_one("#detail-scroll").scroll_end(animate=False)
 
     def _update_detail_header(self) -> None:
         hdr = self.query_one("#detail-header", Static)
@@ -1223,16 +1459,31 @@ class OrbTUI(App[None]):
         info  = self._agents.get(self._selected_agent)
         color = AGENT_COLORS.get(self._selected_agent, "white")
         label = AGENT_LABELS.get(self._selected_agent, self._selected_agent)
-        icon  = STATUS_ICON.get(info.status if info else "idle", "○")
-        i_clr = STATUS_COLOR.get(info.status if info else "idle", "dim")
+        status = info.status if info else "idle"
+        icon  = STATUS_ICON.get(status, "○")
+        i_clr = STATUS_COLOR.get(status, "dim")
+
         t = RichText()
-        t.append(f" {icon} ", style=f"bold {i_clr}")
+        # Line 1: icon + name + model + msg count
+        if info and status == "running":
+            spin = SPINNERS[self._tick_count % len(SPINNERS)]
+            t.append(f" {spin} ", style=f"bold {i_clr}")
+        else:
+            t.append(f" {icon} ", style=f"bold {i_clr}")
         t.append(f"{label}", style=f"bold {color}")
         if info and info.model:
             t.append(f"  {_short_model(info.model)}", style="dim")
         if info and info.msg_count:
             t.append(f"  ✉{info.msg_count}", style="dim")
-        t.append(f"\n [dim]Esc to close[/dim]")
+        t.append(f"  [{i_clr}]{status}[/{i_clr}]")
+        # Line 2: time in state + live activity
+        t.append("\n ")
+        if info and info.time_in_state > 0.5:
+            t.append(f"{info.time_in_state:.0f}s in state  ", style="dim")
+        if info and info.activity_text:
+            t.append(info.activity_text[:50], style="italic dim")
+        else:
+            t.append("Esc to close", style="dim")
         hdr.update(t)
 
     # ── Actions ───────────────────────────────────────────────────────────────

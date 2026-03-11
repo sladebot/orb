@@ -9,7 +9,10 @@ def build_system_prompt(
 ) -> str:
     neighbor_lines = "\n".join(
         f"  - **{nid}** ({r})" for nid, r in neighbors.items()
+        if nid != "user"
     )
+    if "user" in neighbors:
+        neighbor_lines += f"\n  - **user** ⟵ Human operator. `send_message(to=\"user\", ...)` to ask for clarification or report a blocker. The run stays active until you get a reply and call `complete_task`."
 
     filesystem_section = ""
     if enable_filesystem:

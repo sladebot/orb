@@ -63,14 +63,20 @@ class LLMAgent(AgentNode):
 
     def initialize(self, neighbor_roles: dict[str, str]) -> None:
         """Set up system prompt and tools after graph is configured."""
+        # Always expose "user" as a pseudo-neighbor so agents can ask for clarification
+        # without being forced to call complete_task.
+        all_neighbors = {
+            **neighbor_roles,
+            "user": "Human operator — use to ask for clarification or report a blocker",
+        }
         self._system_prompt = build_system_prompt(
             role=self.config.role,
             description=self.config.description,
-            neighbors=neighbor_roles,
+            neighbors=all_neighbors,
             enable_filesystem=self.config.enable_filesystem,
         )
         self._tools = [
-            send_message_tool(sorted(neighbor_roles.keys())),
+            send_message_tool(sorted(all_neighbors.keys())),
             complete_task_tool(),
         ]
         if self.config.enable_filesystem:
@@ -309,6 +315,27 @@ class LLMAgent(AgentNode):
         to = input_data.get("to", "")
         content = input_data.get("content", "")
         context = input_data.get("context", [])
+
+        # Special case: "user" is a pseudo-neighbor — surface the message to the human
+        # via the activity/event system without routing through the bus, and without
+        # triggering completion.  The agent stays RUNNING and waits for an injected reply.
+        if to == "user":
+            await self._emit(f"⏳ Waiting for user: {content[:120]}")
+            # Emit a bus-style event so the dashboard displays this message in the feed
+            user_msg = original.reply(
+                from_=self.node_id,
+                to="user",
+                payload=content,
+                type=MessageType.RESPONSE,
+                context_slice=context,
+            )
+            user_msg.metadata["model"] = model
+            await self.bus._emit("routed", user_msg)
+            self._conversation.add_tool_result(
+                tool_id,
+                "Message sent to user. Waiting for their response — do NOT call complete_task yet.",
+            )
+            return
 
         if to not in self.neighbors:
             self._conversation.add_tool_result(tool_id, f"Error: {to!r} is not a neighbor")

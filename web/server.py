@@ -124,7 +124,7 @@ class DashboardServer:
         msg = Message(
             from_="user",
             to=target_id,
-            type=MessageType.TASK,
+            type=MessageType.RESPONSE,  # Arrives as a reply, not a new task
             payload=text,
         )
 
@@ -133,6 +133,20 @@ class DashboardServer:
         except Exception as exc:
             logger.exception("Failed to inject message")
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+        # Show the injected message in the dashboard feed immediately
+        await self.broadcast(json.dumps({
+            "type": "message",
+            "from": "user",
+            "to": target_id,
+            "content": text,
+            "model": "",
+            "depth": 0,
+            "elapsed": 0,
+            "chain_id": msg.chain_id,
+            "msg_type": "response",
+            "context_slice": [],
+        }))
 
         return web.json_response({"ok": True})
 
