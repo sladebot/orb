@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, Optional
 
 from ..llm.client import LLMClient
 from ..llm.model_selector import ModelSelector
@@ -48,6 +48,7 @@ class LLMAgent(AgentNode):
         self._memory = MemoryGraph()
         self._on_complete = on_complete
         self._on_activity = on_activity
+        self._on_file_write: Optional[Callable] = None  # (agent_id, path, content) -> None
         self._tier_override = tier_override
         self._system_prompt: str = ""
         self._tools: list[dict] = []
@@ -196,7 +197,8 @@ class LLMAgent(AgentNode):
                     await self._handle_complete("all_providers_failed", {"result": f"[ERROR] {err}"})
                     return
 
-            self._last_model = response.model  # track for completion metadata
+            # _last_model is read by web/server.py and tui.py at completion time
+            self._last_model = response.model
             logger.info(
                 f"Agent {self.node_id} used model {response.model} "
                 f"(tier={model_config.tier.value}, tokens={response.usage})"
@@ -268,7 +270,7 @@ class LLMAgent(AgentNode):
                     await self._emit(f"Listing {path}")
                     await self._handle_list_directory(tc.id, tc.input)
                 elif tc.name == "run_command":
-                    cmd = tc.input.get("command", "")[:60]
+                    cmd = tc.input.get("command", "")[:200]
                     await self._emit(f"$ {cmd}")
                     await self._handle_run_command(tc.id, tc.input)
 
@@ -334,7 +336,9 @@ class LLMAgent(AgentNode):
         logger.info(f"Agent {self.node_id} completed: {result[:100]}")
 
         if self._on_activity:
-            self._on_activity(self.node_id, "")  # clear activity text
+            _cb = self._on_activity(self.node_id, "")
+            if asyncio.iscoroutine(_cb):
+                await _cb
 
         if self._on_complete:
             cb_result = self._on_complete(self.node_id, result)
@@ -358,8 +362,15 @@ class LLMAgent(AgentNode):
             self._conversation.add_tool_result(tool_id, "Error: path is required")
             return
         try:
+            # Capture old content before overwriting for diff display
+            try:
+                old_content = self._sandbox().read_file(path)
+            except Exception:
+                old_content = ""
             result = self._sandbox().write_file(path, content)
             self._conversation.add_tool_result(tool_id, result)
+            if self._on_file_write:
+                self._on_file_write(self.node_id, path, content, old_content)
         except Exception as e:
             self._conversation.add_tool_result(tool_id, f"Error writing {path}: {e}")
 
@@ -409,4 +420,11 @@ class LLMAgent(AgentNode):
                     relation="followed_by",
                 ))
             except KeyError:
+                pass
+        # Prune oldest node to cap memory graph size
+        if self._memory_counter > 100:
+            oldest_id = f"msg_{self._memory_counter - 100}"
+            try:
+                self._memory.remove_node(oldest_id)
+            except (KeyError, AttributeError):
                 pass

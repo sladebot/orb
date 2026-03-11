@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import logging
 import os
+import time as _time
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .client import LLMClient
+
+logger = logging.getLogger(__name__)
+
+_ollama_reachable_cache: tuple[bool, float] | None = None
+_OLLAMA_CACHE_TTL = 30.0  # seconds
 
 
 @dataclass
@@ -38,32 +45,44 @@ def _ollama_base_url() -> str:
 
 
 def _ollama_reachable() -> bool:
+    global _ollama_reachable_cache
+    # Config check always runs first — no caching for disabled state
     try:
         from ..cli.config import local_models_enabled
         if not local_models_enabled():
             return False
     except Exception:
         pass
+    now = _time.time()
+    if _ollama_reachable_cache is not None:
+        result, ts = _ollama_reachable_cache
+        if now - ts < _OLLAMA_CACHE_TTL:
+            return result
     import httpx
     try:
         httpx.get(f"{_ollama_base_url()}/api/tags", timeout=2.0)
-        return True
+        result = True
     except Exception:
-        return False
+        result = False
+    _ollama_reachable_cache = (result, now)
+    return result
 
 
 def _real_openai_api_key() -> str | None:
     """Return a genuine OpenAI API key, ignoring Ollama-compat env vars."""
     key = os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        return None
     base = os.environ.get("OPENAI_BASE_URL", "") or os.environ.get("OPENAI_API_BASE", "")
-    # If OPENAI_BASE_URL points somewhere other than api.openai.com, the env
-    # vars belong to an Ollama-compat setup — don't use them for the real
-    # OpenAI provider.
-    if base and "openai.com" not in base:
-        key = ""
+    # Only reject if the base URL points to a local Ollama shim
+    if base:
+        import urllib.parse
+        host = urllib.parse.urlparse(base).hostname or ""
+        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+            return None  # Local shim, not real OpenAI
     # Placeholder keys used by Ollama shims
-    if key.lower() in ("ollama", "none", "na", ""):
-        key = ""
+    if key.lower() in ("ollama", "none", "na"):
+        return None
     return key or None
 
 
@@ -182,6 +201,12 @@ def build_providers(
         if spec.check and not spec.check():
             continue
 
-        providers[spec.name] = spec.factory()
+        try:
+            client = spec.factory()
+            if client is not None:
+                providers[spec.name] = client
+        except Exception as exc:
+            logger.warning(f"Provider '{spec.name}' failed to initialize: {exc}")
+            # Continue with remaining providers
 
     return providers

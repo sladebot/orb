@@ -17,6 +17,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+CONSENSUS_PREFIX = "Consensus:"
+
 
 class Orchestrator:
     """Manages agent lifecycle, injects tasks, and collects results."""
@@ -36,6 +38,7 @@ class Orchestrator:
         self._event_logger = event_logger
         self._completion_event = asyncio.Event()
         self._consensus_sent = False
+        self._consensus_lock = asyncio.Lock()
         self._sandbox = sandbox
 
         if self._event_logger:
@@ -65,20 +68,21 @@ class Orchestrator:
             return
 
         # Worker completed. Broadcast COMPLETE to other workers (not synthesis agent).
-        if not self._consensus_sent:
-            self._consensus_sent = True
-            for other_id, other_agent in self.agents.items():
-                if other_id != agent_id and other_id != synthesis:
-                    consensus_msg = Message(
-                        from_="orchestrator",
-                        to=other_id,
-                        type=MessageType.COMPLETE,
-                        payload=f"Consensus: task completed by {agent_id}. {result[:200]}",
-                    )
-                    try:
-                        await other_agent.channel.send(consensus_msg)
-                    except Exception:
-                        logger.warning(f"Could not send consensus COMPLETE to {other_id}")
+        async with self._consensus_lock:
+            if not self._consensus_sent:
+                self._consensus_sent = True
+                for other_id, other_agent in self.agents.items():
+                    if other_id != agent_id and other_id != synthesis:
+                        consensus_msg = Message(
+                            from_="orchestrator",
+                            to=other_id,
+                            type=MessageType.COMPLETE,
+                            payload=f"{CONSENSUS_PREFIX} task completed by {agent_id}. {result[:200]}",
+                        )
+                        try:
+                            await other_agent.channel.send(consensus_msg)
+                        except Exception:
+                            logger.warning(f"Could not send consensus COMPLETE to {other_id}")
 
         # When all workers are done, forward a summary to the synthesis agent.
         if synthesis:

@@ -99,6 +99,9 @@ class DashboardServer:
         """POST /api/inject — send a message directly to an agent's channel."""
         from orb.messaging.message import Message, MessageType
 
+        if request.content_length and request.content_length > 1_048_576:  # 1 MB limit
+            return web.json_response({"ok": False, "error": "Request too large"}, status=413)
+
         try:
             body = await request.json()
         except Exception:
@@ -135,6 +138,9 @@ class DashboardServer:
 
     async def _start_handler(self, request: web.Request) -> web.Response:
         """POST /api/start — start an orchestrator run from the browser UI."""
+        if request.content_length and request.content_length > 1_048_576:  # 1 MB limit
+            return web.json_response({"ok": False, "error": "Request too large"}, status=413)
+
         try:
             body = await request.json()
         except Exception:
@@ -297,6 +303,7 @@ class DashboardServer:
         tester_cfg      = pick(tester_score)
 
         if not tester_cfg or not coder_cfg or not reviewer_cfg:
+            logger.warning("Failed to build agent-model map: missing config, proceeding without model hints")
             return {}
 
         # For dual-review: assign reviewer_a and reviewer_b to different providers when auto mode.
@@ -420,6 +427,9 @@ class DashboardServer:
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+        if len(raw) > 500_000:  # 500KB limit for topology prediction responses
+            logger.warning(f"LLM response too large to parse ({len(raw)} bytes), using default")
+            return _default_result()
         try:
             parsed = _json.loads(raw.strip())
         except Exception:
@@ -565,7 +575,8 @@ class DashboardServer:
 
         async def wrapped_on_complete(agent_id, result):
             agent_obj = orchestrator.agents.get(agent_id)
-            model = getattr(agent_obj, "_last_model", "") or ""
+            model = getattr(agent_obj, "_last_model", "") if agent_obj else ""
+            model = model or ""
             if model:
                 await bridge.on_agent_status(agent_id, "completed", model)
             await bridge.on_agent_complete(agent_id, result)
@@ -630,17 +641,17 @@ class DashboardServer:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self._clients.add(ws)
-        logger.info(f"Dashboard client connected ({len(self._clients)} total)")
-
-        # Send current state on connect
         try:
-            init_event = self.state.to_init_event()
-            init_event["run_active"] = self._run_task is not None and not self._run_task.done()
-            await ws.send_str(json.dumps(init_event))
-        except Exception:
-            pass
+            logger.info(f"Dashboard client connected ({len(self._clients)} total)")
 
-        try:
+            # Send current state on connect
+            try:
+                init_event = self.state.to_init_event()
+                init_event["run_active"] = self._run_task is not None and not self._run_task.done()
+                await ws.send_str(json.dumps(init_event))
+            except Exception:
+                pass
+
             async for msg in ws:
                 pass  # We don't expect client messages, just keep connection alive
         finally:

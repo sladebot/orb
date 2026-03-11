@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -23,7 +24,7 @@ class Sandbox:
     so a coder can write files that the tester can read.
     """
 
-    COMMAND_TIMEOUT = 30.0   # seconds
+    COMMAND_TIMEOUT: float = float(os.environ.get("ORB_COMMAND_TIMEOUT", "30"))  # seconds
 
     def __init__(
         self,
@@ -68,13 +69,20 @@ class Sandbox:
     def resolve(self, path: str) -> Path:
         """Resolve *path* relative to the sandbox root.
 
-        Raises ValueError if the resolved path escapes the sandbox.
+        Absolute paths are treated as relative to the sandbox root (the leading
+        ``/`` is stripped).  Paths that would escape the root via ``..`` traversal
+        raise ``PermissionError``.
         """
-        # Treat absolute paths as relative to the root
-        rel = path.lstrip("/") if os.path.isabs(path) else path
-        resolved = (self.root / rel).resolve()
-        if not str(resolved).startswith(str(self.root)):
-            raise ValueError(f"Path {path!r} would escape sandbox root")
+        p = Path(path)
+        if p.is_absolute():
+            # Treat absolute paths as relative to sandbox root
+            p = Path(*p.parts[1:])  # strip leading /
+        resolved = (self.root / p).resolve()
+        # Ensure the resolved path stays within the sandbox
+        try:
+            resolved.relative_to(self.root.resolve())
+        except ValueError:
+            raise PermissionError(f"Path {path!r} escapes sandbox root")
         return resolved
 
     # ── Filesystem operations ─────────────────────────────────────────────────
@@ -118,8 +126,15 @@ class Sandbox:
         logger.info(f"sandbox run_command: {command!r} (cwd={self.root})")
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            args = shlex.split(command)
+        except ValueError as e:
+            return f"Error: invalid command syntax: {e}"
+        if not args:
+            return "Error: empty command"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self.root),

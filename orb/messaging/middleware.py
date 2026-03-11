@@ -11,6 +11,10 @@ class BudgetExhausted(Exception):
     pass
 
 
+class CooldownExceeded(Exception):
+    pass
+
+
 class HopCounter:
     """Rejects messages that exceed max hop depth."""
 
@@ -57,7 +61,7 @@ class CooldownTracker:
         key = (msg.from_, msg.to, msg.chain_id)
         count = self._counts.get(key, 0)
         if count >= self.max_per_chain:
-            raise HopLimitExceeded(
+            raise CooldownExceeded(
                 f"Agent {msg.from_!r} exceeded cooldown limit to {msg.to!r} "
                 f"in chain {msg.chain_id!r} ({count}/{self.max_per_chain})"
             )

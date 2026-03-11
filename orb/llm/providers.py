@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from .client import LLMClient
 from .types import CompletionRequest, CompletionResponse, ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 _ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
@@ -31,7 +34,7 @@ class AnthropicProvider(LLMClient):
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
         kwargs: dict = {
-            "model": config.model_id if config else "claude-sonnet-4-5-20251001",
+            "model": config.model_id if config else "claude-sonnet-4-6",
             "max_tokens": config.max_tokens if config else 4096,
             "messages": request.messages,
         }
@@ -191,10 +194,17 @@ class OpenAIProvider(LLMClient):
         tool_calls = []
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to parse tool call arguments: {exc!r} — args: {tc.function.arguments!r:.200}"
+                    )
+                    args = {}
                 tool_calls.append(ToolCall(
                     id=tc.id,
                     name=tc.function.name,
-                    input=json.loads(tc.function.arguments),
+                    input=args,
                 ))
 
         return CompletionResponse(

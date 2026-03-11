@@ -44,13 +44,22 @@ class AgentNode(ABC):
                 self._task.cancel()
 
     async def _run_loop(self) -> None:
+        consecutive_errors = 0
         try:
             while True:
                 msg = await self.channel.receive()
                 try:
                     await self.process(msg)
+                    consecutive_errors = 0
                 except Exception:
                     logger.exception(f"Agent {self.node_id} error processing message {msg.id}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            f"Agent {self.node_id} reached {consecutive_errors} consecutive errors; stopping"
+                        )
+                        self.status = AgentStatus.ERROR
+                        return
         except ChannelClosed:
             logger.info(f"Agent {self.node_id} channel closed, stopping")
         except Exception:

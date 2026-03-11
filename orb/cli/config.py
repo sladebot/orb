@@ -27,6 +27,7 @@ def load_config() -> dict[str, Any]:
 def save_config(cfg: dict[str, Any]) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    CONFIG_PATH.chmod(0o600)
 
 
 def get(key: str) -> Any:
@@ -59,7 +60,7 @@ def local_models_enabled() -> bool:
 
 def show_config() -> None:
     cfg = load_config()
-    max_len = max(len(k) for k in _DEFAULTS)
+    max_len = max((len(k) for k in _DEFAULTS), default=0)
     for key, default in _DEFAULTS.items():
         val = cfg.get(key, default)
         source = "default" if key not in cfg else "config"
