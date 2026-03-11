@@ -546,3 +546,11 @@ pytest tests/ -v
 # Integration tests (require a live API key)
 ANTHROPIC_API_KEY=sk-ant-... pytest tests/integration/ -v
 ```
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License v3.0. See [`LICENSE`](LICENSE).
+
+Copyright (C) 2026 Souranil Sen.

@@ -69,7 +69,8 @@ class TestOrchestrator:
         result = await orchestrator.run("Write hello world")
 
         assert result.success
-        assert len(result.completions) == 3
+        assert len(result.completions) == 4
+        assert "coordinator" in result.completions
         assert not result.timed_out
 
     async def test_timeout(self):

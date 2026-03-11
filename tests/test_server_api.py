@@ -44,9 +44,15 @@ def _make_server() -> DashboardServer:
 
 
 @pytest.fixture
-async def client(aiohttp_client):
+async def client():
     server = _make_server()
-    return await aiohttp_client(server._app)
+    test_server = TestServer(server._app)
+    test_client = TestClient(test_server)
+    await test_client.start_server()
+    try:
+        yield test_client
+    finally:
+        await test_client.close()
 
 
 class TestServerAPI:
