@@ -13,8 +13,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TUIMessage
 from textual.reactive import reactive
+from textual import events, on, work
 from textual.widgets import Footer, Label, RichLog, Static, TextArea
-from textual import on, work
 
 from ..messaging.message import Message as OrbMessage, MessageType
 from ..llm.types import ModelTier, ModelConfig
@@ -337,6 +337,21 @@ class ResultScreen(Screen):
 
 
 # ─── Widgets ──────────────────────────────────────────────────────────────────
+
+class QueryInput(TextArea):
+    """TextArea that submits on Enter but preserves newlines from paste.
+
+    Typing Enter → submit.  Pasting multi-line text → newlines are kept and
+    the whole block is submitted when Enter is pressed.
+    """
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            await self.app.action_submit_input()
+        # All other keys (incl. ctrl+enter as alternative) pass through normally
+
 
 class HeaderBar(Static):
     """Top stats bar with budget progress bar."""
@@ -813,7 +828,7 @@ class OrbTUI(App[None]):
         Binding("r",          "show_results", "Results"),
         Binding("ctrl+k",     "cancel_run",   "Cancel run"),
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
-        Binding("ctrl+enter", "submit_input", "Send", show=True),
+        Binding("ctrl+enter", "submit_input", "Send", show=False),
         Binding("1", "select('coordinator')",         show=False),
         Binding("2", "select('coder')",               show=False),
         Binding("3", "select('reviewer')",            show=False),
@@ -898,13 +913,13 @@ class OrbTUI(App[None]):
 
         with Horizontal(id="query-bar"):
             yield Label(" >  ", id="query-label")
-            yield TextArea(id="query-input", soft_wrap=True)
+            yield QueryInput(id="query-input", soft_wrap=True)
 
         yield Footer()
 
     def on_mount(self) -> None:
         feed = self.query_one("#message-feed", RichLog)
-        feed.write("[dim]Ready. Type a task and press [bold]ctrl+enter[/bold] to send. Enter adds a new line.[/dim]")
+        feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line text freely.[/dim]")
         self.query_one("#query-input", TextArea).focus()
         self._elapsed_task = asyncio.create_task(self._tick())
 
