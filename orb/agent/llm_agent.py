@@ -53,6 +53,7 @@ class LLMAgent(AgentNode):
         self._system_prompt: str = ""
         self._tools: list[dict] = []
         self._memory_counter = 0
+        self._last_complexity_score: int = config.base_complexity
 
     async def _emit(self, activity: str) -> None:
         """Fire the activity callback if set."""
@@ -110,6 +111,7 @@ class LLMAgent(AgentNode):
                 preferred = self._tier_override or self._selector.select_with_available(
                     msg, set(self._providers.keys())
                 )
+                self._last_complexity_score = self._selector.last_score
                 tiers = [preferred,
                          ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]
             for t in tiers:
@@ -350,6 +352,7 @@ class LLMAgent(AgentNode):
             context_slice=context,
         )
         outgoing.metadata["model"] = model
+        outgoing.metadata["complexity"] = self._last_complexity_score
 
         try:
             await self.send(outgoing)

@@ -22,6 +22,7 @@ async def compact_history(
     summary, or the original list if compaction fails.
     """
     from ..llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, OPENAI_MODELS, CODEX_MODELS
+    from ..llm._format import extract_text_content
 
     # Pick the lightest available provider
     provider = (
@@ -54,9 +55,7 @@ async def compact_history(
         role = m.get("role", "unknown")
         content = m.get("content", "")
         if isinstance(content, list):
-            # Handle structured content blocks (Anthropic format)
-            texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-            content = " ".join(texts)
+            content = extract_text_content(content)
         transcript_parts.append(f"[{role}]: {str(content)[:500]}")
     transcript = "\n".join(transcript_parts)
 

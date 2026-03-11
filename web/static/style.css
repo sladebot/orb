@@ -848,6 +848,21 @@ body {
     gap: 3px;
 }
 
+.complexity-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    cursor: default;
+}
+.complexity-low  { background: rgba(26,127,55,0.18);  color: #3fb950; }
+.complexity-mid  { background: rgba(154,103,0,0.18);  color: #d29922; }
+.complexity-high { background: rgba(207,34,46,0.18);  color: #f85149; }
+
 .agent-result-section {
     display: none;
     margin-top: 4px;

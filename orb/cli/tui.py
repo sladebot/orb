@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from time import time
 from typing import Any
@@ -143,6 +144,7 @@ class AgentInfo:
     status: str = "idle"
     model: str = ""
     msg_count: int = 0
+    complexity_score: int = 0        # last complexity score from model selector
     activity_text: str = ""          # live activity from _emit callback
     messages: list[dict] = field(default_factory=list)   # full history for detail pane
     result: str = ""
@@ -478,6 +480,8 @@ class GraphPanel(Static):
                 meta.append(_short_model(info.model))
             if info.msg_count:
                 meta.append(f"✉{info.msg_count}")
+            if info.complexity_score:
+                meta.append(f"⚡{info.complexity_score}")
             if info.status in ("running", "waiting") and info.time_in_state > 1:
                 meta.append(f"{info.time_in_state:.0f}s")
             if key:
@@ -824,7 +828,7 @@ class OrbTUI(App[None]):
 
         # Run state (populated by WebSocket events from backend)
         self._agents: dict[str, AgentInfo] = {}
-        self._detail_feed: list[dict] = []
+        self._detail_feed: deque[dict] = deque(maxlen=500)
         self._routed: int = 0
         self._run_start: float | None = None
         self._run_status: str = "Waiting"
@@ -843,6 +847,9 @@ class OrbTUI(App[None]):
         self._active_edges: dict[tuple[str, str], int] = {}
         self._elapsed_task: asyncio.Task | None = None
         self._ws_task: asyncio.Task | None = None
+
+        # Shared HTTP session (created on mount, closed on unmount)
+        self._http_session: Any = None
 
     def compose(self) -> ComposeResult:
         yield HeaderBar(state=self, id="header-bar")
@@ -875,7 +882,9 @@ class OrbTUI(App[None]):
 
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
+        import aiohttp
+        self._http_session = aiohttp.ClientSession()
         feed = self.query_one("#message-feed", RichLog)
         feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line freely. [bold]y[/bold]=copy result  [bold]shift+drag[/bold]=terminal select[/dim]")
         self.query_one("#query-input", TextArea).focus()
@@ -891,12 +900,20 @@ class OrbTUI(App[None]):
         else:
             self._log_handler = None
 
+    async def on_unmount(self) -> None:
+        if self._http_session is not None:
+            await self._http_session.close()
+
     # ── Tick / animation ──────────────────────────────────────────────────────
 
     async def _tick(self) -> None:
         while True:
             await asyncio.sleep(0.5)
             self._tick_count += 1
+            # Evict edges whose animation window has expired
+            self._active_edges = {
+                k: v for k, v in self._active_edges.items() if v > self._tick_count
+            }
             self.query_one("#header-bar",  HeaderBar).bump()
             self.query_one("#graph-panel", GraphPanel).bump()
             self.query_one("#mode-bar",    ModeBar).bump()
@@ -964,7 +981,7 @@ class OrbTUI(App[None]):
     async def _start_new_run(self, query: str) -> None:
         self._last_query   = query
         self._agents       = {}
-        self._detail_feed  = []
+        self._detail_feed  = deque(maxlen=500)
         self._completions  = {}
         self._routed       = 0
         self._run_start    = time()
@@ -989,12 +1006,10 @@ class OrbTUI(App[None]):
     # ── WebSocket client ──────────────────────────────────────────────────────
 
     async def _post_json(self, path: str, payload: dict) -> dict:
-        import aiohttp
         url = f"http://localhost:{self._server_port}{path}"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as resp:
-                    return await resp.json()
+            async with self._http_session.post(url, json=payload) as resp:
+                return await resp.json()
         except Exception as exc:
             logger.warning("POST %s failed: %s", path, exc)
             return {"ok": False, "error": str(exc)}
@@ -1004,21 +1019,20 @@ class OrbTUI(App[None]):
         url = f"ws://localhost:{self._server_port}/ws"
         while True:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(url, heartbeat=30) as ws:
-                        async for msg in ws:
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                try:
-                                    self._handle_server_event(json.loads(msg.data))
-                                except Exception:
-                                    pass
-                            elif msg.type in (
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.ERROR,
-                            ):
-                                break
-            except Exception:
-                pass
+                async with self._http_session.ws_connect(url, heartbeat=30) as ws:
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                self._handle_server_event(json.loads(msg.data))
+                            except json.JSONDecodeError as exc:
+                                logger.debug("WS JSON decode error: %s", exc)
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.ERROR,
+                        ):
+                            break
+            except Exception as exc:
+                logger.debug("WS connection lost: %s", exc)
             await asyncio.sleep(1)  # reconnect backoff
 
     def _handle_server_event(self, data: dict) -> None:  # noqa: C901
@@ -1049,7 +1063,7 @@ class OrbTUI(App[None]):
 
     def _on_server_init(self, data: dict) -> None:
         self._agents = {}
-        self._detail_feed = []
+        self._detail_feed = deque(maxlen=500)
         self._completions = {}
         self._routed = 0
         self._active_edges = {}
@@ -1057,8 +1071,9 @@ class OrbTUI(App[None]):
         for agent_data in data.get("agents", []):
             aid  = agent_data["id"]
             info = AgentInfo(agent_id=aid, role=agent_data.get("role", aid))
-            info.status = agent_data.get("status", "idle")
-            info.model  = agent_data.get("model", "")
+            info.status           = agent_data.get("status", "idle")
+            info.model            = agent_data.get("model", "")
+            info.complexity_score = agent_data.get("complexity", 0)
             result = agent_data.get("completed_result", "")
             if result:
                 info.result = result
@@ -1180,14 +1195,17 @@ class OrbTUI(App[None]):
         self._refresh_all()
 
     def _on_server_agent_stats(self, data: dict) -> None:
-        aid       = data.get("agent", "")
-        model     = data.get("model", "")
-        msg_count = data.get("msg_count")
+        aid        = data.get("agent", "")
+        model      = data.get("model", "")
+        msg_count  = data.get("msg_count")
+        complexity = data.get("complexity")
         if aid in self._agents:
             if model:
                 self._agents[aid].model = model
             if msg_count is not None:
                 self._agents[aid].msg_count = msg_count
+            if complexity is not None:
+                self._agents[aid].complexity_score = int(complexity)
         self._refresh_all()
 
     def _on_server_agent_activity(self, data: dict) -> None:

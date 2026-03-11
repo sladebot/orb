@@ -62,6 +62,9 @@ class DashboardBridge:
             agent.status = "running"
             agent.model = msg.metadata.get("model", agent.model)
             agent.msg_count += 1
+            complexity = msg.metadata.get("complexity")
+            if complexity is not None:
+                agent.complexity = int(complexity)
 
         # Increment msg_count for receiver
         if msg.to in self.state.agents:
@@ -97,6 +100,7 @@ class DashboardBridge:
                     "msg_count": a.msg_count,
                     "status": a.status,
                     "model": a.model,
+                    "complexity": a.complexity,
                 })
 
     async def on_agent_status(self, agent_id: str, status: str, model: str = "") -> None:

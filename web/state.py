@@ -12,6 +12,7 @@ class AgentState:
     model: str = ""
     completed_result: str = ""
     msg_count: int = 0
+    complexity: int = 0
 
 
 @dataclass
@@ -69,6 +70,7 @@ class DashboardState:
                     "model": a.model,
                     "msg_count": a.msg_count,
                     "completed_result": a.completed_result,
+                    "complexity": a.complexity,
                 }
                 for a in self.agents.values()
             ],

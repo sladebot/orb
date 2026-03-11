@@ -178,6 +178,7 @@ class Dashboard {
                 status: agent.status || 'idle',
                 model: agent.model || '',
                 msg_count: agent.msg_count || 0,
+                complexity: agent.complexity || 0,
                 result: agent.completed_result || '',
             };
         }
@@ -277,8 +278,9 @@ class Dashboard {
     _handleAgentStats(data) {
         if (this.agents[data.agent]) {
             this.agents[data.agent].msg_count = data.msg_count;
-            if (data.status) this.agents[data.agent].status = data.status;
-            if (data.model)  this.agents[data.agent].model  = data.model;
+            if (data.status)     this.agents[data.agent].status     = data.status;
+            if (data.model)      this.agents[data.agent].model      = data.model;
+            if (data.complexity) this.agents[data.agent].complexity = data.complexity;
         }
         // Keep graph node model in sync (agent_stats fires for both sender and receiver)
         if (data.model) this.graph.updateAgentStatus(data.agent, data.status || '', data.model);
@@ -458,6 +460,11 @@ class Dashboard {
             </div>
         ` : '';
 
+        const complexity = agent.complexity || 0;
+        const complexityHtml = complexity > 0
+            ? `<span class="complexity-badge complexity-${this._complexityLevel(complexity)}" title="Complexity score: ${complexity}">${complexity}</span>`
+            : '';
+
         card.innerHTML = `
             <div class="agent-card-header">
                 <span class="agent-card-name ${agentClass}">${agent.id}</span>
@@ -467,6 +474,7 @@ class Dashboard {
             <div class="agent-card-meta">
                 <span>model: ${this._shortModel(agent.model) || '—'}</span>
                 <span>msgs: ${agent.msg_count}</span>
+                ${complexityHtml}
             </div>
             ${resultHtml}
         `;
@@ -1135,6 +1143,12 @@ class Dashboard {
         if (!agentId || agentId === this._thinkingAgent) {
             this._thinkingAgent = null;
         }
+    }
+
+    _complexityLevel(score) {
+        if (score >= 79) return 'high';
+        if (score >= 56) return 'mid';
+        return 'low';
     }
 
     _shortModel(modelId) {

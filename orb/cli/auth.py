@@ -333,16 +333,16 @@ async def _check_anthropic(key: str) -> bool:
     try:
         headers = {"anthropic-version": "2023-06-01"}
         if key.startswith("sk-ant-oat"):
-            # OAuth token — requires Bearer auth + beta header
             headers["Authorization"] = f"Bearer {key}"
             headers["anthropic-beta"] = _ANTHROPIC_OAUTH_BETAS
         else:
             headers["x-api-key"] = key
-        resp = httpx.get(
-            "https://api.anthropic.com/v1/models",
-            headers=headers,
-            timeout=8.0,
-        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers=headers,
+                timeout=8.0,
+            )
         return resp.status_code == 200
     except Exception:
         return False
@@ -351,11 +351,12 @@ async def _check_anthropic(key: str) -> bool:
 async def _check_openai_key(key: str) -> bool:
     """Return True if the OpenAI API key works."""
     try:
-        resp = httpx.get(
-            "https://api.openai.com/v1/models",
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=8.0,
-        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=8.0,
+            )
         return resp.status_code == 200
     except Exception:
         return False
@@ -368,13 +369,14 @@ async def _check_openai_oauth(token: str) -> bool:
     minimal request and consider any non-401/403 response as 'connected'.
     """
     try:
-        resp = httpx.post(
-            "https://chatgpt.com/backend-api/codex/responses",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"model": "gpt-5.4", "store": False, "stream": False,
-                  "instructions": "hi", "input": []},
-            timeout=10.0,
-        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://chatgpt.com/backend-api/codex/responses",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"model": "gpt-5.4", "store": False, "stream": False,
+                      "instructions": "hi", "input": []},
+                timeout=10.0,
+            )
         # 400 = bad request format but auth succeeded; 401/403 = auth failed
         return resp.status_code not in (401, 403)
     except Exception:
@@ -422,7 +424,11 @@ async def auth_status() -> None:
         print("  anthropic  not authenticated  (run: orb auth anthropic --api-key sk-ant-...)")
 
     # Await all checks concurrently and print results
-    print("  Checking connectivity…")
-    for key, (label, task) in tasks.items():
-        connected = await task
-        print(f"{label}  →  {_ok(connected)}")
+    if tasks:
+        import asyncio as _asyncio
+        print("  Checking connectivity…")
+        labels   = [label for label, _ in tasks.values()]
+        results  = await _asyncio.gather(*[task for _, task in tasks.values()], return_exceptions=True)
+        for label, result in zip(labels, results):
+            connected = result if isinstance(result, bool) else False
+            print(f"{label}  →  {_ok(connected)}")

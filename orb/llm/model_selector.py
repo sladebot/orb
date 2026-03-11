@@ -10,9 +10,11 @@ class ModelSelector:
     def __init__(self, base_complexity: int = 50) -> None:
         self.base_complexity = base_complexity
         self._retry_count = 0
+        self.last_score: int = base_complexity  # score from the most recent select() call
 
     def select(self, msg: Message) -> ModelTier:
         score = self._score(msg)
+        self.last_score = score
         return self._tier_from_score(score)
 
     def escalate(self) -> None:
@@ -68,6 +70,7 @@ class ModelSelector:
         """Like select(), but skips tiers whose provider isn't in available_providers."""
         from .types import DEFAULT_MODELS
         score = self._score(msg)
+        self.last_score = score
         tier_order = [
             ModelTier.LOCAL_SMALL, ModelTier.LOCAL_MEDIUM, ModelTier.LOCAL_LARGE,
             ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG,

@@ -8,6 +8,14 @@ from __future__ import annotations
 import json as _json
 
 
+def extract_text_content(content: list[dict]) -> str:
+    """Extract plain text from an Anthropic-format content block list."""
+    return " ".join(
+        b.get("text", "") for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+
 def tool_result_to_str(raw: object) -> str:
     """Coerce an Anthropic tool-result content value to a plain string."""
     if isinstance(raw, str):
