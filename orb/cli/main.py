@@ -130,6 +130,8 @@ def parse_args() -> argparse.Namespace:
     cfg_set.add_argument("key", help="Setting name (e.g. local-models)")
     cfg_set.add_argument("value", help="New value (e.g. false)")
 
+    subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+
     # Main run args (attached to the root parser so 'orb <query>' still works)
     parser.add_argument("query", nargs="?", help="Task query (omit for interactive mode)")
     parser.add_argument("-i", "--interactive", action="store_true", help="Interactive REPL mode")
@@ -199,6 +201,11 @@ async def async_main() -> None:
             except (KeyError, ValueError) as exc:
                 print_error(str(exc))
                 sys.exit(1)
+        return
+
+    if args.subcommand == "onboard":
+        from .onboard import run_onboarding
+        await run_onboarding()
         return
 
     # ── logs subcommand ───────────────────────────────────────────────────────

@@ -39,6 +39,14 @@ pip install -e ".[dev]"
 
 Requires Python 3.11+. At least one LLM provider must be reachable at runtime.
 
+First run after installation:
+
+```bash
+orb onboard
+```
+
+This walks through initial auth and common runtime settings.
+
 ---
 
 ## Authentication
@@ -46,6 +54,9 @@ Requires Python 3.11+. At least one LLM provider must be reachable at runtime.
 Credentials are stored in `~/.orb/credentials.json` (mode 600).
 
 ```bash
+# Guided onboarding for auth + common settings
+orb onboard
+
 # Anthropic subscription flow:
 # 1. run `claude setup-token` in another terminal
 # 2. copy the generated token
@@ -75,6 +86,12 @@ For Anthropic subscription auth, Orb does not run the Claude browser flow itself
 For remote or SSH sessions, `orb auth openai` prints the authorization URL and prompts you to paste the redirect URL from your browser instead of starting a local callback server.
 
 Running `orb auth` with no subcommand is equivalent to `orb auth status`.
+
+`orb onboard` is the easiest entry point for first-time setup. It walks through:
+- Anthropic auth
+- OpenAI auth
+- local model enable/disable
+- current auth/config status
 
 ---
 
