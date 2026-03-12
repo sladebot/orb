@@ -8,7 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 
-from orb.cli.tui import OrbTUI, AgentInfo
+from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar
 
 
 def _make_tui() -> OrbTUI:
@@ -21,6 +21,7 @@ def _make_tui() -> OrbTUI:
     tui._agents        = {}
     tui._detail_feed   = []
     tui._routed        = 0
+    tui._budget        = 200
     tui._run_start     = None
     tui._run_status    = "Waiting"
     tui._selected_agent = None
@@ -418,6 +419,14 @@ class TestTuiEventHandler:
         assert "Overview" in writes
         assert "Recent Messages" in writes
         assert "Result" in writes
+
+    def test_header_bar_shows_waiting_for_user_state(self):
+        tui = _make_tui()
+        tui._awaiting_user = "coder"
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        rendered = HeaderBar(tui).render().plain
+        assert "USER INPUT" in rendered
+        assert "coder" in rendered.lower()
 
     # ── stats ─────────────────────────────────────────────────────────────────
 

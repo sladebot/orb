@@ -338,42 +338,51 @@ class HeaderBar(Static):
     def render(self) -> RichText:
         s = self._state
         t = RichText()
+        active_agent = s._awaiting_user or next(
+            (aid for aid, info in s._agents.items() if info.status == "running"),
+            None,
+        )
+        elapsed = time() - s._run_start if s._run_start else s._last_elapsed
+
         t.append("  ORB", style="bold magenta")
+        t.append(f"  [{s._topology_name}]", style="dim")
         t.append("  │  ", style="dim")
 
-        # Run status badge
-        badge_style = {
-            "Waiting":  ("dim",        "  ○ Ready   "),
-            "Idle":     ("dim",        "  ○ Ready   "),
-            "Running":  ("bold green", "  ● Running "),
-            "Complete": ("bold cyan",  "  ✓ Done    "),
-            "Error":    ("bold red",   "  ✗ Error   "),
-        }.get(s._run_status, ("white", s._run_status))
-        t.append(badge_style[1], style=badge_style[0])
-        t.append("  │  ", style="dim")
+        if s._awaiting_user:
+            t.append("USER INPUT", style="bold black on yellow")
+        else:
+            badge_style = {
+                "Waiting": ("dim", "READY"),
+                "Idle": ("dim", "READY"),
+                "Running": ("bold green", "RUNNING"),
+                "Complete": ("bold cyan", "DONE"),
+                "Error": ("bold red", "ERROR"),
+            }.get(s._run_status, ("white", s._run_status.upper()))
+            t.append(badge_style[1], style=badge_style[0])
 
-        # Budget bar
-        bar, bar_style = _budget_bar(s._routed, s._budget, width=12)
-        t.append(f"msgs {s._routed}", style="bold white")
-        t.append(f"/{s._budget}  ", style="dim")
+        if active_agent:
+            label = AGENT_LABELS.get(active_agent, active_agent)
+            color = AGENT_COLORS.get(active_agent, "white")
+            t.append("  │  ", style="dim")
+            t.append("active ", style="dim")
+            t.append(label, style=f"bold {color}")
+
+        bar, bar_style = _budget_bar(s._routed, s._budget, width=10)
+        t.append("  │  ", style="dim")
+        t.append(f"{elapsed:.1f}s", style="bold white")
+        t.append(f"  {s._routed}/{s._budget} msgs  ", style="dim")
         t.append(bar, style=bar_style)
-
-        if s._run_start:
-            elapsed = time() - s._run_start
-            t.append(f"  {elapsed:.1f}s", style="dim")
 
         if s._selected_agent and s._selected_agent in s._agents:
             label = AGENT_LABELS.get(s._selected_agent, s._selected_agent)
             color = AGENT_COLORS.get(s._selected_agent, "white")
-            t.append("  │  @", style="dim")
+            t.append("  │  ", style="dim")
+            t.append("inspect ", style="dim")
             t.append(label, style=f"bold {color}")
 
-        if s._run_status in ("Complete", "Idle") and s._turn_count > 0:
-            t.append("  │  ", style="dim")
-            t.append("r=results  s=save", style="dim cyan")
-
         if getattr(s, "_server_port", None):
-            t.append(f"  │  ::{s._server_port}", style="dim")
+            t.append("  │  ", style="dim")
+            t.append(f"::{s._server_port}", style="dim")
 
         return t
 
@@ -516,9 +525,13 @@ class ModeBar(Static):
         s = self._state
         t = RichText()
 
-        if s._run_status == "Running":
+        if s._awaiting_user:
+            label = AGENT_LABELS.get(s._awaiting_user, s._awaiting_user)
+            t.append("  ↩ reply", style="bold yellow")
+            t.append(f" · your next input goes to {label}  ", style="dim")
+        elif s._run_status == "Running":
             t.append("  ↪ inject", style="bold cyan")
-            t.append(" · new input goes to coordinator  ", style="dim")
+            t.append(" · mid-run input goes to coordinator  ", style="dim")
         elif s._run_status in ("Complete", "Idle") and s._turn_count > 0:
             t.append("  ✓ done", style="bold cyan")
             t.append(" · type a follow-up or new task  ", style="dim")
@@ -526,7 +539,8 @@ class ModeBar(Static):
             t.append("  ○ ready", style="dim")
             t.append(" · type a task  ", style="dim")
 
-        # Agent shortcuts
+        t.append("│  / focus  ctrl+k stop  r results  ", style="dim")
+
         if s._agents:
             ordered = [a for a in AGENT_ORDER if a in s._agents]
             for agent_id in ordered:
@@ -544,7 +558,7 @@ class ModeBar(Static):
                     t.append(f"[{key}]", style="dim")
                 t.append("  ", style="dim")
         else:
-            t.append("@mention or 1–6 to inspect agents", style="dim")
+            t.append("@mention or 1-6 to inspect agents", style="dim")
 
         return t
 
