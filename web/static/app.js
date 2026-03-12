@@ -401,6 +401,11 @@ class Dashboard {
         return `${Math.round(age / 60)}m`;
     }
 
+    _topologyLabel() {
+        const ids = Object.keys(this.agents);
+        return ids.includes('reviewer_a') ? 'Dual Review' : (ids.length ? 'Triad' : 'Uninitialized');
+    }
+
     // ── Tab switching ─────────────────────────────────────────
 
     _switchTab(tabName) {
@@ -643,6 +648,7 @@ class Dashboard {
         const meta = document.getElementById('ndp-meta');
         const summary = document.getElementById('ndp-summary');
         const overview = document.getElementById('ndp-overview-grid');
+        const topologyMap = document.getElementById('ndp-topology-map');
         const commGrid = document.getElementById('ndp-comm-grid');
         const modelShort = agent.model ? this._shortModel(agent.model) : '—';
         const compScore = this._lastPrediction?.agent_complexity?.[agentId];
@@ -651,6 +657,13 @@ class Dashboard {
         const outgoing = relevantMessages.filter(m => m.from === agentId);
         const incoming = relevantMessages.filter(m => m.to === agentId);
         const peers = [...new Set(relevantMessages.map(m => m.from === agentId ? m.to : m.from).filter(Boolean))];
+        const neighbors = (this.graph.edges || [])
+            .flatMap(e => e.source === agentId ? [e.target] : (e.target === agentId ? [e.source] : []));
+        const uniqueNeighbors = [...new Set(neighbors)];
+        const activePeers = peers.filter(p => uniqueNeighbors.includes(p));
+        const edgeList = (this.graph.edges || [])
+            .filter(e => e.source === agentId || e.target === agentId)
+            .map(e => `${e.source} ↔ ${e.target}`);
         const compHtml = compScore !== undefined
             ? `<span class="ndp-meta-pill">complexity&nbsp;${compScore}</span>`
             : '';
@@ -689,6 +702,26 @@ class Dashboard {
                 <span class="ndp-overview-label">Peers</span>
                 <span class="ndp-overview-value">${peers.length}</span>
                 <span class="ndp-overview-note">${peers.slice(0, 3).join(', ') || 'none yet'}</span>
+            </div>
+        `;
+
+        topologyMap.innerHTML = `
+            <div class="ndp-topology-header">
+                <span class="ndp-topology-badge">${this._topologyLabel()}</span>
+                <span class="ndp-topology-node">${this._escapeHtml(agentId)}</span>
+            </div>
+            <div class="ndp-topology-copy">
+                ${this._escapeHtml(agent.role || agentId)} sits on ${uniqueNeighbors.length} graph edge${uniqueNeighbors.length === 1 ? '' : 's'} and can communicate directly with its neighbors.
+            </div>
+            <div class="ndp-neighbor-row">
+                ${uniqueNeighbors.length
+                    ? uniqueNeighbors.map(n => `<span class="ndp-neighbor-chip${activePeers.includes(n) ? ' active' : ''}">${this._escapeHtml(n)}</span>`).join('')
+                    : '<span class="ndp-neighbor-empty">No connected neighbors</span>'}
+            </div>
+            <div class="ndp-edge-list">
+                ${edgeList.length
+                    ? edgeList.map(edge => `<div class="ndp-edge-item">${this._escapeHtml(edge)}</div>`).join('')
+                    : '<div class="ndp-edge-item empty">No active edges</div>'}
             </div>
         `;
 
@@ -745,6 +778,8 @@ class Dashboard {
                 const bstyle  = BADGE_STYLES[mtype] || 'background:var(--bg-overlay);color:var(--text-muted)';
                 const elapsed = m.elapsed !== undefined ? m.elapsed.toFixed(1) + 's' : '';
                 const preview = (m.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+                const contextCount = Array.isArray(m.context_slice) ? m.context_slice.length : 0;
+                const chainId = m.chain_id ? String(m.chain_id).slice(0, 8) : '';
                 return `<div class="ndp-msg-entry">
                     <div class="ndp-msg-header">
                         <span class="ndp-msg-from ${fromCls}">${this._escapeHtml(m.from)}</span>
@@ -753,7 +788,15 @@ class Dashboard {
                         <span class="ndp-msg-type" style="${bstyle}">${mtype}</span>
                         ${elapsed ? `<span class="ndp-msg-elapsed">${elapsed}</span>` : ''}
                     </div>
+                    <div class="ndp-msg-meta">
+                        ${chainId ? `<span>chain ${this._escapeHtml(chainId)}</span>` : ''}
+                        ${contextCount ? `<span>${contextCount} ctx</span>` : '<span>0 ctx</span>'}
+                    </div>
                     <div class="ndp-msg-preview">${this._escapeHtml(preview)}${preview.length >= 100 ? '…' : ''}</div>
+                    <details class="ndp-msg-details">
+                        <summary>Full payload</summary>
+                        <pre class="ndp-msg-full">${this._escapeHtml(m.content || '')}</pre>
+                    </details>
                 </div>`;
             }).join('');
         }

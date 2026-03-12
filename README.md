@@ -46,7 +46,13 @@ Requires Python 3.11+. At least one LLM provider must be reachable at runtime.
 Credentials are stored in `~/.orb/credentials.json` (mode 600).
 
 ```bash
-# Store an Anthropic API key
+# Anthropic subscription flow:
+# 1. run `claude setup-token` in another terminal
+# 2. copy the generated token
+# 3. paste it into Orb
+orb auth anthropic
+
+# Or store an Anthropic API key directly
 orb auth anthropic --api-key sk-ant-...
 
 # Store an OpenAI API key directly
@@ -63,6 +69,8 @@ orb auth logout
 ```
 
 The auth system also reads `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, and `OPENAI_API_KEY` environment variables as fallbacks. `orb auth status` shows which source is active for each provider and whether OAuth tokens are still valid.
+
+For Anthropic subscription auth, Orb does not run the Claude browser flow itself. It guides you through the supported Claude CLI route: run `claude setup-token`, then paste the resulting setup-token into `orb auth anthropic`.
 
 For remote or SSH sessions, `orb auth openai` prints the authorization URL and prompts you to paste the redirect URL from your browser instead of starting a local callback server.
 
