@@ -77,6 +77,11 @@ AGENT_KEY_MAP: dict[str, str] = {
     "tester":      "6",
 }
 
+TOPOLOGY_LABELS: dict[str, str] = {
+    "triangle": "Triad",
+    "dual-review": "Dual Review",
+}
+
 # ─── Graph layout definitions ─────────────────────────────────────────────────
 # Each layout is a list of rows; each row is a list of segments.
 # Segment types:
@@ -135,6 +140,10 @@ def _budget_bar(routed: int, budget: int, width: int = 10) -> tuple[str, str]:
     bar = "▓" * filled + "░" * (width - filled)
     style = "red" if pct > 0.8 else "yellow" if pct > 0.5 else "green"
     return bar, style
+
+
+def _topology_label(topology: str) -> str:
+    return TOPOLOGY_LABELS.get(topology, topology.replace("-", " ").title())
 
 
 def _graph_node_status(info: "AgentInfo", tick_count: int) -> tuple[str, str]:
@@ -249,6 +258,20 @@ class ResultScreen(Screen):
         ftr.update("[dim][q/Esc] back  [s] save  [y] copy result  drag to select text[/dim]")
 
         log = self.query_one("#rs-log", RichLog)
+        primary_id, primary_result = pick_primary_result(self._completions)
+        supporting_results = [
+            (agent_id, result)
+            for agent_id, result in self._completions.items()
+            if result and agent_id != primary_id
+        ]
+
+        if primary_result:
+            color = AGENT_COLORS.get(primary_id or "", "white")
+            label = AGENT_LABELS.get(primary_id or "", "Final Result")
+            log.write("[bold green]══ Final Result ═══════════════════════════[/bold green]")
+            log.write(f"[bold {color}]{label}[/bold {color}]")
+            log.write(primary_result)
+            log.write("")
 
         # ── Files changed (git diff) ──────────────────────────────────────
         if self._diff:
@@ -276,10 +299,14 @@ class ResultScreen(Screen):
         else:
             log.write("[dim]No file changes detected (git diff empty).[/dim]\n")
 
-        # ── Agent results ─────────────────────────────────────────────────
-        log.write("[bold white]── Agent Results ────────────────────────[/bold white]")
-        ordered = [a for a in AGENT_ORDER if a in self._completions]
-        ordered += [a for a in self._completions if a not in AGENT_ORDER]
+        # ── Supporting results ────────────────────────────────────────────
+        if supporting_results:
+            log.write("[bold white]── Supporting Results ───────────────────[/bold white]")
+        elif not primary_result:
+            log.write("[dim]No agent results captured.[/dim]")
+
+        ordered = [a for a in AGENT_ORDER if any(a == agent_id for agent_id, _ in supporting_results)]
+        ordered += [a for a, _ in supporting_results if a not in AGENT_ORDER]
         for agent_id in ordered:
             result = self._completions[agent_id]
             color  = AGENT_COLORS.get(agent_id, "white")
@@ -315,6 +342,85 @@ class ResultScreen(Screen):
             f.writelines(lines)
         log = self.query_one("#rs-log", RichLog)
         log.write(f"\n[green]Saved to {path}[/green]")
+
+
+class HelpScreen(Screen):
+    """Compact full-screen keybinding reference."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Back"),
+        Binding("q", "dismiss_screen", "Back"),
+    ]
+
+    DEFAULT_CSS = """
+    HelpScreen {
+        background: #0d1117;
+        layout: vertical;
+    }
+    #help-header {
+        height: 3;
+        background: #161b22;
+        border-bottom: solid #21262d;
+        padding: 1 2;
+    }
+    #help-body {
+        height: 1fr;
+    }
+    #help-log {
+        padding: 1 2;
+    }
+    #help-footer {
+        height: 1;
+        background: #161b22;
+        border-top: solid #21262d;
+        color: #8b949e;
+        padding: 0 2;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="help-header")
+        with VerticalScroll(id="help-body"):
+            yield RichLog(id="help-log", highlight=True, markup=True, wrap=True)
+        yield Static(id="help-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#help-header", Static).update(
+            "[bold white]Orb TUI Help[/bold white]\n[dim]Keybindings for navigation, replies, and results[/dim]"
+        )
+        self.query_one("#help-footer", Static).update("[dim][q/Esc] back[/dim]")
+        log = self.query_one("#help-log", RichLog)
+        sections = [
+            ("Run Control", [
+                ("Enter", "Submit the current task or reply"),
+                ("Ctrl+K", "Stop the active run"),
+                ("R", "Open the results screen after a run"),
+                ("Y", "Copy the selected or primary result"),
+            ]),
+            ("Navigation", [
+                ("/", "Focus the input composer"),
+                ("Tab", "Cycle through agents"),
+                ("1-6", "Inspect a specific agent"),
+                ("Esc", "Close the current inspector or overlay"),
+            ]),
+            ("Reply Mode", [
+                ("Ctrl+G", "Clear the current reply draft"),
+                ("Agent question banner", "Shows who is waiting for input"),
+                ("Reply composer", "Sends your next message back to that agent"),
+            ]),
+            ("Workspace", [
+                ("Ctrl+L", "Clear the main feed"),
+                ("Drag to select", "Copy any visible terminal text"),
+            ]),
+        ]
+        for title, rows in sections:
+            log.write(f"[bold white]{title}[/bold white]")
+            for key, desc in rows:
+                log.write(f"  [bold cyan]{key:<22}[/bold cyan] {desc}")
+            log.write("")
+
+    def action_dismiss_screen(self) -> None:
+        self.app.pop_screen()
 
 
 # ─── Widgets ──────────────────────────────────────────────────────────────────
@@ -355,7 +461,7 @@ class HeaderBar(Static):
         elapsed = time() - s._run_start if s._run_start else s._last_elapsed
 
         t.append("  ORB", style="bold magenta")
-        t.append(f"  [{s._topology_name}]", style="dim")
+        t.append(f"  [{_topology_label(s._topology_name)}]", style="dim")
         t.append("  │  ", style="dim")
 
         if s._awaiting_user:
@@ -541,7 +647,7 @@ class ModeBar(Static):
             t.append("  ○ ready", style="dim")
             t.append(" · type a task  ", style="dim")
 
-        t.append("│  / focus  ctrl+k stop  r results  ", style="dim")
+        t.append("│  / focus  ctrl+k stop  r results  ? help  ", style="dim")
 
         if s._agents:
             ordered = [a for a in AGENT_ORDER if a in s._agents]
@@ -846,6 +952,7 @@ class OrbTUI(App[None]):
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
         Binding("ctrl+g",     "cancel_reply", "Clear reply", show=False),
         Binding("y",          "copy_result",  "Copy result"),
+        Binding("question_mark", "show_help", "Help", show=False),
         Binding("ctrl+enter", "submit_input", "Send", show=False),
         Binding("1", "select('coordinator')",         show=False),
         Binding("2", "select('coder')",               show=False),
@@ -1638,6 +1745,9 @@ class OrbTUI(App[None]):
             msg_count=self._routed,
             diff=self._last_diff,
         ))
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     async def action_cancel_run(self) -> None:
         if self._run_status == "Running":

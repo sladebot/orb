@@ -8,7 +8,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 
-from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar, GraphPanel
+from orb.cli.display import pick_primary_result
+from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar, GraphPanel, HelpScreen
 
 
 def _make_tui() -> OrbTUI:
@@ -428,12 +429,35 @@ class TestTuiEventHandler:
         assert "USER INPUT" in rendered
         assert "coder" in rendered.lower()
 
+    def test_header_bar_uses_topology_label(self):
+        tui = _make_tui()
+        tui._topology_name = "triangle"
+        rendered = HeaderBar(tui).render().plain
+        assert "Triad" in rendered
+        assert "triangle" not in rendered
+
     def test_graph_panel_shows_ask_badge_for_waiting_user(self):
         tui = _make_tui()
         tui._agents = {"coder": AgentInfo("coder", "Coder")}
         tui._agents["coder"].activity_text = "⏳ Waiting for user: choose framework"
         rendered = GraphPanel(tui).render().plain
         assert "ASK" in rendered
+
+    def test_pick_primary_result_prefers_worker_over_coordinator(self):
+        agent_id, result = pick_primary_result({
+            "coordinator": "Routed work to coder and reviewer",
+            "coder": "Implemented the requested feature",
+            "reviewer": "Looks good",
+        })
+        assert agent_id == "coder"
+        assert result == "Implemented the requested feature"
+
+    def test_show_help_pushes_help_screen(self):
+        tui = _make_tui()
+        tui.push_screen = MagicMock()
+        tui.action_show_help()
+        tui.push_screen.assert_called_once()
+        assert isinstance(tui.push_screen.call_args.args[0], HelpScreen)
 
     # ── stats ─────────────────────────────────────────────────────────────────
 
