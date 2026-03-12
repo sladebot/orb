@@ -396,6 +396,29 @@ class TestTuiEventHandler:
         })
         assert tui._agents["coder"].status == "completed"
 
+    def test_populate_detail_pane_writes_structured_sections(self):
+        tui = _make_tui()
+        tui._selected_agent = "coder"
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._agents["coder"].activity_text = "Reviewing feedback"
+        tui._agents["coder"].result = "Implemented feature"
+        tui._detail_feed = [{
+            "from_": "coder",
+            "to": "reviewer",
+            "model": "mock",
+            "type": "task",
+            "elapsed": 1.0,
+            "payload": "please review",
+            "preview": "please review",
+        }]
+
+        tui._populate_detail_pane()
+
+        writes = " ".join(str(call.args[0]) for call in tui.query_one("#detail-log").write.call_args_list)
+        assert "Overview" in writes
+        assert "Recent Messages" in writes
+        assert "Result" in writes
+
     # ── stats ─────────────────────────────────────────────────────────────────
 
     def test_stats_updates_routed_and_elapsed(self):

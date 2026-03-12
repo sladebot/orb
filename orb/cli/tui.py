@@ -680,7 +680,7 @@ class OrbTUI(App[None]):
     }
 
     #detail-header {
-        height: 2;
+        height: 3;
         background: #161b22;
         border-bottom: solid #21262d;
         padding: 0 1;
@@ -1506,35 +1506,38 @@ class OrbTUI(App[None]):
         color = AGENT_COLORS.get(self._selected_agent, "white")
         label = AGENT_LABELS.get(self._selected_agent, self._selected_agent)
 
-        # Agent summary header
-        log.write(f"[bold {color}]{'═' * 36}[/bold {color}]")
-        log.write(f"[bold {color}]  {label}[/bold {color}]  [dim]{info.role}[/dim]")
-        if info.model:
-            log.write(f"  [dim]model  {info.model}[/dim]")
-
-        # All messages (inbox + outbox) from _detail_feed
         agent_entries = [
             e for e in self._detail_feed
             if e.get("from_") == self._selected_agent
             or e.get("to") == self._selected_agent
         ]
-        n = len(agent_entries)
-        log.write(f"  [dim]queue  {n} message{'s' if n != 1 else ''}[/dim]")
-        log.write(f"[bold {color}]{'═' * 36}[/bold {color}]")
+
+        log.write(f"[bold {color}]■ {label}[/bold {color}] [dim]{info.role}[/dim]")
         log.write("")
+        log.write("[bold white]Overview[/bold white]")
+        log.write(f"  [dim]status[/dim]  {info.status}")
+        log.write(f"  [dim]messages[/dim]  {len(agent_entries)}")
+        if info.model:
+            log.write(f"  [dim]model[/dim]  {info.model}")
+        if info.complexity_score:
+            log.write(f"  [dim]complexity[/dim]  {info.complexity_score}")
 
-        for entry in agent_entries:
-            self._append_to_detail(entry)
-
-        # Live activity line at the bottom
         if info.activity_text:
-            log.write(f"[dim]⟳ {info.activity_text}[/dim]")
+            log.write("")
+            log.write("[bold white]Current Activity[/bold white]")
+            log.write(f"  {info.activity_text}")
 
-        # Final result
+        log.write("")
+        log.write("[bold white]Recent Messages[/bold white]")
+        if agent_entries:
+            for entry in agent_entries[-8:]:
+                self._append_to_detail(entry)
+        else:
+            log.write("  [dim]No messages yet.[/dim]")
+
         if info.result:
-            log.write(f"\n[bold green]{'─' * 36}[/bold green]")
-            log.write("[bold green]  Result[/bold green]")
-            log.write(f"[bold green]{'─' * 36}[/bold green]")
+            log.write("")
+            log.write("[bold green]Result[/bold green]")
             for line in info.result.splitlines():
                 log.write(f"  {line}")
 
