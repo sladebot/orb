@@ -108,6 +108,8 @@ class Dashboard {
 
         this._selectedModel = 'auto';
         this._loadModelOptions();
+        this._setMessageEmptyState();
+        this._setAgentEmptyState();
 
         this._connect();
     }
@@ -142,8 +144,10 @@ class Dashboard {
 
     _setConnectionStatus(connected) {
         const el = document.getElementById('connection-indicator');
+        const label = document.getElementById('connection-label');
         el.className = connected ? 'connected' : 'disconnected';
         el.title = connected ? 'Connected' : 'Disconnected';
+        if (label) label.textContent = connected ? 'Live' : 'Offline';
     }
 
     // ── Event dispatch ────────────────────────────────────────
@@ -154,6 +158,7 @@ class Dashboard {
             case 'message':        this._handleMessage(data);        break;
             case 'agent_status':   this._handleAgentStatus(data);    break;
             case 'agent_stats':    this._handleAgentStats(data);     break;
+            case 'agent_heartbeat': this._handleAgentHeartbeat(data); break;
             case 'complete':       this._handleComplete(data);       break;
             case 'stats':          this._handleStats(data);          break;
             case 'stopped':        this._handleStopped();            break;
@@ -180,6 +185,7 @@ class Dashboard {
                 msg_count: agent.msg_count || 0,
                 complexity: agent.complexity || 0,
                 result: agent.completed_result || '',
+                last_heartbeat: agent.last_heartbeat || 0,
             };
         }
 
@@ -191,6 +197,9 @@ class Dashboard {
         if (this._pendingPrediction) {
             this._addPredictionCard(this._pendingPrediction);
             this._pendingPrediction = null;
+        }
+        if ((data.messages || []).length === 0 && !this.messageLog.children.length) {
+            this._setMessageEmptyState();
         }
         for (const msg of data.messages) {
             this._addMessageEntry(msg);
@@ -244,10 +253,7 @@ class Dashboard {
         this.graph.updateAgentActivity(data.from, preview);
         this._updateStatusIndicator();
 
-        // If the message looks like a clarifying question from an agent, surface it
-        if (data.from && data.from !== 'user' && this._isQuestion(data.content)) {
-            this._showQuestion(data.from, data.content);
-        } else if (data.to && this.agents[data.to] && this.agents[data.to].status !== 'completed') {
+        if (data.to && this.agents[data.to] && this.agents[data.to].status !== 'completed') {
             // Show thinking indicator for the recipient
             this._showThinking(data.to);
         }
@@ -284,6 +290,17 @@ class Dashboard {
         }
         // Keep graph node model in sync (agent_stats fires for both sender and receiver)
         if (data.model) this.graph.updateAgentStatus(data.agent, data.status || '', data.model);
+        this._updateAgentCard(data.agent);
+        if (this.selectedAgent === data.agent) this._refreshNodePanel();
+    }
+
+    _handleAgentHeartbeat(data) {
+        if (this.agents[data.agent]) {
+            this.agents[data.agent].last_heartbeat = data.ts || 0;
+            if (data.status && this.agents[data.agent].status !== 'completed' && this.agents[data.agent].status !== 'error') {
+                this.agents[data.agent].status = data.status;
+            }
+        }
         this._updateAgentCard(data.agent);
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
     }
@@ -362,6 +379,28 @@ class Dashboard {
         }
     }
 
+    _heartbeatAge(agent) {
+        if (!agent || !agent.last_heartbeat) return null;
+        return Math.max(0, Date.now() / 1000 - agent.last_heartbeat);
+    }
+
+    _heartbeatState(agent) {
+        const age = this._heartbeatAge(agent);
+        if (age === null) return { label: 'no hb', age: null, live: false };
+        return {
+            label: age <= 6 ? 'live' : 'stale',
+            age,
+            live: age <= 6,
+        };
+    }
+
+    _formatRelativeAge(age) {
+        if (age === null || age === undefined) return '—';
+        if (age < 1) return '<1s';
+        if (age < 60) return `${age.toFixed(1)}s`;
+        return `${Math.round(age / 60)}m`;
+    }
+
     // ── Tab switching ─────────────────────────────────────────
 
     _switchTab(tabName) {
@@ -373,9 +412,31 @@ class Dashboard {
         });
     }
 
+    _setMessageEmptyState(text = 'Runs, agent questions, and handoffs will appear here.') {
+        this.messageLog.innerHTML = `
+            <div class="empty-state empty-state-messages">
+                <div class="empty-state-kicker">Message Feed</div>
+                <div class="empty-state-title">No activity yet</div>
+                <div class="empty-state-copy">${this._escapeHtml(text)}</div>
+            </div>
+        `;
+    }
+
+    _setAgentEmptyState(text = 'Agents will appear after topology prediction and run startup.') {
+        this.agentCards.innerHTML = `
+            <div class="empty-state empty-state-agents">
+                <div class="empty-state-kicker">Agents</div>
+                <div class="empty-state-title">Graph is idle</div>
+                <div class="empty-state-copy">${this._escapeHtml(text)}</div>
+            </div>
+        `;
+    }
+
     // ── Message log ───────────────────────────────────────────
 
     _addMessageEntry(msg) {
+        const empty = this.messageLog.querySelector('.empty-state');
+        if (empty) empty.remove();
         const entry = document.createElement('div');
         entry.className = 'msg-entry';
 
@@ -430,6 +491,10 @@ class Dashboard {
 
     _rebuildAgentCards() {
         this.agentCards.innerHTML = '';
+        if (Object.keys(this.agents).length === 0) {
+            this._setAgentEmptyState();
+            return;
+        }
         for (const agent of Object.values(this.agents)) {
             this._createAgentCard(agent);
         }
@@ -464,6 +529,16 @@ class Dashboard {
         const complexityHtml = complexity > 0
             ? `<span class="complexity-badge complexity-${this._complexityLevel(complexity)}" title="Complexity score: ${complexity}">${complexity}</span>`
             : '';
+        const heartbeat = this._heartbeatState(agent);
+        const heartbeatHtml = heartbeat.age !== null
+            ? `<span class="agent-heartbeat ${heartbeat.live ? 'live' : 'stale'}" title="Last heartbeat ${heartbeat.age.toFixed(1)}s ago">hb ${heartbeat.age.toFixed(1)}s</span>`
+            : `<span class="agent-heartbeat stale" title="No heartbeat received">hb —</span>`;
+        const recentActivity = (this._agentActivityLines[agent.id] || []).slice(-1)[0]
+            || this._rawMessages.filter(m => m.from === agent.id || m.to === agent.id).slice(-1)[0]?.content
+            || '';
+        const activityHtml = recentActivity
+            ? `<div class="agent-card-activity">${this._escapeHtml(recentActivity.replace(/\s+/g, ' ').trim().slice(0, 120))}</div>`
+            : `<div class="agent-card-activity empty">No recent activity yet</div>`;
 
         card.innerHTML = `
             <div class="agent-card-header">
@@ -474,8 +549,10 @@ class Dashboard {
             <div class="agent-card-meta">
                 <span>model: ${this._shortModel(agent.model) || '—'}</span>
                 <span>msgs: ${agent.msg_count}</span>
+                ${heartbeatHtml}
                 ${complexityHtml}
             </div>
+            ${activityHtml}
             ${resultHtml}
         `;
 
@@ -564,8 +641,16 @@ class Dashboard {
 
         // ── Meta row: model · msgs · complexity ───────────
         const meta = document.getElementById('ndp-meta');
+        const summary = document.getElementById('ndp-summary');
+        const overview = document.getElementById('ndp-overview-grid');
+        const commGrid = document.getElementById('ndp-comm-grid');
         const modelShort = agent.model ? this._shortModel(agent.model) : '—';
         const compScore = this._lastPrediction?.agent_complexity?.[agentId];
+        const heartbeat = this._heartbeatState(agent);
+        const relevantMessages = this._rawMessages.filter(m => m.from === agentId || m.to === agentId);
+        const outgoing = relevantMessages.filter(m => m.from === agentId);
+        const incoming = relevantMessages.filter(m => m.to === agentId);
+        const peers = [...new Set(relevantMessages.map(m => m.from === agentId ? m.to : m.from).filter(Boolean))];
         const compHtml = compScore !== undefined
             ? `<span class="ndp-meta-pill">complexity&nbsp;${compScore}</span>`
             : '';
@@ -574,7 +659,54 @@ class Dashboard {
             <span class="ndp-meta-pill accent" style="color:var(--text-muted)">
                 ${agent.msg_count || 0} msg${(agent.msg_count || 0) !== 1 ? 's' : ''}
             </span>
+            <span class="ndp-meta-pill" style="color:${heartbeat.live ? 'var(--green)' : 'var(--red)'}">
+                ${heartbeat.age !== null ? `heartbeat ${heartbeat.age.toFixed(1)}s` : 'heartbeat —'}
+            </span>
             ${compHtml}
+        `;
+
+        summary.textContent = heartbeat.live
+            ? `${agent.role || agentId} is active in the graph and ready to exchange work.`
+            : `${agent.role || agentId} has not emitted a recent heartbeat. Inspect activity and message flow before trusting the state.`;
+
+        overview.innerHTML = `
+            <div class="ndp-overview-card">
+                <span class="ndp-overview-label">State</span>
+                <span class="ndp-overview-value">${this._escapeHtml(status)}</span>
+                <span class="ndp-overview-note">${heartbeat.label}</span>
+            </div>
+            <div class="ndp-overview-card">
+                <span class="ndp-overview-label">Messages</span>
+                <span class="ndp-overview-value">${relevantMessages.length}</span>
+                <span class="ndp-overview-note">${outgoing.length} out · ${incoming.length} in</span>
+            </div>
+            <div class="ndp-overview-card">
+                <span class="ndp-overview-label">Heartbeat</span>
+                <span class="ndp-overview-value">${this._formatRelativeAge(heartbeat.age)}</span>
+                <span class="ndp-overview-note">${heartbeat.live ? 'recent' : 'stale'}</span>
+            </div>
+            <div class="ndp-overview-card">
+                <span class="ndp-overview-label">Peers</span>
+                <span class="ndp-overview-value">${peers.length}</span>
+                <span class="ndp-overview-note">${peers.slice(0, 3).join(', ') || 'none yet'}</span>
+            </div>
+        `;
+
+        commGrid.innerHTML = `
+            <div class="ndp-comm-card">
+                <span class="ndp-comm-kicker">Outgoing</span>
+                <span class="ndp-comm-value">${outgoing.length}</span>
+                <span class="ndp-comm-note">messages sent to collaborators</span>
+            </div>
+            <div class="ndp-comm-card">
+                <span class="ndp-comm-kicker">Incoming</span>
+                <span class="ndp-comm-value">${incoming.length}</span>
+                <span class="ndp-comm-note">messages received from the graph</span>
+            </div>
+            <div class="ndp-comm-card ndp-comm-wide">
+                <span class="ndp-comm-kicker">Connected peers</span>
+                <span class="ndp-comm-note">${peers.length ? peers.map(p => this._escapeHtml(p)).join(' · ') : 'No graph communication yet'}</span>
+            </div>
         `;
 
         // ── Activity section ──────────────────────────────
@@ -595,9 +727,7 @@ class Dashboard {
 
         // ── Messages section ──────────────────────────────
         const msgList = document.getElementById('ndp-message-list');
-        const relevant = this._rawMessages
-            .filter(m => m.from === agentId || m.to === agentId)
-            .slice(-8);
+        const relevant = relevantMessages.slice(-8);
 
         if (relevant.length === 0) {
             msgList.innerHTML = `<div style="font-size:11px;color:var(--text-muted);font-style:italic">No messages yet.</div>`;
@@ -782,7 +912,9 @@ class Dashboard {
         this._rawMessages = [];
         this._agentActivityLines = {};
         this.messageLog.innerHTML = '';
+        this._setMessageEmptyState('Analyzing the task and waiting for the runtime to emit events.');
         this.agentCards.innerHTML = '';
+        this._setAgentEmptyState('Waiting for the runtime to construct the predicted topology.');
         this.agents = {};
         this.graph.setTopology([], []);
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
@@ -1117,6 +1249,23 @@ class Dashboard {
             while (log.children.length > 12) log.removeChild(log.firstChild);
             // Scroll the whole message log to keep the indicator in view
             this.messageLog.scrollTop = this.messageLog.scrollHeight;
+        }
+
+        if (typeof activity === 'string' && activity.startsWith('⏳ Waiting for user')) {
+            this._addMessageEntry({
+                from: agent,
+                to: 'user',
+                content: activity,
+                elapsed: 0,
+                model: '',
+                depth: 0,
+                msg_type: 'question',
+                context_slice: [],
+            });
+            this._showQuestion(agent, activity);
+        } else if (!activity && this._questionAgent === agent) {
+            document.getElementById('question-panel').classList.add('hidden');
+            this._questionAgent = null;
         }
 
         // Update node detail panel if this agent is selected

@@ -337,6 +337,18 @@ class TestTuiEventHandler:
         tui._mock_ta.clear.assert_called_once()
         tui.notify.assert_called_once()
 
+    def test_agent_heartbeat_updates_last_seen(self):
+        tui = _make_tui()
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._handle_server_event({
+            "type": "agent_heartbeat",
+            "agent": "coder",
+            "ts": 123.45,
+            "status": "running",
+        })
+        assert tui._agents["coder"].last_heartbeat == 123.45
+        assert tui._agents["coder"].status == "running"
+
     # ── complete ─────────────────────────────────────────────────────────────
 
     def test_complete_updates_completions(self):

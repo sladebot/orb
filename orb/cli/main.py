@@ -144,9 +144,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
-    parser.add_argument("--topology", choices=["triangle", "dual-review"], default="triangle", help="Agent topology to use")
+    parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Agent topology to use")
     parser.add_argument("--tui", action="store_true", help="Launch interactive terminal TUI")
     parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI (requires --tui)")
+    parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="Enable verbose logging (default: on)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose logging")
     return parser.parse_args()
@@ -276,6 +277,8 @@ async def async_main() -> None:
                 budget=args.budget,
                 dashboard_port=args.dashboard_port,
                 show_logs=args.logs,
+                initial_query=args.query,
+                exit_after_run=args.exit_after_run,
             )
         else:
             # No public dashboard: backend on loopback-only port 18080
@@ -287,6 +290,8 @@ async def async_main() -> None:
                 topology=args.topology,
                 budget=args.budget,
                 show_logs=args.logs,
+                initial_query=args.query,
+                exit_after_run=args.exit_after_run,
             )
         return
 
@@ -339,28 +344,28 @@ async def async_main() -> None:
         )
     else:
         print_header()
-        if args.topology == "dual-review":
-            from ..topologies.dual_review import create_dual_review
-            orchestrator = create_dual_review(
-                providers=providers,
-                config=config,
-                model_overrides=model_overrides or None,
-                trace=False,  # we register our own listener below
-                tier_override=tier_override,
-            )
-        else:
-            orchestrator = create_triad(
-                providers=providers,
-                config=config,
-                model_overrides=model_overrides or None,
-                trace=False,  # we register our own listener below
-                tier_override=tier_override,
-            )
-
         live_display = None
         dashboard_server = None
+        orchestrator = None
 
         if not args.dashboard and trace:
+            if args.topology == "dual-review":
+                from ..topologies.dual_review import create_dual_review
+                orchestrator = create_dual_review(
+                    providers=providers,
+                    config=config,
+                    model_overrides=model_overrides or None,
+                    trace=False,
+                    tier_override=tier_override,
+                )
+            else:
+                orchestrator = create_triad(
+                    providers=providers,
+                    config=config,
+                    model_overrides=model_overrides or None,
+                    trace=False,
+                    tier_override=tier_override,
+                )
             from .live_display import LiveDisplay
             live_display = LiveDisplay(budget=args.budget)
             # Pass topology/model info for the header (use defaults since no LLM prediction here)
@@ -381,45 +386,41 @@ async def async_main() -> None:
 
         if args.dashboard:
             from web.server import DashboardServer
-            from web.bridge import DashboardBridge
             from web.state import DashboardState
 
             dash_state = DashboardState()
             dashboard_server = DashboardServer(dash_state, port=args.dashboard_port)
-            bridge = DashboardBridge(dash_state, dashboard_server.broadcast)
-
-            # Set up bridge with topology info
-            agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
-            bridge.setup_agents(agent_roles)
-            bridge.setup_edges(
-                [(e.a, e.b) for e in orchestrator.bus.graph.edges]
+            dashboard_server.set_providers(
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                tier_override=tier_override,
             )
-            bridge.setup_budget(config.budget)
 
-            # Wire bridge into bus events
-            orchestrator.bus.on_event(bridge.on_message_routed)
-
-            dashboard_server.set_agents(orchestrator.agents)
             await dashboard_server.start()
 
             print(f"  Dashboard running at http://localhost:{args.dashboard_port}")
-
-            # Hook bridge into orchestrator's completion tracking
-            original_on_complete = orchestrator._on_agent_complete
-            async def wrapped_on_complete(agent_id, result):
-                await bridge.on_agent_complete(agent_id, result)
-                await original_on_complete(agent_id, result)
-            orchestrator._on_agent_complete = wrapped_on_complete
-
-        result = await orchestrator.run(args.query)
+            status, payload = await dashboard_server.runtime.start_run(
+                args.query,
+                args.topology,
+            )
+            if not payload.get("ok"):
+                print_error(payload.get("error", "Failed to start run"))
+                await dashboard_server.stop()
+                sys.exit(1)
+            await dashboard_server.runtime.wait_for_run()
+            result = dashboard_server.runtime.last_result
+        else:
+            result = await orchestrator.run(args.query)
 
         if live_display:
             live_display.stop()
 
         if dashboard_server:
             # Keep dashboard open for a bit so user can inspect
-            from rich.prompt import Prompt
-            Prompt.ask("\n[dim]Dashboard running. Press Enter to shut down[/dim]")
+            if not args.exit_after_run:
+                from rich.prompt import Prompt
+                Prompt.ask("\n[dim]Dashboard running. Press Enter to shut down[/dim]")
             await dashboard_server.stop()
 
         if result.error:

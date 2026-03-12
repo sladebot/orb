@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 class AgentStatus(Enum):
     IDLE = "idle"
     RUNNING = "running"
+    WAITING = "waiting"
     COMPLETED = "completed"
     ERROR = "error"
 
@@ -27,3 +28,16 @@ class AgentConfig:
     enable_filesystem: bool = False          # give agent read/write/run tools
     sandbox: "Sandbox | None" = None        # shared sandbox for this run
     suppress_context_guidelines: bool = False  # omit generic context-sharing hints from system prompt
+
+
+@dataclass
+class TopologyContext:
+    topology_id: str
+    topology_label: str
+    node_id: str
+    role: str
+    direct_neighbors: dict[str, str]
+    graph_edges: list[tuple[str, str]]
+    node_roles: dict[str, str]
+    workflow_steps: list[str]
+    completion_rules: list[str]

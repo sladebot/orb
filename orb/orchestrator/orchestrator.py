@@ -50,6 +50,11 @@ class Orchestrator:
 
         synthesis = self.config.synthesis_agent
 
+        if not synthesis:
+            if len(self._completions) >= len(self.agents):
+                self._completion_event.set()
+            return
+
         if synthesis and agent_id == synthesis:
             # Synthesis agent finished — gracefully stop remaining workers, then signal done.
             for other_id, other_agent in self.agents.items():
@@ -103,10 +108,6 @@ class Orchestrator:
                         await synth_agent.channel.send(notify_msg)
                     except Exception:
                         logger.warning("Could not notify synthesis agent")
-        else:
-            # No synthesis agent — done when all agents complete.
-            if len(self._completions) >= len(self.agents):
-                self._completion_event.set()
 
     async def run(self, query: str) -> RunResult:
         """Run the agent graph with the given query."""

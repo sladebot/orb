@@ -121,6 +121,20 @@ class TestDashboardBridge:
         # model should be unchanged since empty model was passed
         assert bridge.state.agents["coder"].model == "existing-model"
 
+    async def test_on_agent_heartbeat_updates_state_and_broadcasts(self):
+        bridge, captured = _make_bridge()
+        bridge.setup_agents({"coder": "Coder"})
+        await bridge.on_agent_heartbeat("coder", {"status": "running", "ts": 123.45})
+
+        assert bridge.state.agents["coder"].last_heartbeat == 123.45
+        assert bridge.state.agents["coder"].status == "running"
+
+        events = [json.loads(c) for c in captured]
+        heartbeat_event = next(e for e in events if e["type"] == "agent_heartbeat")
+        assert heartbeat_event["agent"] == "coder"
+        assert heartbeat_event["status"] == "running"
+        assert heartbeat_event["ts"] == 123.45
+
     # ── on_agent_complete ────────────────────────────────────────────────────
 
     async def test_on_agent_complete_marks_completed(self):
@@ -176,6 +190,7 @@ class TestDashboardBridge:
         agent = event["agents"][0]
         assert agent["id"] == "coder"
         assert agent["role"] == "Coder"
+        assert "last_heartbeat" in agent
 
     async def test_budget_decrements_with_messages(self):
         bridge, _ = _make_bridge()

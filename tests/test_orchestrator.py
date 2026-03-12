@@ -31,9 +31,16 @@ class TestOrchestrator:
         mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
         overrides = {t: mock_model for t in ModelTier}
 
-        # First agent (coder) completes, but reviewer/tester need messages too
-        # Actually coder sends to reviewer and tester, then they complete
         mock_with_flow = MockLLMClient([
+            # Coordinator: routes to coder, then completes routing duties
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[
+                    ToolCall(id="t0", name="send_message", input={"to": "coder", "content": "Write hello world"}),
+                    ToolCall(id="t0b", name="complete_task", input={"result": "Task routed to coder"}),
+                ],
+            ),
             # Coder: sends to reviewer and tester, then completes
             CompletionResponse(
                 content="",
@@ -70,7 +77,7 @@ class TestOrchestrator:
 
         assert result.success
         assert len(result.completions) == 4
-        assert "coordinator" in result.completions
+        assert result.completions["coordinator"] == "Task routed to coder"
         assert not result.timed_out
 
     async def test_timeout(self):

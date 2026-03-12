@@ -458,6 +458,31 @@ No frontend build step is required — the UI is plain HTML, CSS, and JS served 
 
 ---
 
+## Demo Video
+
+Use the recording helper to generate `.mov` demos for TUI and dashboard on macOS:
+
+```bash
+# Record both demos into demos/
+./scripts/record_demo_video.sh both
+
+# Record only TUI
+./scripts/record_demo_video.sh tui
+
+# Record only dashboard
+./scripts/record_demo_video.sh dashboard
+```
+
+Optional environment variables:
+
+- `DEMO_QUERY` custom prompt shown in the demo
+- `DEMO_DURATION` seconds per clip (default: `25`)
+- `DEMO_DASHBOARD_PORT` dashboard port (default: `8080`)
+- `DEMO_DISPLAY_ID` optional display index for macOS `screencapture` (example: `1`)
+- `ORB_CMD` command used to launch orb (default: `python -m orb.cli.main`)
+
+---
+
 ## Architecture
 
 ### MessageBus

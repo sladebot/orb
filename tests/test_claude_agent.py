@@ -1,9 +1,10 @@
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
 from orb.agent.llm_agent import LLMAgent
-from orb.agent.types import AgentConfig
+from orb.agent.types import AgentConfig, AgentStatus
 from orb.graph.graph import Graph
 from orb.llm.client import LLMClient
 from orb.llm.types import CompletionRequest, CompletionResponse, ToolCall, ModelTier
@@ -174,3 +175,94 @@ class TestLLMAgent:
 
         received = await asyncio.wait_for(ch_b.receive(), timeout=1.0)
         assert received.context_slice == ["def hello(): pass", "must handle errors"]
+
+    async def test_send_to_user_sets_waiting_status(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(
+                    id="tc1",
+                    name="send_message",
+                    input={"to": "user", "content": "Which framework should I use?"},
+                )],
+            ),
+        ])
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock)
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Build app")
+        await agent_a.process(msg)
+
+        assert agent_a.status == AgentStatus.WAITING
+
+    async def test_repeated_directory_listing_uses_turn_cache(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc1", name="list_directory", input={"path": "."})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc2", name="list_directory", input={"path": "."})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc3", name="complete_task", input={"result": "Done"})],
+            ),
+        ])
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock)
+        sandbox = MagicMock()
+        sandbox.list_directory = MagicMock(return_value="app/\npackage.json")
+        sandbox.read_file = MagicMock(return_value="")
+        sandbox.write_file = MagicMock(return_value="ok")
+        agent_a.config.sandbox = sandbox
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Inspect project")
+        await agent_a.process(msg)
+
+        assert sandbox.list_directory.call_count == 1
+
+    async def test_repeated_read_file_uses_turn_cache_until_write(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc1", name="read_file", input={"path": "app.py"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc2", name="read_file", input={"path": "app.py"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc3", name="write_file", input={"path": "app.py", "content": "print('hi')"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc4", name="read_file", input={"path": "app.py"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc5", name="complete_task", input={"result": "Done"})],
+            ),
+        ])
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock)
+        sandbox = MagicMock()
+        sandbox.list_directory = MagicMock(return_value="")
+        sandbox.read_file = MagicMock(side_effect=["old", "old", "new"])
+        sandbox.write_file = MagicMock(return_value="wrote app.py")
+        agent_a.config.sandbox = sandbox
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Inspect project")
+        await agent_a.process(msg)
+
+        # One initial read, one old-content read during write_file for diff capture,
+        # and one fresh read after cache invalidation.
+        assert sandbox.read_file.call_count == 3

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..sandbox.sandbox import Sandbox
 from ..tracing.logger import EventLogger
+from .context import build_topology_contexts
 
 
 AGENT_DEFS = {
@@ -22,13 +23,10 @@ AGENT_DEFS = {
         node_id="coordinator",
         role="Coordinator",
         description=(
-            "You are the entry and exit point for this team. You have exactly two jobs:\n"
-            "1. DELEGATE: When you receive a task, send it to the Coder immediately with the task text unchanged. "
-            "Do NOT answer the task, write any code, explain any solution, or do any analysis yourself.\n"
-            "2. SYNTHESIZE: When the orchestrator notifies you that all workers are done, "
-            "compile their results into a single final answer and call complete_task.\n\n"
-            "NEVER call complete_task before receiving worker results. "
-            "NEVER answer the user's question yourself — always delegate to the Coder first."
+            "You are the routing coordinator for this team.\n"
+            "When you receive the user's task, send it to the correct worker immediately with the task text unchanged. "
+            "Do NOT answer the task, do NOT write code, and do NOT analyze the task yourself. "
+            "You only route inputs across the graph and surface user clarifications to the correct node."
         ),
         base_complexity=20,
         suppress_context_guidelines=True,
@@ -37,11 +35,9 @@ AGENT_DEFS = {
         node_id="coder",
         role="Coder",
         description=(
-            "You write code to solve programming tasks. "
-            "Write your implementation to disk using write_file, then run it with run_command to verify. "
-            "Send the file paths to the Reviewer for feedback and to the Tester for validation. "
-            "When you receive feedback, iterate on your code and update the files. "
-            "When your work is complete and approved, call complete_task with your final implementation."
+            "You write and update the implementation for programming tasks. "
+            "Use the shared sandbox to inspect, write, and verify code. "
+            "Coordinate with your graph neighbors for review, testing, and follow-up changes."
         ),
         base_complexity=50,
         enable_filesystem=True,
@@ -50,11 +46,8 @@ AGENT_DEFS = {
         node_id="reviewer",
         role="Reviewer",
         description=(
-            "You review code for correctness, style, edge cases, and best practices. "
-            "Use read_file to read the coder's files directly before reviewing. "
-            "Send specific, actionable feedback to the Coder. "
-            "You can also suggest test cases to the Tester. "
-            "When the code meets your standards, call complete_task with your final review verdict."
+            "You review implementation quality, correctness, and edge cases. "
+            "Inspect files directly in the shared sandbox and send concrete feedback to the relevant neighbors."
         ),
         base_complexity=65,
         enable_filesystem=True,
@@ -63,11 +56,8 @@ AGENT_DEFS = {
         node_id="tester",
         role="Tester",
         description=(
-            "You test code by writing and executing test cases. "
-            "Read the coder's files with read_file, write test files with write_file, "
-            "and run them with run_command. Report any bugs or failing cases back to the Coder. "
-            "Share test results and coverage summaries with the Reviewer. "
-            "When all tests pass, call complete_task with your full test report."
+            "You validate implementations through execution, test cases, and bug discovery. "
+            "Use the shared sandbox to read files, write tests, run commands, and report concrete findings."
         ),
         base_complexity=25,
         enable_filesystem=True,
@@ -85,7 +75,10 @@ def create_triad(
 ) -> Orchestrator:
     """Build a coordinator + 3-agent triangle and return an Orchestrator."""
     config = config or OrchestratorConfig()
-    config = dataclasses.replace(config, entry_agent="coordinator", synthesis_agent="coordinator")
+    entry_agent = "coordinator" if config.entry_agent == OrchestratorConfig().entry_agent else config.entry_agent
+    config = dataclasses.replace(config, entry_agent=entry_agent, synthesis_agent=None)
+    topology_id = "triangle"
+    topology_label = "Triad"
 
     # Build graph
     graph = Graph()
@@ -95,6 +88,41 @@ def create_triad(
     graph.add_edge("coder", "reviewer")
     graph.add_edge("coder", "tester")
     graph.add_edge("reviewer", "tester")
+
+    node_roles = {nid: agent_config.role for nid, agent_config in AGENT_DEFS.items()}
+    topology_contexts = build_topology_contexts(
+        topology_id=topology_id,
+        topology_label=topology_label,
+        graph=graph,
+        node_roles=node_roles,
+        workflow_steps=[
+            "Coordinator receives the user task and routes it into the graph.",
+            "Coder implements or updates the solution in the shared sandbox.",
+            "Coder hands work to Reviewer and Tester for feedback and validation.",
+            "Reviewer and Tester send concrete findings back through their graph neighbors.",
+            "Each node completes only after finishing its own role in the workflow.",
+        ],
+        completion_rules={
+            "coordinator": [
+                "Route the incoming task to the correct worker without solving it yourself.",
+                "Do not ask the user questions unless a worker explicitly bubbles one up.",
+                "Complete after routing or forwarding the necessary input.",
+            ],
+            "coder": [
+                "Do not complete immediately after first-pass implementation.",
+                "Hand off the implementation to both Reviewer and Tester before final completion.",
+                "If feedback or bugs arrive, update the implementation before completing.",
+            ],
+            "reviewer": [
+                "Review concrete files or outputs before completing.",
+                "Send actionable feedback to the Coder when changes are needed.",
+            ],
+            "tester": [
+                "Run validation against the current implementation before completing.",
+                "Send failing cases or validation results to the relevant neighbors.",
+            ],
+        },
+    )
 
     # Build bus
     bus = MessageBus(
@@ -130,7 +158,7 @@ def create_triad(
         neighbor_roles = {
             n: AGENT_DEFS[n].role for n in graph.get_neighbors(nid)
         }
-        agent.initialize(neighbor_roles)
+        agent.initialize(neighbor_roles, topology_contexts[nid])
 
     # Event logger
     event_logger = EventLogger(enabled=trace)

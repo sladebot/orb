@@ -15,7 +15,10 @@
         <!-- Brand -->
         <div id="brand">
             <span id="brand-badge">ORB</span>
-            <span id="brand-subtitle">Agent Network</span>
+            <div id="brand-copy">
+                <span id="brand-subtitle">Agent Network</span>
+                <span id="brand-caption">Live graph runtime with subscriber UIs</span>
+            </div>
         </div>
 
         <div id="stats-group">
@@ -41,7 +44,10 @@
             </div>
         </div>
 
-        <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+        <div id="connection-pill">
+            <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+            <span id="connection-label">Disconnected</span>
+        </div>
     </div>
 
     <!-- Main layout -->
@@ -158,17 +164,32 @@
                             <span id="ndp-status-badge"></span>
                         </div>
                         <div id="ndp-meta"></div>
+                        <div id="ndp-summary"></div>
                     </div>
                     <button id="ndp-close" title="Close">×</button>
                 </div>
 
                 <div id="ndp-body">
+                    <div id="ndp-overview-section" class="ndp-section">
+                        <div class="ndp-section-label">
+                            <span class="ndp-section-icon">◈</span> Overview
+                        </div>
+                        <div id="ndp-overview-grid"></div>
+                    </div>
+
                     <!-- Live activity -->
                     <div id="ndp-activity-section" class="ndp-section hidden">
                         <div class="ndp-section-label">
-                            <span class="ndp-section-icon">⚙</span> Current Activity
+                            <span class="ndp-section-icon">⚙</span> Activity Timeline
                         </div>
                         <div id="ndp-activity-log"></div>
+                    </div>
+
+                    <div id="ndp-comm-section" class="ndp-section">
+                        <div class="ndp-section-label">
+                            <span class="ndp-section-icon">⇄</span> Communication
+                        </div>
+                        <div id="ndp-comm-grid"></div>
                     </div>
 
                     <!-- Recent messages -->
@@ -190,6 +211,7 @@
 
                 <!-- Chat input -->
                 <div id="ndp-chat-row">
+                    <div id="ndp-chat-label">Send input directly to this node</div>
                     <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
                     <button id="ndp-chat-send">Send</button>
                 </div>

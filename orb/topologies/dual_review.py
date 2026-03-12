@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..sandbox.sandbox import Sandbox
 from ..tracing.logger import EventLogger
+from .context import build_topology_contexts
 
 
 AGENT_DEFS = {
@@ -22,13 +23,10 @@ AGENT_DEFS = {
         node_id="coordinator",
         role="Coordinator",
         description=(
-            "You are the entry and exit point for this team. You have exactly two jobs:\n"
-            "1. DELEGATE: When you receive a task, send it to the Coder immediately with the task text unchanged. "
-            "Do NOT answer the task, write any code, explain any solution, or do any analysis yourself.\n"
-            "2. SYNTHESIZE: When the orchestrator notifies you that all workers are done, "
-            "compile their results into a single final answer and call complete_task.\n\n"
-            "NEVER call complete_task before receiving worker results. "
-            "NEVER answer the user's question yourself — always delegate to the Coder first."
+            "You are the routing coordinator for this team.\n"
+            "When you receive the user's task, send it to the correct worker immediately with the task text unchanged. "
+            "Do NOT answer the task, do NOT write code, and do NOT analyze the task yourself. "
+            "You only route work and surface direct user clarifications to the correct node."
         ),
         base_complexity=20,
         suppress_context_guidelines=True,
@@ -37,12 +35,9 @@ AGENT_DEFS = {
         node_id="coder",
         role="Coder",
         description=(
-            "You write code to solve programming tasks. "
-            "Write your implementation to disk using write_file, then verify it with run_command. "
-            "Send the file paths to both Reviewer A and Reviewer B for independent review, "
-            "and to the Tester for validation. "
-            "When you receive feedback from either reviewer, iterate and update the files. "
-            "Complete your task only after both reviewers have approved."
+            "You write and update the implementation for programming tasks. "
+            "Use the shared sandbox to inspect, write, and verify code. "
+            "Coordinate with your graph neighbors for review, testing, and follow-up changes."
         ),
         base_complexity=50,
         enable_filesystem=True,
@@ -51,13 +46,8 @@ AGENT_DEFS = {
         node_id="reviewer_a",
         role="Reviewer A",
         description=(
-            "You are the first of two senior code reviewers. "
-            "Use read_file to read the coder's files directly before reviewing. "
-            "Review code independently for correctness, style, edge cases, and best practices. "
-            "After forming your own opinion, communicate with Reviewer B to compare findings. "
-            "You MUST reach consensus with Reviewer B before approving — discuss any disagreements directly with them. "
-            "Only call complete_task once you and Reviewer B have explicitly agreed the code is ready. "
-            "Send your final consensus decision to the Coder."
+            "You are one of two independent reviewers. "
+            "Inspect files in the shared sandbox, review them from your perspective, and communicate with the other reviewer and relevant neighbors."
         ),
         base_complexity=65,
         enable_filesystem=True,
@@ -66,13 +56,8 @@ AGENT_DEFS = {
         node_id="reviewer_b",
         role="Reviewer B",
         description=(
-            "You are the second of two senior code reviewers. "
-            "Use read_file to read the coder's files directly before reviewing. "
-            "Review code independently for correctness, security, performance, and maintainability. "
-            "After forming your own opinion, communicate with Reviewer A to compare findings. "
-            "You MUST reach consensus with Reviewer A before approving — discuss any disagreements directly with them. "
-            "Only call complete_task once you and Reviewer A have explicitly agreed the code is ready. "
-            "Send your final consensus decision to the Coder."
+            "You are one of two independent reviewers. "
+            "Inspect files in the shared sandbox, review them from your perspective, and communicate with the other reviewer and relevant neighbors."
         ),
         base_complexity=65,
         enable_filesystem=True,
@@ -81,12 +66,8 @@ AGENT_DEFS = {
         node_id="tester",
         role="Tester",
         description=(
-            "You test code by writing and executing test cases. "
-            "Read the coder's files with read_file, write test files with write_file, "
-            "and run them with run_command. "
-            "Report any bugs or failing cases back to the Coder. "
-            "Share test results and coverage summaries with both Reviewer A and Reviewer B. "
-            "Complete your task when all tests pass."
+            "You validate implementations through execution, test cases, and bug discovery. "
+            "Use the shared sandbox to read files, write tests, run commands, and report concrete findings."
         ),
         base_complexity=25,
         enable_filesystem=True,
@@ -140,7 +121,10 @@ def create_dual_review(
     If agent_model_map is provided, it overrides the default reviewer pinned models.
     """
     config = config or OrchestratorConfig()
-    config = dataclasses.replace(config, entry_agent="coordinator", synthesis_agent="coordinator")
+    entry_agent = "coordinator" if config.entry_agent == OrchestratorConfig().entry_agent else config.entry_agent
+    config = dataclasses.replace(config, entry_agent=entry_agent, synthesis_agent=None)
+    topology_id = "dual-review"
+    topology_label = "Dual Review"
 
     # Pick reviewer models from different providers when possible
     reviewer_a_model, reviewer_b_model = _pick_reviewer_models(providers)
@@ -181,6 +165,46 @@ def create_dual_review(
     graph.add_edge("tester", "reviewer_b")
     graph.add_edge("reviewer_b", "tester")
 
+    node_roles = {nid: agent_config.role for nid, agent_config in agent_defs.items()}
+    topology_contexts = build_topology_contexts(
+        topology_id=topology_id,
+        topology_label=topology_label,
+        graph=graph,
+        node_roles=node_roles,
+        workflow_steps=[
+            "Coordinator routes the incoming task to the Coder.",
+            "Coder implements or updates the solution in the shared sandbox.",
+            "Coder hands the work to Reviewer A, Reviewer B, and Tester.",
+            "The two reviewers compare findings with each other before approval.",
+            "Tester validates the implementation and sends concrete failures or pass signals.",
+            "Each node completes only after finishing its own role in the workflow.",
+        ],
+        completion_rules={
+            "coordinator": [
+                "Route the incoming task to the correct worker without solving it yourself.",
+                "Forward user clarifications to the right node when needed.",
+                "Complete after routing or forwarding the necessary input.",
+            ],
+            "coder": [
+                "Do not complete immediately after first-pass implementation.",
+                "Hand off the implementation to both reviewers and the tester before final completion.",
+                "Incorporate reviewer and tester feedback before completing.",
+            ],
+            "reviewer_a": [
+                "Review the implementation independently before completing.",
+                "Discuss disagreements directly with Reviewer B before signaling approval.",
+            ],
+            "reviewer_b": [
+                "Review the implementation independently before completing.",
+                "Discuss disagreements directly with Reviewer A before signaling approval.",
+            ],
+            "tester": [
+                "Run validation against the current implementation before completing.",
+                "Send failing cases or validation results to the coder and reviewers.",
+            ],
+        },
+    )
+
     # Build bus
     bus = MessageBus(
         graph=graph,
@@ -213,7 +237,7 @@ def create_dual_review(
         neighbor_roles = {
             n: agent_defs[n].role for n in graph.get_neighbors(nid)
         }
-        agent.initialize(neighbor_roles)
+        agent.initialize(neighbor_roles, topology_contexts[nid])
 
     # Event logger
     event_logger = EventLogger(enabled=trace)

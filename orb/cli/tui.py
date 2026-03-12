@@ -151,6 +151,9 @@ def _graph_node_status(info: "AgentInfo", tick_count: int) -> tuple[str, str]:
         return "?", "yellow"
     if info.activity_text.startswith("wrote "):
         return "✎", "cyan"
+    age = info.heartbeat_age
+    if age is not None and age > 6 and info.status not in ("completed", "error"):
+        return "!", "red"
     if info.status == "running":
         return SPINNERS[tick_count % len(SPINNERS)], STATUS_COLOR.get(info.status, "green")
     return STATUS_ICON.get(info.status, "○"), STATUS_COLOR.get(info.status, "dim")
@@ -169,6 +172,7 @@ class AgentInfo:
     activity_text: str = ""          # live activity from _emit callback
     messages: list[dict] = field(default_factory=list)   # full history for detail pane
     result: str = ""
+    last_heartbeat: float = 0.0
     status_since: float = field(default_factory=time)    # when status last changed
 
     def set_status(self, status: str) -> None:
@@ -181,6 +185,12 @@ class AgentInfo:
     @property
     def time_in_state(self) -> float:
         return time() - self.status_since
+
+    @property
+    def heartbeat_age(self) -> float | None:
+        if not self.last_heartbeat:
+            return None
+        return max(0.0, time() - self.last_heartbeat)
 
 
 # ─── TUI Messages ─────────────────────────────────────────────────────────────
@@ -594,6 +604,8 @@ class GraphPanel(Static):
                 meta.append(f"⚡{info.complexity_score}")
             if info.status in ("running", "waiting") and info.time_in_state > 1:
                 meta.append(f"{info.time_in_state:.0f}s")
+            if info.heartbeat_age is not None:
+                meta.append("LIVE" if info.heartbeat_age <= 6 else "STALE")
             if info.activity_text.startswith("⏳ Waiting for user"):
                 meta.append("ASK")
             elif info.activity_text.startswith("wrote "):
@@ -1240,6 +1252,8 @@ class OrbTUI(App[None]):
             self._on_server_agent_stats(data)
         elif t == "agent_activity":
             self._on_server_agent_activity(data)
+        elif t == "agent_heartbeat":
+            self._on_server_agent_heartbeat(data)
         elif t == "complete":
             self._on_server_complete(data)
         elif t == "run_complete":
@@ -1267,6 +1281,7 @@ class OrbTUI(App[None]):
             info.status           = agent_data.get("status", "idle")
             info.model            = agent_data.get("model", "")
             info.complexity_score = agent_data.get("complexity", 0)
+            info.last_heartbeat   = float(agent_data.get("last_heartbeat", 0.0) or 0.0)
             result = agent_data.get("completed_result", "")
             if result:
                 info.result = result
@@ -1402,6 +1417,18 @@ class OrbTUI(App[None]):
                 self._agents[aid].msg_count = msg_count
             if complexity is not None:
                 self._agents[aid].complexity_score = int(complexity)
+        self._refresh_all()
+
+    def _on_server_agent_heartbeat(self, data: dict) -> None:
+        aid = data.get("agent", "")
+        ts = float(data.get("ts", 0.0) or 0.0)
+        status = data.get("status", "")
+        if aid in self._agents:
+            self._agents[aid].last_heartbeat = ts
+            if status and self._agents[aid].status not in ("completed", "error"):
+                self._agents[aid].set_status(status)
+        if self._selected_agent == aid:
+            self._update_detail_header()
         self._refresh_all()
 
     def _on_server_agent_activity(self, data: dict) -> None:
@@ -1644,6 +1671,9 @@ class OrbTUI(App[None]):
             log.write(f"  [dim]model[/dim]  {info.model}")
         if info.complexity_score:
             log.write(f"  [dim]complexity[/dim]  {info.complexity_score}")
+        if info.heartbeat_age is not None:
+            heartbeat_label = "live" if info.heartbeat_age <= 6 else "stale"
+            log.write(f"  [dim]heartbeat[/dim]  {heartbeat_label} ({info.heartbeat_age:.1f}s ago)")
 
         if info.activity_text:
             log.write("")
@@ -1696,6 +1726,9 @@ class OrbTUI(App[None]):
         t.append("\n ")
         if info and info.time_in_state > 0.5:
             t.append(f"{info.time_in_state:.0f}s in state  ", style="dim")
+        if info and info.heartbeat_age is not None:
+            hb_style = "green" if info.heartbeat_age <= 6 else "red"
+            t.append(f"hb {info.heartbeat_age:.1f}s  ", style=hb_style)
         if info and info.activity_text:
             t.append(info.activity_text[:50], style="italic dim")
         else:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from pathlib import PurePosixPath
 from typing import Callable, Awaitable, Optional
 
 from ..llm.client import LLMClient
@@ -16,7 +18,7 @@ from .base import AgentNode
 from .conversation import ConversationHistory
 from .prompt_builder import build_system_prompt
 from .tools import send_message_tool, complete_task_tool, filesystem_tools
-from .types import AgentConfig, AgentStatus
+from .types import AgentConfig, AgentStatus, TopologyContext
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 CompletionCallback = Callable[[str, str], Awaitable[None] | None]
 # Callback for agent activity updates (agent_id, activity_text)
 ActivityCallback = Callable[[str, str], Awaitable[None] | None]
+HeartbeatCallback = Callable[[str, dict], Awaitable[None] | None]
 
 
 class LLMAgent(AgentNode):
@@ -38,6 +41,7 @@ class LLMAgent(AgentNode):
         model_overrides: dict[ModelTier, ModelConfig] | None = None,
         on_complete: CompletionCallback | None = None,
         on_activity: ActivityCallback | None = None,
+        on_heartbeat: HeartbeatCallback | None = None,
         tier_override: ModelTier | None = None,
     ) -> None:
         super().__init__(config, channel, bus)
@@ -48,12 +52,15 @@ class LLMAgent(AgentNode):
         self._memory = MemoryGraph()
         self._on_complete = on_complete
         self._on_activity = on_activity
+        self._on_heartbeat = on_heartbeat
         self._on_file_write: Optional[Callable] = None  # (agent_id, path, content) -> None
         self._tier_override = tier_override
         self._system_prompt: str = ""
         self._tools: list[dict] = []
         self._memory_counter = 0
         self._last_complexity_score: int = config.base_complexity
+        self._heartbeat_task: asyncio.Task | None = None
+        self._fs_cache: dict[tuple[str, str], str] = {}
 
     async def _emit(self, activity: str) -> None:
         """Fire the activity callback if set."""
@@ -62,7 +69,47 @@ class LLMAgent(AgentNode):
             if asyncio.iscoroutine(cb):
                 await cb
 
-    def initialize(self, neighbor_roles: dict[str, str]) -> None:
+    async def _emit_heartbeat(self) -> None:
+        if self._on_heartbeat:
+            payload = {
+                "status": self.status.value,
+                "ts": time.time(),
+            }
+            cb = self._on_heartbeat(self.node_id, payload)
+            if asyncio.iscoroutine(cb):
+                await cb
+
+    async def _heartbeat_loop(self) -> None:
+        try:
+            while True:
+                await self._emit_heartbeat()
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            return
+
+    def start(self) -> asyncio.Task:
+        task = super().start()
+        if self._on_heartbeat and not self._heartbeat_task:
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name=f"heartbeat-{self.node_id}"
+            )
+        return task
+
+    async def stop(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+        await super().stop()
+
+    def initialize(
+        self,
+        neighbor_roles: dict[str, str],
+        topology_context: TopologyContext | None = None,
+    ) -> None:
         """Set up system prompt and tools after graph is configured."""
         # Always expose "user" as a pseudo-neighbor so agents can ask for clarification
         # without being forced to call complete_task.
@@ -74,6 +121,7 @@ class LLMAgent(AgentNode):
             role=self.config.role,
             description=self.config.description,
             neighbors=all_neighbors,
+            topology=topology_context,
             enable_filesystem=self.config.enable_filesystem,
             suppress_context_guidelines=self.config.suppress_context_guidelines,
         )
@@ -85,6 +133,8 @@ class LLMAgent(AgentNode):
             self._tools.extend(filesystem_tools())
 
     async def process(self, msg: Message) -> None:
+        self.status = AgentStatus.RUNNING
+        self._fs_cache = {}
         # Handle consensus shutdown: skip LLM and auto-complete immediately.
         if msg.type == MessageType.COMPLETE:
             if self.status != AgentStatus.COMPLETED:
@@ -290,6 +340,11 @@ class LLMAgent(AgentNode):
                 for tc in response.tool_calls
             )
             if not has_action and response.tool_calls:
+                if len(response.tool_calls) == 1:
+                    self._conversation.add_user(
+                        "Continue with the remaining filesystem work. Batch as many related tool calls "
+                        "as you can in your next response, and avoid repeating unchanged listings or reads."
+                    )
                 # All calls were filesystem ops — add results and let the model continue
                 request = CompletionRequest(
                     messages=self._conversation.get_messages(),
@@ -323,6 +378,7 @@ class LLMAgent(AgentNode):
         # via the activity/event system without routing through the bus, and without
         # triggering completion.  The agent stays RUNNING and waits for an injected reply.
         if to == "user":
+            self.status = AgentStatus.WAITING
             await self._emit(f"⏳ Waiting for user: {content[:120]}")
             # Emit a bus-style event so the dashboard displays this message in the feed
             user_msg = original.reply(
@@ -386,6 +442,30 @@ class LLMAgent(AgentNode):
             self._fallback_sandbox = Sandbox()
         return self._fallback_sandbox
 
+    def _normalize_relpath(self, path: str) -> str:
+        raw = (path or ".").strip() or "."
+        normalized = PurePosixPath(raw).as_posix()
+        return "." if normalized == "" else normalized
+
+    def _invalidate_fs_cache_for_path(self, path: str) -> None:
+        changed = self._normalize_relpath(path)
+        changed_parts = PurePosixPath(changed).parts
+        updated: dict[tuple[str, str], str] = {}
+        for (kind, cached_path), value in self._fs_cache.items():
+            cached_parts = PurePosixPath(cached_path).parts
+            same_file = kind == "read" and cached_path == changed
+            listing_affected = (
+                kind == "list"
+                and (
+                    cached_path == "."
+                    or cached_parts == changed_parts[:len(cached_parts)]
+                )
+            )
+            if same_file or listing_affected:
+                continue
+            updated[(kind, cached_path)] = value
+        self._fs_cache = updated
+
     async def _handle_write_file(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", "").strip()
         content = input_data.get("content", "")
@@ -400,6 +480,7 @@ class LLMAgent(AgentNode):
                 old_content = ""
             result = self._sandbox().write_file(path, content)
             self._conversation.add_tool_result(tool_id, result)
+            self._invalidate_fs_cache_for_path(path)
             if self._on_file_write:
                 self._on_file_write(self.node_id, path, content, old_content)
         except Exception as e:
@@ -410,16 +491,28 @@ class LLMAgent(AgentNode):
         if not path:
             self._conversation.add_tool_result(tool_id, "Error: path is required")
             return
+        norm_path = self._normalize_relpath(path)
+        cached = self._fs_cache.get(("read", norm_path))
+        if cached is not None:
+            self._conversation.add_tool_result(tool_id, cached)
+            return
         try:
             content = self._sandbox().read_file(path)
+            self._fs_cache[("read", norm_path)] = content
             self._conversation.add_tool_result(tool_id, content)
         except Exception as e:
             self._conversation.add_tool_result(tool_id, f"Error reading {path}: {e}")
 
     async def _handle_list_directory(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", ".").strip() or "."
+        norm_path = self._normalize_relpath(path)
+        cached = self._fs_cache.get(("list", norm_path))
+        if cached is not None:
+            self._conversation.add_tool_result(tool_id, cached)
+            return
         try:
             listing = self._sandbox().list_directory(path)
+            self._fs_cache[("list", norm_path)] = listing
             self._conversation.add_tool_result(tool_id, listing)
         except Exception as e:
             self._conversation.add_tool_result(tool_id, f"Error listing {path}: {e}")

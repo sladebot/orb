@@ -13,6 +13,7 @@ class AgentState:
     completed_result: str = ""
     msg_count: int = 0
     complexity: int = 0
+    last_heartbeat: float = 0.0
 
 
 @dataclass
@@ -71,6 +72,7 @@ class DashboardState:
                     "msg_count": a.msg_count,
                     "completed_result": a.completed_result,
                     "complexity": a.complexity,
+                    "last_heartbeat": a.last_heartbeat,
                 }
                 for a in self.agents.values()
             ],

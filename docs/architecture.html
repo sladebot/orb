@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orb — Architecture</title>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --accent:    #58a6ff;
+    --green:     #3fb950;
+    --yellow:    #d29922;
+    --purple:    #bc8cff;
+    --orange:    #f0883e;
+    --red:       #f85149;
+    --teal:      #39d3bb;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 40px 24px 80px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 48px;
+  }
+
+  h2 {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 16px;
+    margin-top: 48px;
+  }
+
+  /* ── Layer diagram ─────────────────────────────────────── */
+  .layer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 48px;
+  }
+
+  .layer {
+    display: flex;
+    align-items: stretch;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+
+  .layer-label {
+    width: 130px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 10px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+  }
+
+  .layer-content {
+    flex: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 16px;
+    background: var(--surface);
+  }
+
+  .layer-ui     .layer-label { color: var(--accent); }
+  .layer-server .layer-label { color: var(--green); }
+  .layer-orch   .layer-label { color: var(--yellow); }
+  .layer-agent  .layer-label { color: var(--purple); }
+  .layer-msg    .layer-label { color: var(--teal); }
+  .layer-llm    .layer-label { color: var(--orange); }
+  .layer-infra  .layer-label { color: var(--muted); }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+  .chip-accent  { color: var(--accent);  border-color: rgba(88,166,255,.3);  background: rgba(88,166,255,.08); }
+  .chip-green   { color: var(--green);   border-color: rgba(63,185,80,.3);   background: rgba(63,185,80,.08); }
+  .chip-yellow  { color: var(--yellow);  border-color: rgba(210,153,34,.3);  background: rgba(210,153,34,.08); }
+  .chip-purple  { color: var(--purple);  border-color: rgba(188,140,255,.3); background: rgba(188,140,255,.08); }
+  .chip-teal    { color: var(--teal);    border-color: rgba(57,211,187,.3);  background: rgba(57,211,187,.08); }
+  .chip-orange  { color: var(--orange);  border-color: rgba(240,136,62,.3);  background: rgba(240,136,62,.08); }
+  .chip-muted   { color: var(--muted);   border-color: rgba(139,148,158,.3); background: rgba(139,148,158,.08); }
+  .chip-red     { color: var(--red);     border-color: rgba(248,81,73,.3);   background: rgba(248,81,73,.08); }
+
+  .chip-sep {
+    color: var(--border);
+    font-size: 11px;
+    padding: 0 2px;
+  }
+
+  .arrow-down {
+    text-align: center;
+    color: var(--border);
+    font-size: 18px;
+    line-height: 1;
+    padding: 1px 0;
+    letter-spacing: -2px;
+  }
+
+  /* ── Flow diagram ──────────────────────────────────────── */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    margin-bottom: 48px;
+  }
+
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .flow-node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    min-width: 180px;
+  }
+
+  .flow-node-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  .flow-node-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  .flow-arrow {
+    color: var(--border);
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .flow-down {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin-left: 24px;
+  }
+
+  /* ── Topology diagrams ─────────────────────────────────── */
+  .topo-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 48px;
+  }
+
+  @media (max-width: 700px) { .topo-grid { grid-template-columns: 1fr; } }
+
+  .topo-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .topo-card-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .topo-card-body {
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .topo-node {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100px;
+    height: 34px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid;
+  }
+
+  .topo-edge {
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+  }
+
+  .topo-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 48px;
+  }
+
+  .topo-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .topo-h-edges {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 200px;
+    height: 14px;
+  }
+
+  .topo-h-line {
+    position: absolute;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .topo-h-line-left  { left: 10px; right: 55%; }
+  .topo-h-line-right { left: 55%; right: 10px; }
+
+  .topo-badge {
+    font-size: 10px;
+    color: var(--muted);
+    padding: 1px 6px;
+    background: rgba(139,148,158,.1);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+
+  /* ── Model selection table ─────────────────────────────── */
+  .tier-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 48px;
+    font-size: 13px;
+  }
+  .tier-table th {
+    text-align: left;
+    padding: 8px 12px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    border-bottom: 1px solid var(--border);
+  }
+  .tier-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(48,54,61,.5);
+  }
+  .tier-table tr:last-child td { border-bottom: none; }
+  .tier-table code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    background: rgba(139,148,158,.1);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .score-bar {
+    display: inline-block;
+    height: 6px;
+    border-radius: 3px;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  /* ── Component cards ───────────────────────────────────── */
+  .component-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 48px;
+  }
+
+  .component-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+
+  .component-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .component-card-file {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .component-card ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .component-card li {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .component-card li::before {
+    content: '·';
+    color: var(--border);
+    flex-shrink: 0;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Orb Architecture</h1>
+<p class="subtitle">Multi-agent code generation system — async Python, Anthropic/OpenAI/Ollama backends</p>
+
+<!-- ── Layer Stack ───────────────────────────────────────────── -->
+<h2>System Layers</h2>
+<div class="layer-stack">
+  <div class="layer layer-ui">
+    <div class="layer-label">UI</div>
+    <div class="layer-content">
+      <span class="chip chip-accent">TUI <small style="opacity:.6">Textual</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-accent">Web Dashboard <small style="opacity:.6">HTML/JS/WS</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-accent">CLI <small style="opacity:.6">orb run / orb auth</small></span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-server">
+    <div class="layer-label">Server</div>
+    <div class="layer-content">
+      <span class="chip chip-green">DashboardServer <small style="opacity:.6">aiohttp</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-green">WebSocket /ws</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-green">REST /api/start /api/inject /api/stop</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-green">DashboardBridge</span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-orch">
+    <div class="layer-label">Orchestrator</div>
+    <div class="layer-content">
+      <span class="chip chip-yellow">Orchestrator</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-yellow">OrchestratorConfig</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-yellow">Topology Factory <small style="opacity:.6">triad / dual_review</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-yellow">Shared Sandbox</span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-agent">
+    <div class="layer-label">Agents</div>
+    <div class="layer-content">
+      <span class="chip chip-purple">LLMAgent</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-purple">ConversationHistory</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-purple">ModelSelector</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-purple">MemoryGraph</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-purple">PromptBuilder</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-purple">Compaction</span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-msg">
+    <div class="layer-label">Messaging</div>
+    <div class="layer-content">
+      <span class="chip chip-teal">MessageBus</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-teal">AgentChannel</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-teal">Message / MessageType</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-teal">HopCounter</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-teal">BudgetTracker</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-teal">CooldownTracker</span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-llm">
+    <div class="layer-label">LLM Providers</div>
+    <div class="layer-content">
+      <span class="chip chip-orange">AnthropicProvider</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-orange">OpenAIProvider</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-orange">OpenAICodexProvider</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-orange">OllamaProvider</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-orange">ProviderRegistry</span>
+    </div>
+  </div>
+  <div class="arrow-down">↕</div>
+  <div class="layer layer-infra">
+    <div class="layer-label">Infra</div>
+    <div class="layer-content">
+      <span class="chip chip-muted">Sandbox <small style="opacity:.6">isolated filesystem</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-muted">Graph <small style="opacity:.6">topology edges</small></span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-muted">EventLogger / Tracing</span>
+      <span class="chip-sep">·</span>
+      <span class="chip chip-muted">Auth / Credentials</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Task Flow ─────────────────────────────────────────────── -->
+<h2>Task Flow — End to End</h2>
+<div style="overflow-x:auto; margin-bottom:48px;">
+<svg viewBox="0 0 1100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:1100px;display:block;font-family:-apple-system,sans-serif;">
+  <defs>
+    <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L6,3 Z" fill="#30363d"/>
+    </marker>
+  </defs>
+  <!-- Boxes -->
+  <g>
+    <!-- User -->
+    <rect x="10" y="30" width="90" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="55" y="45" text-anchor="middle" font-size="11" fill="#58a6ff" font-weight="600">User</text>
+    <text x="55" y="58" text-anchor="middle" font-size="9" fill="#8b949e">TUI / Web</text>
+    <!-- Server -->
+    <rect x="130" y="30" width="110" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="185" y="45" text-anchor="middle" font-size="11" fill="#3fb950" font-weight="600">DashboardServer</text>
+    <text x="185" y="58" text-anchor="middle" font-size="9" fill="#8b949e">/api/start</text>
+    <!-- Orchestrator -->
+    <rect x="270" y="30" width="110" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="325" y="45" text-anchor="middle" font-size="11" fill="#d29922" font-weight="600">Orchestrator</text>
+    <text x="325" y="58" text-anchor="middle" font-size="9" fill="#8b949e">inject task</text>
+    <!-- Coordinator -->
+    <rect x="410" y="30" width="100" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="460" y="45" text-anchor="middle" font-size="11" fill="#bc8cff" font-weight="600">Coordinator</text>
+    <text x="460" y="58" text-anchor="middle" font-size="9" fill="#8b949e">LLMAgent</text>
+    <!-- Coder -->
+    <rect x="540" y="30" width="80" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="580" y="45" text-anchor="middle" font-size="11" fill="#bc8cff" font-weight="600">Coder</text>
+    <text x="580" y="58" text-anchor="middle" font-size="9" fill="#8b949e">LLMAgent</text>
+    <!-- Reviewer/Tester -->
+    <rect x="650" y="10" width="90" height="34" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="695" y="25" text-anchor="middle" font-size="11" fill="#bc8cff" font-weight="600">Reviewer</text>
+    <text x="695" y="37" text-anchor="middle" font-size="9" fill="#8b949e">LLMAgent</text>
+    <rect x="650" y="56" width="90" height="34" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="695" y="71" text-anchor="middle" font-size="11" fill="#bc8cff" font-weight="600">Tester</text>
+    <text x="695" y="83" text-anchor="middle" font-size="9" fill="#8b949e">LLMAgent</text>
+    <!-- MessageBus -->
+    <rect x="780" y="30" width="100" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="830" y="45" text-anchor="middle" font-size="11" fill="#39d3bb" font-weight="600">MessageBus</text>
+    <text x="830" y="58" text-anchor="middle" font-size="9" fill="#8b949e">route / guard</text>
+    <!-- LLM Provider -->
+    <rect x="910" y="30" width="110" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="965" y="45" text-anchor="middle" font-size="11" fill="#f0883e" font-weight="600">LLM Provider</text>
+    <text x="965" y="58" text-anchor="middle" font-size="9" fill="#8b949e">Anthropic / OAI…</text>
+    <!-- Sandbox -->
+    <rect x="1030" y="30" width="60" height="36" rx="6" fill="#161b22" stroke="#30363d"/>
+    <text x="1060" y="45" text-anchor="middle" font-size="11" fill="#8b949e" font-weight="600">Sandbox</text>
+    <text x="1060" y="58" text-anchor="middle" font-size="9" fill="#8b949e">files</text>
+  </g>
+  <!-- Arrows -->
+  <line x1="100" y1="48" x2="127" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="240" y1="48" x2="267" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="380" y1="48" x2="407" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="510" y1="48" x2="537" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="620" y1="42" x2="647" y2="28" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="620" y1="54" x2="647" y2="66" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="740" y1="27" x2="777" y2="42" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="740" y1="73" x2="777" y2="58" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="880" y1="48" x2="907" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="1020" y1="48" x2="1027" y2="48" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>
+</div>
+
+<!-- ── Topologies ─────────────────────────────────────────────── -->
+<h2>Agent Topologies</h2>
+<div class="topo-grid">
+  <div class="topo-card">
+    <div class="topo-card-header" style="color:var(--yellow)">Triad (triangle) <span class="topo-badge">default</span></div>
+    <div class="topo-card-body">
+      <div class="topo-node" style="color:var(--yellow);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.06)">coordinator</div>
+      <div class="topo-edge"></div>
+      <div class="topo-node" style="color:var(--purple);border-color:rgba(188,140,255,.4);background:rgba(188,140,255,.06)">coder</div>
+      <div class="topo-h-edges">
+        <div class="topo-h-line topo-h-line-left"></div>
+        <div class="topo-h-line topo-h-line-right"></div>
+      </div>
+      <div class="topo-row">
+        <div class="topo-col">
+          <div class="topo-node" style="color:var(--teal);border-color:rgba(57,211,187,.4);background:rgba(57,211,187,.06)">reviewer</div>
+        </div>
+        <div class="topo-col">
+          <div class="topo-node" style="color:var(--green);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.06)">tester</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--muted);text-align:center;line-height:1.6">
+        4 nodes · 5 edges<br>
+        <code style="font-size:10px">coord↔coder · coder↔reviewer · coder↔tester · reviewer↔tester</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="topo-card">
+    <div class="topo-card-header" style="color:var(--accent)">Dual Review</div>
+    <div class="topo-card-body">
+      <div class="topo-node" style="color:var(--yellow);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.06)">coordinator</div>
+      <div class="topo-edge"></div>
+      <div class="topo-node" style="color:var(--purple);border-color:rgba(188,140,255,.4);background:rgba(188,140,255,.06)">coder</div>
+      <div class="topo-h-edges">
+        <div class="topo-h-line topo-h-line-left"></div>
+        <div class="topo-h-line topo-h-line-right"></div>
+      </div>
+      <div class="topo-row">
+        <div class="topo-col">
+          <div class="topo-node" style="color:var(--teal);border-color:rgba(57,211,187,.4);background:rgba(57,211,187,.06);font-size:11px">reviewer_a</div>
+          <div class="topo-edge"></div>
+          <div class="topo-node" style="color:var(--green);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.06)">tester</div>
+        </div>
+        <div class="topo-col">
+          <div class="topo-node" style="color:var(--accent);border-color:rgba(88,166,255,.4);background:rgba(88,166,255,.06);font-size:11px">reviewer_b</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--muted);text-align:center;line-height:1.6">
+        5 nodes · independent reviewers reach consensus<br>
+        <code style="font-size:10px">reviewer_a ↔ reviewer_b · both pinned to different providers</code>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Model Selection ────────────────────────────────────────── -->
+<h2>Model Tier Selection</h2>
+<p style="font-size:12px;color:var(--muted);margin-bottom:16px">
+  Each message is scored 0–100. The score determines which model tier is used. If the preferred tier's provider is unavailable, the selector walks up to the next available tier.
+</p>
+<table class="tier-table">
+  <thead>
+    <tr>
+      <th>Score range</th>
+      <th>Tier</th>
+      <th>Anthropic model</th>
+      <th>OpenAI model</th>
+      <th>Drivers (+points)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="score-bar" style="width:30px;background:var(--green)"></span>0–30</td>
+      <td><code>LOCAL_SMALL</code></td>
+      <td>—</td>
+      <td>—</td>
+      <td style="color:var(--muted);font-size:12px">Ollama qwen3.5:9b · low complexity hint (−15)</td>
+    </tr>
+    <tr>
+      <td><span class="score-bar" style="width:55px;background:var(--green)"></span>31–55</td>
+      <td><code>LOCAL_MEDIUM</code></td>
+      <td>—</td>
+      <td>—</td>
+      <td style="color:var(--muted);font-size:12px">base=50 · default for most messages</td>
+    </tr>
+    <tr>
+      <td><span class="score-bar" style="width:70px;background:var(--yellow)"></span>56–70</td>
+      <td><code>LOCAL_LARGE</code></td>
+      <td>—</td>
+      <td>—</td>
+      <td style="color:var(--muted);font-size:12px">Ollama qwen3.5:27b · large payload (+10)</td>
+    </tr>
+    <tr>
+      <td><span class="score-bar" style="width:78px;background:var(--yellow)"></span>71–78</td>
+      <td><code>CLOUD_LITE</code></td>
+      <td><code>haiku-4-5</code></td>
+      <td><code>gpt-4o-mini</code></td>
+      <td style="color:var(--muted);font-size:12px">feedback msg (+20) · deep chain (+15)</td>
+    </tr>
+    <tr>
+      <td><span class="score-bar" style="width:90px;background:var(--orange)"></span>79–90</td>
+      <td><code>CLOUD_FAST</code></td>
+      <td><code>claude-sonnet-4-6</code></td>
+      <td><code>gpt-4o</code></td>
+      <td style="color:var(--muted);font-size:12px">high complexity hint (+25) · retry escalation (+10×n)</td>
+    </tr>
+    <tr>
+      <td><span class="score-bar" style="width:100px;background:var(--red)"></span>91–100</td>
+      <td><code>CLOUD_STRONG</code></td>
+      <td><code>claude-opus-4-6</code></td>
+      <td><code>o3</code></td>
+      <td style="color:var(--muted);font-size:12px">max score · extreme depth + high hint + feedback</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ── Component Reference ────────────────────────────────────── -->
+<h2>Key Components</h2>
+<div class="component-grid">
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--purple)"></div>LLMAgent
+    </div>
+    <div class="component-card-file">orb/agent/llm_agent.py</div>
+    <ul>
+      <li>Async event loop, processes one Message at a time</li>
+      <li>Calls LLM with tool schema; handles tool_use / tool_result pairs</li>
+      <li>Up to 3 nudges if LLM returns text-only (no tool call)</li>
+      <li>Filesystem tools: read_file, write_file, list_dir, run_command</li>
+      <li>Fallback chain: preferred tier → CLOUD_LITE → CLOUD_FAST → CLOUD_STRONG</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--teal)"></div>MessageBus
+    </div>
+    <div class="component-card-file">orb/messaging/bus.py</div>
+    <ul>
+      <li>Routes messages between named AgentChannels</li>
+      <li>Validates graph edge exists before delivery</li>
+      <li>HopCounter: rejects if depth &gt; 10</li>
+      <li>BudgetTracker: global cap (default 200 messages)</li>
+      <li>CooldownTracker: max 5 sends on same edge per chain</li>
+      <li>Emits "routed" events to dashboard listeners</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--yellow)"></div>Orchestrator
+    </div>
+    <div class="component-card-file">orb/orchestrator/orchestrator.py</div>
+    <ul>
+      <li>Starts all agents concurrently, injects initial task</li>
+      <li>Consensus: when any agent completes, broadcasts COMPLETE to others</li>
+      <li>Synthesis flow: coordinator waits for all workers, then synthesizes</li>
+      <li>600s timeout, then forcibly stops all agents</li>
+      <li>Cleans up sandbox after run</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--purple)"></div>ConversationHistory
+    </div>
+    <div class="component-card-file">orb/agent/conversation.py</div>
+    <ul>
+      <li>Per-agent message history, max 20 messages</li>
+      <li>Smart trim: preserves tool_use ↔ tool_result pairs</li>
+      <li>Forward scan finds clean plain-user start point</li>
+      <li>Fallback: backward scan preserves most recent valid slice</li>
+      <li>Prevents orphaned tool_results → Anthropic 400 errors</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--orange)"></div>ProviderRegistry
+    </div>
+    <div class="component-card-file">orb/llm/registry.py</div>
+    <ul>
+      <li>Discovers available providers at startup</li>
+      <li>Checks env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY)</li>
+      <li>Pings Ollama at localhost:11434 for liveness</li>
+      <li>Returns dict of instantiated LLMClient objects</li>
+      <li>--local-only / --cloud-only flags filter providers</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--green)"></div>DashboardBridge
+    </div>
+    <div class="component-card-file">web/bridge.py</div>
+    <ul>
+      <li>Listens to MessageBus "routed" events</li>
+      <li>Updates DashboardState (agents, messages, budget)</li>
+      <li>Broadcasts JSON events over WebSocket to all clients</li>
+      <li>Events: message · agent_status · agent_stats · complete · stats</li>
+      <li>Complexity score included in agent_stats events</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--purple)"></div>ModelSelector
+    </div>
+    <div class="component-card-file">orb/llm/model_selector.py</div>
+    <ul>
+      <li>Scores each message 0–100 based on complexity signals</li>
+      <li>base_complexity per agent (coordinator=50, tester=25, reviewer=65)</li>
+      <li>Exposes last_score for dashboard/TUI display</li>
+      <li>Self-escalates on retries (+10 per retry)</li>
+      <li>select_with_available() skips unavailable provider tiers</li>
+    </ul>
+  </div>
+
+  <div class="component-card">
+    <div class="component-card-title">
+      <div class="dot" style="background:var(--muted)"></div>Sandbox
+    </div>
+    <div class="component-card-file">orb/sandbox/sandbox.py</div>
+    <ul>
+      <li>Isolated filesystem root per orchestrator run</li>
+      <li>Path traversal prevention (all paths validated)</li>
+      <li>Shared across all agents in the same run</li>
+      <li>Async run_command with stdout/stderr capture</li>
+      <li>Cleaned up after each run completes</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ── Message lifecycle ───────────────────────────────────────── -->
+<h2>Message Lifecycle</h2>
+<p style="font-size:12px;color:var(--muted);margin-bottom:16px">How a single message travels from one agent to another.</p>
+<div style="display:flex;gap:0;flex-wrap:wrap;align-items:center;margin-bottom:48px;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;min-width:130px;">
+    <div style="font-weight:600;color:var(--purple)">LLMAgent A</div>
+    <div style="color:var(--muted);font-size:11px;margin-top:2px">calls send_message tool</div>
+  </div>
+  <div style="color:var(--border);padding:0 6px;font-size:18px">→</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;min-width:130px;">
+    <div style="font-weight:600;color:var(--teal)">MessageBus.route()</div>
+    <div style="color:var(--muted);font-size:11px;margin-top:2px">middleware guards</div>
+  </div>
+  <div style="color:var(--border);padding:0 6px;font-size:18px">→</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;min-width:130px;">
+    <div style="font-weight:600;color:var(--teal)">AgentChannel B</div>
+    <div style="color:var(--muted);font-size:11px;margin-top:2px">async queue → await</div>
+  </div>
+  <div style="color:var(--border);padding:0 6px;font-size:18px">→</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;min-width:130px;">
+    <div style="font-weight:600;color:var(--purple)">LLMAgent B</div>
+    <div style="color:var(--muted);font-size:11px;margin-top:2px">process() → LLM call</div>
+  </div>
+  <div style="color:var(--border);padding:0 6px;font-size:18px">→</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;min-width:150px;">
+    <div style="font-weight:600;color:var(--green)">DashboardBridge</div>
+    <div style="color:var(--muted);font-size:11px;margin-top:2px">on_event("routed") → WS broadcast</div>
+  </div>
+</div>
+
+<p style="font-size:12px;color:var(--muted);text-align:center;border-top:1px solid var(--border);padding-top:20px;">
+  Generated from orb source — <a href="https://github.com/souranil/orb" style="color:var(--accent)">github.com/souranil/orb</a>
+</p>
+
+</body>
+</html>

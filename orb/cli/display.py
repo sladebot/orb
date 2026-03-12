@@ -17,11 +17,20 @@ AGENT_STYLES = {
     "tester":      ("green",   "Tester"),
 }
 
-# Agents whose result is the canonical "final answer"
-SYNTHESIS_AGENTS = {"coordinator"}
-
 # Skip showing these as standalone results (they're interim completions)
 SKIP_RESULT_PREFIX = "Consensus:"
+
+
+def pick_primary_result(completions: dict[str, str]) -> tuple[str | None, str]:
+    preferred = ["coder", "reviewer", "reviewer_a", "reviewer_b", "tester", "coordinator"]
+    for agent_id in preferred:
+        result = completions.get(agent_id, "")
+        if result and not result.startswith(SKIP_RESULT_PREFIX) and result != "[shutdown]":
+            return agent_id, result
+    for agent_id, result in completions.items():
+        if result and not result.startswith(SKIP_RESULT_PREFIX) and result != "[shutdown]":
+            return agent_id, result
+    return None, ""
 
 
 def print_header() -> None:
@@ -38,25 +47,18 @@ def print_result(completions: dict[str, str], message_count: int, timed_out: boo
     console.print(f"[dim]Messages routed: {message_count}[/dim]")
     console.print()
 
-    # Separate synthesis result from worker results
-    synthesis_result: tuple[str, str] | None = None
-    worker_results: list[tuple[str, str]] = []
+    primary_id, primary_result = pick_primary_result(completions)
+    worker_results = [
+        (aid, result)
+        for aid, result in completions.items()
+        if result
+        and not result.startswith(SKIP_RESULT_PREFIX)
+        and result != "[shutdown]"
+        and aid != primary_id
+    ]
 
-    for agent_id, result in completions.items():
-        if not result or result.startswith(SKIP_RESULT_PREFIX):
-            continue
-        if agent_id in SYNTHESIS_AGENTS:
-            synthesis_result = (agent_id, result)
-        else:
-            worker_results.append((agent_id, result))
-
-    # If no synthesis agent (simple topology), treat all as worker results
-    if not synthesis_result and not worker_results:
-        worker_results = [(aid, r) for aid, r in completions.items() if r]
-
-    # Show synthesis result prominently
-    if synthesis_result:
-        agent_id, result = synthesis_result
+    if primary_result:
+        agent_id, result = primary_id, primary_result
         color, label = AGENT_STYLES.get(agent_id, ("magenta", agent_id.title()))
         console.print(Panel(
             Markdown(result),
@@ -68,9 +70,8 @@ def print_result(completions: dict[str, str], message_count: int, timed_out: boo
         console.print("[dim]No results.[/dim]")
         return
 
-    # Show worker results as collapsible sub-panels if present
     if worker_results:
-        if synthesis_result:
+        if primary_result:
             console.print()
             console.print(Rule("[dim]Worker Results[/dim]", style="dim"))
             console.print()

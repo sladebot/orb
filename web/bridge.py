@@ -128,3 +128,18 @@ class DashboardBridge:
             "result": result,
             "is_consensus": is_consensus,
         })
+
+    async def on_agent_heartbeat(self, agent_id: str, payload: dict) -> None:
+        ts = float(payload.get("ts", time.time()))
+        status = payload.get("status", "")
+        if agent_id in self.state.agents:
+            self.state.agents[agent_id].last_heartbeat = ts
+            if status:
+                self.state.agents[agent_id].status = status
+
+        await self._send({
+            "type": "agent_heartbeat",
+            "agent": agent_id,
+            "ts": ts,
+            "status": status,
+        })
