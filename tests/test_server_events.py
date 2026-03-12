@@ -177,6 +177,11 @@ class TestDashboardBridge:
 
     def test_to_init_event_structure(self):
         state = DashboardState()
+        state.topology_id = "triangle"
+        state.topology_label = "Triad"
+        state.agent_neighbors = {"coder": ["reviewer", "tester"]}
+        state.agent_positions = {"coder": "implementation hub"}
+        state.graph_view = {"rows": [[{"node": "coder"}]], "order": ["coder"]}
         state.agents["coder"] = __import__(
             "web.state", fromlist=["AgentState"]
         ).AgentState(node_id="coder", role="Coder", status="idle")
@@ -187,6 +192,9 @@ class TestDashboardBridge:
         assert "edges" in event
         assert "messages" in event
         assert "stats" in event
+        assert event["plan"]["topology"]["id"] == "triangle"
+        assert event["plan"]["neighbors"]["coder"] == ["reviewer", "tester"]
+        assert event["plan"]["graph_view"]["order"] == ["coder"]
         agent = event["agents"][0]
         assert agent["id"] == "coder"
         assert agent["role"] == "Coder"

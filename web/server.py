@@ -17,7 +17,7 @@ _BUILD_TS = str(int(time.time()))
 
 
 class DashboardServer:
-    """UI-only HTTP/WebSocket server layered on top of a graph runtime."""
+    """Backend runtime server with API, WebSocket fanout, and dashboard assets."""
 
     def __init__(
         self,
@@ -117,9 +117,6 @@ class DashboardServer:
         query = (body.get("query") or "").strip()
         topology = (body.get("topology") or "auto").strip()
         model_pin = (body.get("model") or "auto").strip()
-        complexity = int(body.get("complexity", 50))
-        agent_complexity = body.get("agent_complexity") or {}
-
         if not query:
             return web.json_response({"ok": False, "error": "Query must not be empty"}, status=400)
         if topology not in ("auto", "triangle", "dual-review"):
@@ -129,8 +126,6 @@ class DashboardServer:
             query,
             topology,
             model_pin=model_pin,
-            complexity=complexity,
-            agent_complexity=agent_complexity,
         )
         return web.json_response(payload, status=status)
 

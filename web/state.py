@@ -48,6 +48,15 @@ class DashboardState:
     budget_remaining: int = 200
     start_time: float = field(default_factory=time.time)
     completed: bool = False
+    run_query: str = ""
+    topology_id: str = ""
+    topology_label: str = ""
+    topology_description: str = ""
+    agent_complexity: dict[str, int] = field(default_factory=dict)
+    agent_models: dict[str, str] = field(default_factory=dict)
+    agent_neighbors: dict[str, list[str]] = field(default_factory=dict)
+    agent_positions: dict[str, str] = field(default_factory=dict)
+    graph_view: dict = field(default_factory=dict)
 
     def reset(self) -> None:
         """Reset all state back to defaults (called before starting a new run)."""
@@ -58,11 +67,33 @@ class DashboardState:
         self.budget_remaining = self.budget
         self.start_time = time.time()
         self.completed = False
+        self.run_query = ""
+        self.topology_id = ""
+        self.topology_label = ""
+        self.topology_description = ""
+        self.agent_complexity = {}
+        self.agent_models = {}
+        self.agent_neighbors = {}
+        self.agent_positions = {}
+        self.graph_view = {}
 
     def to_init_event(self) -> dict:
         return {
             "type": "init",
             "completed": self.completed,
+            "plan": {
+                "query": self.run_query,
+                "topology": {
+                    "id": self.topology_id,
+                    "label": self.topology_label,
+                    "description": self.topology_description,
+                },
+                "agent_complexity": self.agent_complexity,
+                "agent_models": self.agent_models,
+                "neighbors": self.agent_neighbors,
+                "positions": self.agent_positions,
+                "graph_view": self.graph_view,
+            },
             "agents": [
                 {
                     "id": a.node_id,

@@ -37,3 +37,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["orb*", "web*"]
+
+[tool.setuptools.package-data]
+web = ["static/*.html", "static/*.css", "static/*.js"]

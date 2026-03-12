@@ -30,6 +30,67 @@ class GraphRuntime:
         self._turn_count: int = 0
         self._last_result = None
 
+    @staticmethod
+    def _topology_meta(topology_id: str) -> tuple[str, str, dict[str, str]]:
+        if topology_id == "dual-review":
+            return (
+                "Dual Review",
+                "Coder works with two reviewer branches and tester validation.",
+                {
+                    "coordinator": "entry router",
+                    "coder": "implementation hub",
+                    "reviewer_a": "review branch A",
+                    "reviewer_b": "review branch B",
+                    "tester": "validation sink",
+                },
+            )
+        return (
+            "Triad",
+            "Coder, reviewer, and tester collaborate through a compact graph.",
+            {
+                "coordinator": "entry router",
+                "coder": "implementation hub",
+                "reviewer": "quality edge",
+                "tester": "validation edge",
+            },
+        )
+
+    @staticmethod
+    def _topology_graph_view(topology_id: str) -> dict:
+        if topology_id == "dual-review":
+            return {
+                "rows": [
+                    [{"text": "         "}, {"node": "coordinator"}],
+                    [{"text": "              "}, {"edge": ["coordinator", "coder"], "text": "│"}],
+                    [{"text": "         "}, {"node": "coder"}],
+                    [{"text": "        "}, {"edge": ["coder", "reviewer_a"], "text": "╱"},
+                     {"text": "     "},
+                     {"edge": ["coder", "reviewer_b"], "text": "╲"}],
+                    [{"text": "  "}, {"node": "reviewer_a"}, {"text": "  "},
+                     {"edge": ["reviewer_a", "reviewer_b"], "text": "───  "},
+                     {"node": "reviewer_b"}],
+                    [{"text": "       "}, {"edge": ["reviewer_a", "tester"], "text": "╲"},
+                     {"text": "     "},
+                     {"edge": ["reviewer_b", "tester"], "text": "╱"}],
+                    [{"text": "          "}, {"node": "tester"}],
+                ],
+                "order": ["coordinator", "coder", "reviewer_a", "reviewer_b", "tester"],
+            }
+        return {
+            "rows": [
+                [{"text": "       "}, {"node": "coordinator"}],
+                [{"text": "            "}, {"edge": ["coordinator", "coder"], "text": "│"}],
+                [{"text": "  "}, {"node": "coder"}, {"text": "  "},
+                 {"edge": ["coder", "reviewer"], "text": "───  "},
+                 {"node": "reviewer"}],
+                [{"text": "  "}, {"edge": ["coder", "tester"], "text": "│"},
+                 {"text": "                 "}, {"edge": ["reviewer", "tester"], "text": "│"}],
+                [{"text": "  "}, {"node": "tester"}, {"text": "  "},
+                 {"edge": ["tester", "reviewer"], "text": "─────────────╯"}],
+            ],
+            "order": ["coordinator", "coder", "reviewer", "tester"],
+        }
+
     @property
     def running(self) -> bool:
         return self._run_task is not None and not self._run_task.done()
@@ -121,26 +182,41 @@ class GraphRuntime:
         query: str,
         topology: str,
         model_pin: str = "auto",
-        complexity: int = 50,
-        agent_complexity: dict | None = None,
     ) -> tuple[int, dict]:
         if not self._providers:
             return 500, {"ok": False, "error": "Server has no providers configured"}
         if self.running:
             return 200, {"ok": False, "error": "Run already in progress"}
 
-        if topology == "auto":
-            predicted = await self.predict_topology(query, model_pin=model_pin)
-            topology = predicted.get("topology", "triangle")
+        predicted = await self.predict_topology(query, model_pin=model_pin)
+        selected_topology = topology if topology != "auto" else predicted.get("topology", "triangle")
+        topology_label, topology_description, agent_positions = self._topology_meta(selected_topology)
+        graph_view = self._topology_graph_view(selected_topology)
+        agent_complexity = dict(predicted.get("agent_complexity") or {})
+        overall_complexity = int(predicted.get("complexity", 50))
+        agent_model_map = self._build_agent_model_map(
+            overall_complexity,
+            model_pin=model_pin,
+            agent_complexity=agent_complexity,
+        )
+        agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
 
         self.state.reset()
         self._last_result = None
+        self.state.run_query = query
+        self.state.topology_id = selected_topology
+        self.state.topology_label = topology_label
+        self.state.topology_description = topology_description
+        self.state.agent_complexity = agent_complexity
+        self.state.agent_models = agent_models
+        self.state.agent_positions = agent_positions
+        self.state.graph_view = graph_view
         self._run_task = asyncio.create_task(
             self._run_orchestrator(
                 query,
-                topology,
+                selected_topology,
                 model_pin=model_pin,
-                complexity=complexity,
+                complexity=overall_complexity,
                 agent_complexity=agent_complexity,
             )
         )
@@ -452,6 +528,8 @@ class GraphRuntime:
         bridge = DashboardBridge(self.state, self._broadcast)
         effective_overrides = dict(self._model_overrides or {})
         agent_model_map = self._build_agent_model_map(complexity, model_pin, agent_complexity)
+        topology_label, topology_description, agent_positions = self._topology_meta(topology)
+        graph_view = self._topology_graph_view(topology)
 
         if topology == "dual-review":
             from orb.topologies.dual_review import create_dual_review
@@ -477,10 +555,23 @@ class GraphRuntime:
         agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
         bridge.setup_agents(agent_roles)
         bridge.setup_edges([(e.a, e.b) for e in orchestrator.bus.graph.edges])
+        bridge.setup_plan(
+            query=query,
+            topology_id=topology,
+            topology_label=topology_label,
+            topology_description=topology_description,
+            agent_complexity=agent_complexity,
+            agent_models={aid: cfg.model_id for aid, cfg in agent_model_map.items()},
+            agent_positions=agent_positions,
+            graph_view=graph_view,
+        )
         if agent_model_map:
             for aid, cfg in agent_model_map.items():
                 if aid in bridge.state.agents:
                     bridge.state.agents[aid].model = cfg.model_id
+        for aid, score in (agent_complexity or {}).items():
+            if aid in bridge.state.agents:
+                bridge.state.agents[aid].complexity = int(score)
         if self._config:
             bridge.setup_budget(self._config.budget)
 

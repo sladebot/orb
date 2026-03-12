@@ -131,6 +131,9 @@ def parse_args() -> argparse.Namespace:
     cfg_set.add_argument("value", help="New value (e.g. false)")
 
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+    daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
+    daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
+    daemon_parser.add_argument("--port", type=int, default=8080, help="Daemon bind port (default: 8080)")
 
     # Main run args (attached to the root parser so 'orb <query>' still works)
     parser.add_argument("query", nargs="?", help="Task query (omit for interactive mode)")
@@ -146,6 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-model", type=str, default=os.environ.get("OLLAMA_MODEL"), help="Ollama model to use for all local tiers (e.g. qwen3.5:9b)")
     parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
+    parser.add_argument("--connect", type=str, help="Connect TUI or dashboard client to an existing Orb daemon URL")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
     parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Agent topology to use")
     parser.add_argument("--tui", action="store_true", help="Launch interactive terminal TUI")
@@ -208,18 +212,59 @@ async def async_main() -> None:
         await run_onboarding()
         return
 
+    if args.subcommand == "daemon":
+        from web.server import DashboardServer
+        from web.state import DashboardState
+
+        dash_state = DashboardState()
+        dashboard_server = DashboardServer(dash_state, host=args.host, port=args.port)
+        dashboard_server.set_providers(
+            providers=build_providers(local_only=False, cloud_only=False),
+            config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
+            model_overrides=None,
+            tier_override=None,
+        )
+
+        await dashboard_server.start()
+        print_header()
+        print(f"  Orb daemon listening at http://{args.host}:{args.port}")
+        print("  TUI attach: orb --tui --connect http://127.0.0.1:{0}".format(args.port))
+        print(f"  Dashboard:  http://{args.host}:{args.port}")
+        print("  Press Ctrl-C to shut down.\n")
+
+        stop_event = asyncio.Event()
+        try:
+            import signal
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, AttributeError):
+            pass
+
+        try:
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await dashboard_server.stop()
+        return
+
     # ── logs subcommand ───────────────────────────────────────────────────────
     if args.subcommand == "logs":
         _cmd_logs(args)
         return
 
     fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
-    if args.verbose and not args.quiet:
-        logging.basicConfig(level=logging.DEBUG, format=fmt)
+    file_only_logging = bool(args.tui) or args.subcommand == "daemon"
+    if file_only_logging:
+        level = logging.DEBUG if args.verbose and not args.quiet else logging.WARNING
+        logging.basicConfig(level=level, format=fmt, handlers=[], force=True)
+    elif args.verbose and not args.quiet:
+        logging.basicConfig(level=logging.DEBUG, format=fmt, force=True)
         for noisy in ("httpx", "httpcore", "anthropic", "openai", "asyncio", "urllib3"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
     else:
-        logging.basicConfig(level=logging.WARNING)
+        logging.basicConfig(level=logging.WARNING, force=True)
 
     # Always write to ~/.orb/run.log so 'orb logs' can stream it
     _setup_log_file(fmt)
@@ -273,7 +318,17 @@ async def async_main() -> None:
 
     # --tui: TUI is always a frontend; backend always runs (port exposed only with --dashboard)
     if args.tui:
-        from .tui import run_tui_with_dashboard, run_tui_async
+        from .tui import attach_tui, run_tui_with_dashboard, run_tui_async
+        if args.connect:
+            await attach_tui(
+                connect_url=args.connect,
+                topology=args.topology,
+                budget=args.budget,
+                show_logs=args.logs,
+                initial_query=args.query,
+                exit_after_run=args.exit_after_run,
+            )
+            return
         if args.dashboard:
             await run_tui_with_dashboard(
                 providers=providers,
@@ -300,6 +355,27 @@ async def async_main() -> None:
                 initial_query=args.query,
                 exit_after_run=args.exit_after_run,
             )
+        return
+
+    if args.dashboard and args.connect:
+        import aiohttp
+
+        base = args.connect.rstrip("/")
+        if "://" not in base:
+            base = f"http://{base}"
+
+        if args.query:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{base}/api/start", json={
+                    "query": args.query,
+                    "topology": args.topology,
+                }) as resp:
+                    payload = await resp.json()
+                    if not payload.get("ok"):
+                        print_error(payload.get("error", "Failed to start run"))
+                        sys.exit(1)
+                    print("  Started run on daemon.")
+        print(f"  Open dashboard at {base}")
         return
 
     # --dashboard without a query: serve the UI and wait for the browser to start a run

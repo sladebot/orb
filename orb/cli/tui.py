@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from time import time
 from typing import Any
+from urllib.parse import urlparse
 
 from rich.text import Text as RichText
 from textual.app import App, ComposeResult, Screen
@@ -84,59 +85,6 @@ TOPOLOGY_LABELS: dict[str, str] = {
     "dual-review": "Dual Review",
 }
 
-TOPOLOGY_EDGES: dict[str, list[tuple[str, str]]] = {
-    "triangle": [
-        ("coordinator", "coder"),
-        ("coder", "reviewer"),
-        ("coder", "tester"),
-        ("reviewer", "tester"),
-    ],
-    "dual-review": [
-        ("coordinator", "coder"),
-        ("coder", "reviewer_a"),
-        ("coder", "reviewer_b"),
-        ("reviewer_a", "reviewer_b"),
-        ("reviewer_a", "tester"),
-        ("reviewer_b", "tester"),
-    ],
-}
-
-# ─── Graph layout definitions ─────────────────────────────────────────────────
-# Each layout is a list of rows; each row is a list of segments.
-# Segment types:
-#   {"t": "text", "s": "style"}       — static text
-#   {"node": "agent_id"}               — live agent node (icon + label)
-#   {"edge": ("from","to"), "t":"─"}  — edge char, highlighted when active
-
-TOPOLOGY_LAYOUTS: dict[str, list[list[dict]]] = {
-    "triangle": [
-        [{"t": "       "}, {"node": "coordinator"}],
-        [{"t": "            "}, {"edge": ("coordinator", "coder"), "t": "│"}],
-        [{"t": "  "}, {"node": "coder"}, {"t": "  "},
-         {"edge": ("coder", "reviewer"), "t": "───  "},
-         {"node": "reviewer"}],
-        [{"t": "  "}, {"edge": ("coder", "tester"), "t": "│"},
-         {"t": "                 "}, {"edge": ("reviewer", "tester"), "t": "│"}],
-        [{"t": "  "}, {"node": "tester"}, {"t": "  "},
-         {"edge": ("tester", "reviewer"), "t": "─────────────╯"}],
-    ],
-    "dual-review": [
-        [{"t": "         "}, {"node": "coordinator"}],
-        [{"t": "              "}, {"edge": ("coordinator", "coder"), "t": "│"}],
-        [{"t": "         "}, {"node": "coder"}],
-        [{"t": "        "}, {"edge": ("coder", "reviewer_a"), "t": "╱"},
-         {"t": "     "},
-         {"edge": ("coder", "reviewer_b"), "t": "╲"}],
-        [{"t": "  "}, {"node": "reviewer_a"}, {"t": "  "},
-         {"edge": ("reviewer_a", "reviewer_b"), "t": "───  "},
-         {"node": "reviewer_b"}],
-        [{"t": "       "}, {"edge": ("reviewer_a", "tester"), "t": "╲"},
-         {"t": "     "},
-         {"edge": ("reviewer_b", "tester"), "t": "╱"}],
-        [{"t": "          "}, {"node": "tester"}],
-    ],
-}
-
 
 def _short_model(model_id: str) -> str:
     if not model_id:
@@ -178,9 +126,9 @@ def _graph_node_status(info: "AgentInfo", tick_count: int) -> tuple[str, str]:
     return STATUS_ICON.get(info.status, "○"), STATUS_COLOR.get(info.status, "dim")
 
 
-def _neighbor_ids(topology: str, agent_id: str) -> list[str]:
+def _neighbors_from_edges(edges: list[tuple[str, str]], agent_id: str) -> list[str]:
     neighbors: set[str] = set()
-    for a, b in TOPOLOGY_EDGES.get(topology, []):
+    for a, b in edges:
         if a == agent_id:
             neighbors.add(b)
         elif b == agent_id:
@@ -188,25 +136,13 @@ def _neighbor_ids(topology: str, agent_id: str) -> list[str]:
     return sorted(neighbors, key=lambda aid: AGENT_ORDER.index(aid) if aid in AGENT_ORDER else 99)
 
 
-def _topology_position(topology: str, agent_id: str) -> str:
-    if topology == "triangle":
-        mapping = {
-            "coordinator": "entry router",
-            "coder": "implementation hub",
-            "reviewer": "quality edge",
-            "tester": "validation edge",
-        }
-        return mapping.get(agent_id, "worker")
-    if topology == "dual-review":
-        mapping = {
-            "coordinator": "entry router",
-            "coder": "implementation hub",
-            "reviewer_a": "review branch A",
-            "reviewer_b": "review branch B",
-            "tester": "validation sink",
-        }
-        return mapping.get(agent_id, "worker")
-    return "worker"
+def _plan_topology_id(plan: dict[str, Any] | None, fallback: str) -> str:
+    return str((plan or {}).get("topology", {}).get("id") or fallback)
+
+
+def _plan_topology_label(plan: dict[str, Any] | None, fallback: str) -> str:
+    topology = (plan or {}).get("topology", {})
+    return str(topology.get("label") or _topology_label(fallback))
 
 
 def _event_icon(kind: str) -> tuple[str, str]:
@@ -630,7 +566,7 @@ class HeaderBar(Static):
         active_tab = s._workspace_tab.title()
 
         t.append("  ORB", style="bold magenta")
-        t.append(f"  {_topology_label(s._topology_name)}", style="dim")
+        t.append(f"  {_plan_topology_label(s._plan, s._topology_name)}", style="dim")
         t.append("  │  ", style="dim")
 
         if s._awaiting_user:
@@ -715,7 +651,8 @@ class GraphPanel(Static):
             return t
 
         # ── Topology graph ─────────────────────────────────────────────
-        layout = TOPOLOGY_LAYOUTS.get(s._topology_name, [])
+        graph_view = s._plan.get("graph_view") or {}
+        layout = graph_view.get("rows") or []
         for row in layout:
             for seg in row:
                 if "node" in seg:
@@ -735,22 +672,23 @@ class GraphPanel(Static):
                     if key:
                         t.append(f"[{key}]", style="dim")
                 elif "edge" in seg:
-                    a, b   = seg["edge"]
-                    chars  = seg.get("t", "─")
+                    a, b   = tuple(seg["edge"])
+                    chars  = seg.get("text", "─")
                     fwd    = s._active_edges.get((a, b), 0)
                     rev    = s._active_edges.get((b, a), 0)
                     active = max(fwd, rev) >= s._tick_count
                     style  = "bold bright_cyan" if active else "dim"
                     t.append(chars, style=style)
                 else:
-                    t.append(seg.get("t", ""), style=seg.get("s", "dim"))
+                    t.append(seg.get("text", ""), style=seg.get("style", "dim"))
             t.append("\n")
 
         # ── Agent roster ───────────────────────────────────────────────
         t.append("\n  [bold white]Agents[/bold white]\n", style="")
         t.append("  " + "─" * 36 + "\n", style="dim")
-        ordered = [a for a in AGENT_ORDER if a in s._agents]
-        ordered += [a for a in s._agents if a not in AGENT_ORDER]
+        ordered = [a for a in graph_view.get("order", []) if a in s._agents]
+        ordered += [a for a in AGENT_ORDER if a in s._agents and a not in ordered]
+        ordered += [a for a in s._agents if a not in ordered]
 
         for agent_id in ordered:
             info   = s._agents[agent_id]
@@ -1154,6 +1092,8 @@ class OrbTUI(App[None]):
     def __init__(
         self,
         server_port: int = 8080,
+        server_host: str = "127.0.0.1",
+        server_scheme: str = "http",
         topology: str = "triangle",
         budget: int = 200,
         show_logs: bool = False,
@@ -1162,6 +1102,8 @@ class OrbTUI(App[None]):
     ) -> None:
         super().__init__()
         self._server_port   = server_port
+        self._server_host   = server_host
+        self._server_scheme = server_scheme
         self._topology_name = topology
         self._budget        = budget
         self._show_logs     = show_logs
@@ -1185,6 +1127,8 @@ class OrbTUI(App[None]):
         self._file_changes: dict[str, FileChangeEntry] = {}
         self._selected_file: str | None = None
         self._workspace_tab: str = "timeline"
+        self._plan: dict[str, Any] = {}
+        self._edges: list[tuple[str, str]] = []
 
         # User-prompt handling — set when backend reports an agent waiting for user
         self._awaiting_user: str | None = None
@@ -1562,6 +1506,7 @@ class OrbTUI(App[None]):
         self._run_start    = time()
         self._run_status   = "Running"
         self._active_edges = {}
+        self._edges        = []
 
         self.query_one("#detail-log", RichLog).clear()
         self._rebuild_timeline()
@@ -1594,7 +1539,7 @@ class OrbTUI(App[None]):
     # ── WebSocket client ──────────────────────────────────────────────────────
 
     async def _post_json(self, path: str, payload: dict) -> dict:
-        url = f"http://localhost:{self._server_port}{path}"
+        url = f"{self._server_scheme}://{self._server_host}:{self._server_port}{path}"
         try:
             async with self._http_session.post(url, json=payload) as resp:
                 return await resp.json()
@@ -1604,7 +1549,8 @@ class OrbTUI(App[None]):
 
     async def _start_ws_client(self) -> None:
         import aiohttp
-        url = f"ws://localhost:{self._server_port}/ws"
+        ws_scheme = "wss" if self._server_scheme == "https" else "ws"
+        url = f"{ws_scheme}://{self._server_host}:{self._server_port}/ws"
         while True:
             try:
                 async with self._http_session.ws_connect(url, heartbeat=30) as ws:
@@ -1665,6 +1611,11 @@ class OrbTUI(App[None]):
         self._selected_file = None
         self._routed = 0
         self._active_edges = {}
+        self._edges = [
+            (edge.get("source", ""), edge.get("target", ""))
+            for edge in data.get("edges", [])
+            if edge.get("source") and edge.get("target")
+        ]
 
         for agent_data in data.get("agents", []):
             aid  = agent_data["id"]
@@ -1679,7 +1630,8 @@ class OrbTUI(App[None]):
                 self._completions[aid] = result
             self._agents[aid] = info
 
-        self._topology_name = "dual-review" if "reviewer_a" in self._agents else "triangle"
+        self._plan = dict(data.get("plan") or {})
+        self._topology_name = _plan_topology_id(self._plan, self._topology_name)
 
         stats = data.get("stats", {})
         self._routed       = stats.get("message_count", 0)
@@ -1700,7 +1652,7 @@ class OrbTUI(App[None]):
                 elapsed=0.0,
                 title="Resumed task",
                 summary=self._last_query,
-                body=f"Topology {_topology_label(self._topology_name)} already active.",
+                body=f"Topology {_plan_topology_label(self._plan, self._topology_name)} already active.",
             ))
         for msg in data.get("messages", []):
             msg_type = msg.get("msg_type", "")
@@ -1751,19 +1703,7 @@ class OrbTUI(App[None]):
         if msg_type != "complete":
             self._active_edges[(from_id, to_id)] = self._tick_count + 3
 
-        if msg_type == "complete":
-            for aid in (from_id, to_id):
-                if aid in self._agents:
-                    self._agents[aid].set_status("completed")
-        else:
-            if from_id in self._agents:
-                info = self._agents[from_id]
-                info.set_status("running")
-                info.msg_count += 1
-            if to_id in self._agents:
-                info = self._agents[to_id]
-                if info.status != "completed":
-                    info.set_status("waiting")
+        if msg_type != "complete":
             self._routed += 1
 
         to_label = "[COMPLETE]" if msg_type == "complete" else to_id
@@ -1892,8 +1832,6 @@ class OrbTUI(App[None]):
         self._run_status   = "Idle"
 
         for info in self._agents.values():
-            if info.status not in ("completed", "error"):
-                info.set_status("completed")
             info.activity_text = ""
 
         self._record_timeline_entry(TimelineEntry(
@@ -2055,7 +1993,9 @@ class OrbTUI(App[None]):
 
         color = AGENT_COLORS.get(self._selected_agent, "white")
         label = AGENT_LABELS.get(self._selected_agent, self._selected_agent)
-        neighbors = _neighbor_ids(self._topology_name, self._selected_agent)
+        plan_neighbors = (self._plan.get("neighbors") or {}).get(self._selected_agent, [])
+        neighbors = plan_neighbors or _neighbors_from_edges(self._edges, self._selected_agent)
+        topology_position = (self._plan.get("positions") or {}).get(self._selected_agent, "worker")
 
         agent_entries = [
             e for e in self._detail_feed
@@ -2070,7 +2010,7 @@ class OrbTUI(App[None]):
         log.write("")
         log.write("[bold white]Overview[/bold white]")
         log.write(f"  [dim]status[/dim]  {info.status}")
-        log.write(f"  [dim]topology position[/dim]  {_topology_position(self._topology_name, self._selected_agent)}")
+        log.write(f"  [dim]topology position[/dim]  {topology_position}")
         log.write(f"  [dim]neighbors[/dim]  {', '.join(AGENT_LABELS.get(aid, aid) for aid in neighbors) or 'none'}")
         log.write(f"  [dim]messages[/dim]  {len(agent_entries)} total · {len(inbound)} in · {len(outbound)} out")
         if info.model:
@@ -2150,7 +2090,8 @@ class OrbTUI(App[None]):
         if info and info.heartbeat_age is not None:
             hb_style = "green" if info.heartbeat_age <= 6 else "red"
             t.append(f"hb {info.heartbeat_age:.1f}s  ", style=hb_style)
-        neighbors = _neighbor_ids(self._topology_name, self._selected_agent)
+        plan_neighbors = (self._plan.get("neighbors") or {}).get(self._selected_agent, [])
+        neighbors = plan_neighbors or _neighbors_from_edges(self._edges, self._selected_agent)
         if neighbors:
             t.append(f"nbrs {len(neighbors)}  ", style="dim")
         if info and info.activity_text:
@@ -2267,6 +2208,7 @@ async def _launch(
     show_logs: bool,
     server_port: int,
     server_host: str = "0.0.0.0",
+    server_scheme: str = "http",
     initial_query: str | None = None,
     exit_after_run: bool = False,
 ) -> None:
@@ -2283,6 +2225,8 @@ async def _launch(
     try:
         await OrbTUI(
             server_port=server_port,
+            server_host=server_host,
+            server_scheme=server_scheme,
             topology=topology,
             budget=budget,
             show_logs=show_logs,
@@ -2333,7 +2277,7 @@ async def run_tui_with_dashboard(
         providers=providers, config=config,
         model_overrides=model_overrides, tier_override=tier_override,
         topology=topology, budget=budget, show_logs=show_logs,
-        server_port=dashboard_port, server_host="0.0.0.0",
+        server_port=dashboard_port, server_host="127.0.0.1",
         initial_query=initial_query, exit_after_run=exit_after_run,
     )
 
@@ -2358,3 +2302,27 @@ async def run_tui_async(
         server_port=server_port, server_host="127.0.0.1",
         initial_query=initial_query, exit_after_run=exit_after_run,
     )
+
+
+async def attach_tui(
+    connect_url: str,
+    topology: str = "triangle",
+    budget: int = 200,
+    show_logs: bool = False,
+    initial_query: str | None = None,
+    exit_after_run: bool = False,
+) -> None:
+    parsed = urlparse(connect_url if "://" in connect_url else f"http://{connect_url}")
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if scheme == "https" else 80)
+    await OrbTUI(
+        server_port=port,
+        server_host=host,
+        server_scheme=scheme,
+        topology=topology,
+        budget=budget,
+        show_logs=show_logs,
+        initial_query=initial_query,
+        exit_after_run=exit_after_run,
+    ).run_async()

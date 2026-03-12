@@ -138,22 +138,50 @@ Opens a prompt loop. Submit tasks one at a time; agents are rebuilt fresh each r
 ### Terminal TUI
 
 ```bash
+# Start an isolated local backend and open the TUI
 orb --tui
+
+# Attach the TUI to an existing Orb daemon
+orb --tui --connect http://127.0.0.1:8080
 ```
 
 Launches a full-screen Textual TUI. Type tasks directly in the input bar. You can submit multiple tasks in sequence without restarting.
 
+### Daemon mode
+
+```bash
+# Local-only daemon
+orb daemon --host 127.0.0.1 --port 8080
+
+# Reachable from other devices (for example over Tailscale)
+orb daemon --host 0.0.0.0 --port 8080
+```
+
+The daemon owns the backend runtime, API, WebSocket event stream, and dashboard. Attach UIs to it separately:
+
+```bash
+# Attach TUI
+orb --tui --connect http://127.0.0.1:8080
+
+# Start a run remotely, then inspect in the browser dashboard
+orb --dashboard --connect http://127.0.0.1:8080 "build a REST API"
+```
+
 ### Web dashboard
 
 ```bash
-# Start dashboard and wait for a task from the browser
+# Start dashboard and wait for a task from the browser (embedded backend)
 orb --dashboard
 
-# Run a query and keep the dashboard open to inspect afterward
+# Run a query and keep the dashboard open to inspect afterward (embedded backend)
 orb --dashboard "build a REST API"
 
 # Custom port
 orb --dashboard --dashboard-port 3000
+
+# Preferred production flow: run daemon, then open its URL
+orb daemon --host 127.0.0.1 --port 8080
+# open http://127.0.0.1:8080
 ```
 
 Opens a WebSocket-backed web UI at `http://localhost:8080`. The canvas graph shows agent nodes and animates edges as messages flow.
@@ -166,6 +194,8 @@ orb --tui --dashboard --dashboard-port 3000
 ```
 
 Runs the TUI in the foreground and serves the web dashboard as a sidecar. Both views update from the same event stream.
+
+For persistent or multi-device use, prefer `orb daemon` plus `--connect` instead of the embedded sidecar mode.
 
 ---
 

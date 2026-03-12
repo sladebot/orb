@@ -43,6 +43,7 @@ class Dashboard {
         // Raw data for node detail panel
         this._rawMessages = [];         // all messages, capped at 200
         this._agentActivityLines = {};  // agentId -> string[] (last 10 lines)
+        this._plan = null;
 
         // Tab switching
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -171,6 +172,7 @@ class Dashboard {
         document.getElementById('result-panel').classList.add('hidden');
         this._rawMessages = [];
         this._agentActivityLines = {};
+        this._plan = data.plan || null;
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
         this.selectedAgent = null;
@@ -192,11 +194,10 @@ class Dashboard {
         this.graph.setTopology(data.agents, data.edges);
         this._hideLoader();
 
-        // Render existing messages (prediction card first if we have one)
+        // Render existing messages (runtime plan first if available)
         this.messageLog.innerHTML = '';
-        if (this._pendingPrediction) {
-            this._addPredictionCard(this._pendingPrediction);
-            this._pendingPrediction = null;
+        if (this._plan?.topology?.id) {
+            this._addPredictionCard(this._plan);
         }
         if ((data.messages || []).length === 0 && !this.messageLog.children.length) {
             this._setMessageEmptyState();
@@ -247,16 +248,11 @@ class Dashboard {
         this._clearThinking(data.from);
         this._addMessageEntry(data);
         this.graph.animateEdge(data.from, data.to);
-        this.graph.updateAgentStatus(data.from, 'running', data.model || '');
+        if (data.model) this.graph.updateAgentStatus(data.from, this.agents[data.from]?.status || '', data.model || '');
         // Push last activity preview into sender node
         const preview = (data.content || '').replace(/\s+/g, ' ').trim().slice(0, 60);
         this.graph.updateAgentActivity(data.from, preview);
         this._updateStatusIndicator();
-
-        if (data.to && this.agents[data.to] && this.agents[data.to].status !== 'completed') {
-            // Show thinking indicator for the recipient
-            this._showThinking(data.to);
-        }
 
         // Refresh node detail panel if the involved agent is selected
         if (this.selectedAgent && (data.from === this.selectedAgent || data.to === this.selectedAgent)) {
@@ -402,8 +398,7 @@ class Dashboard {
     }
 
     _topologyLabel() {
-        const ids = Object.keys(this.agents);
-        return ids.includes('reviewer_a') ? 'Dual Review' : (ids.length ? 'Triad' : 'Uninitialized');
+        return this._plan?.topology?.label || (Object.keys(this.agents).length ? 'Active Graph' : 'Uninitialized');
     }
 
     // ── Tab switching ─────────────────────────────────────────
@@ -427,7 +422,7 @@ class Dashboard {
         `;
     }
 
-    _setAgentEmptyState(text = 'Agents will appear after topology prediction and run startup.') {
+    _setAgentEmptyState(text = 'Agents will appear after the runtime constructs the graph.') {
         this.agentCards.innerHTML = `
             <div class="empty-state empty-state-agents">
                 <div class="empty-state-kicker">Agents</div>
@@ -651,19 +646,20 @@ class Dashboard {
         const topologyMap = document.getElementById('ndp-topology-map');
         const commGrid = document.getElementById('ndp-comm-grid');
         const modelShort = agent.model ? this._shortModel(agent.model) : '—';
-        const compScore = this._lastPrediction?.agent_complexity?.[agentId];
+        const compScore = this._plan?.agent_complexity?.[agentId];
         const heartbeat = this._heartbeatState(agent);
         const relevantMessages = this._rawMessages.filter(m => m.from === agentId || m.to === agentId);
         const outgoing = relevantMessages.filter(m => m.from === agentId);
         const incoming = relevantMessages.filter(m => m.to === agentId);
         const peers = [...new Set(relevantMessages.map(m => m.from === agentId ? m.to : m.from).filter(Boolean))];
-        const neighbors = (this.graph.edges || [])
-            .flatMap(e => e.source === agentId ? [e.target] : (e.target === agentId ? [e.source] : []));
-        const uniqueNeighbors = [...new Set(neighbors)];
+        const uniqueNeighbors = this._plan?.neighbors?.[agentId]
+            || [...new Set((this.graph.edges || [])
+                .flatMap(e => e.source === agentId ? [e.target] : (e.target === agentId ? [e.source] : [])))];
         const activePeers = peers.filter(p => uniqueNeighbors.includes(p));
         const edgeList = (this.graph.edges || [])
             .filter(e => e.source === agentId || e.target === agentId)
             .map(e => `${e.source} ↔ ${e.target}`);
+        const position = this._plan?.positions?.[agentId] || 'graph participant';
         const compHtml = compScore !== undefined
             ? `<span class="ndp-meta-pill">complexity&nbsp;${compScore}</span>`
             : '';
@@ -679,7 +675,7 @@ class Dashboard {
         `;
 
         summary.textContent = heartbeat.live
-            ? `${agent.role || agentId} is active in the graph and ready to exchange work.`
+            ? `${agent.role || agentId} is active in the graph as the ${position}.`
             : `${agent.role || agentId} has not emitted a recent heartbeat. Inspect activity and message flow before trusting the state.`;
 
         overview.innerHTML = `
@@ -711,7 +707,7 @@ class Dashboard {
                 <span class="ndp-topology-node">${this._escapeHtml(agentId)}</span>
             </div>
             <div class="ndp-topology-copy">
-                ${this._escapeHtml(agent.role || agentId)} sits on ${uniqueNeighbors.length} graph edge${uniqueNeighbors.length === 1 ? '' : 's'} and can communicate directly with its neighbors.
+                ${this._escapeHtml(agent.role || agentId)} is the ${this._escapeHtml(position)} and can communicate directly with ${uniqueNeighbors.length ? uniqueNeighbors.join(', ') : 'no current neighbors'}.
             </div>
             <div class="ndp-neighbor-row">
                 ${uniqueNeighbors.length
@@ -950,14 +946,14 @@ class Dashboard {
         // Clear previous run state
         this._clearThinking();
         this._thinkingAgent = null;
-        this._pendingPrediction = null;
         this._runModelShown = false;
         this._rawMessages = [];
         this._agentActivityLines = {};
+        this._plan = null;
         this.messageLog.innerHTML = '';
-        this._setMessageEmptyState('Analyzing the task and waiting for the runtime to emit events.');
+        this._setMessageEmptyState('Waiting for the runtime to build the graph and emit activity.');
         this.agentCards.innerHTML = '';
-        this._setAgentEmptyState('Waiting for the runtime to construct the predicted topology.');
+        this._setAgentEmptyState('Waiting for the runtime to construct the graph.');
         this.agents = {};
         this.graph.setTopology([], []);
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
@@ -968,33 +964,16 @@ class Dashboard {
         this._handleStats({ message_count: 0, budget_remaining: 200, elapsed: 0 });
         const statusEl = document.getElementById('stat-status');
 
-        // Step 1: Predict topology (LLM call)
-        statusEl.textContent = 'Predicting…';
-        statusEl.className = 'stat-value status-running';
-        this._showLoader('Choosing topology…');
-
-        const pred = await fetch(`/api/predict-topology?q=${encodeURIComponent(query)}&model=${encodeURIComponent(this._selectedModel)}`);
-        const predData = await pred.json();
-        const topology = predData.topology || 'triangle';
-        this._showLoader(`Using ${predData.label || topology}…`);
-
-        // Store prediction — will be shown when _handleInit fires
-        this._pendingPrediction = predData;
-        this._lastPrediction = predData;   // persists for node detail panel
-        this._lastQuery = query;
-
-
-        // Step 2: Start the run
         statusEl.textContent = 'Starting…';
+        statusEl.className = 'stat-value status-running';
+        this._showLoader('Starting runtime…');
+        this._lastQuery = query;
         const res = await fetch('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 query,
-                topology,
                 model: this._selectedModel,
-                complexity: predData.complexity || 50,
-                agent_complexity: predData.agent_complexity || {},
             }),
         });
         const data = await res.json();
@@ -1031,15 +1010,6 @@ class Dashboard {
     _handleRunComplete(data) {
         this._clearThinking();
         this._setRunActive(false);
-
-        // Mark any agents still in running/waiting as completed
-        for (const agent of Object.values(this.agents)) {
-            if (agent.status !== 'completed') {
-                agent.status = 'completed';
-                this.graph.updateAgentStatus(agent.id, 'completed');
-                this._updateAgentCard(agent.id);
-            }
-        }
 
         // Force status to Done
         const statusEl = document.getElementById('stat-status');
@@ -1202,19 +1172,19 @@ class Dashboard {
             content: text, elapsed: 0, model: '',
             depth: 0, msg_type: 'task', context_slice: [],
         });
-        this._showThinking(this._questionAgent);
         this._questionAgent = null;
     }
 
     _addPredictionCard(pred) {
-        const complexity = pred.complexity ?? 50;
+        const complexity = pred.complexity ?? Math.max(...Object.values(pred.agent_complexity || {}), 0);
         const barColor = complexity >= 75 ? '#cf222e' : complexity >= 50 ? '#9a6700' : '#1a7f37';
-        const optionsHtml = (pred.options || []).map(o => `
-            <div class="pred-option${o.chosen ? ' chosen' : ''}">
-                <span class="pred-option-label">${this._escapeHtml(o.label)}</span>
-                <span class="pred-option-desc">${this._escapeHtml(o.description)}</span>
-                ${o.chosen ? '<span class="pred-chosen-badge">✓ chosen</span>' : ''}
-            </div>`).join('');
+        const topology = pred.topology || {};
+        const optionsHtml = topology.id ? `
+            <div class="pred-option chosen">
+                <span class="pred-option-label">${this._escapeHtml(topology.label || topology.id)}</span>
+                <span class="pred-option-desc">${this._escapeHtml(topology.description || '')}</span>
+                <span class="pred-chosen-badge">✓ active</span>
+            </div>` : '';
 
         const agentModels     = pred.agent_models     || {};
         const agentComplexity = pred.agent_complexity || {};
@@ -1235,14 +1205,14 @@ class Dashboard {
         el.className = 'prediction-card';
         el.innerHTML = `
             <div class="pred-header">
-                <span class="pred-title">Task Analysis</span>
+                <span class="pred-title">Run Plan</span>
                 <span class="pred-complexity-label">Complexity</span>
                 <span class="pred-complexity-value" style="color:${barColor}">${complexity}</span>
             </div>
             <div class="pred-bar-wrap">
                 <div class="pred-bar" style="width:${complexity}%;background:${barColor}"></div>
             </div>
-            <div class="pred-reason">${this._escapeHtml(pred.reason || '')}</div>
+            <div class="pred-reason">${this._escapeHtml(topology.description || pred.reason || '')}</div>
             <div class="pred-options">${optionsHtml}</div>
             ${agentRows ? `<div class="pred-agent-models">${agentRows}</div>` : ''}
         `;

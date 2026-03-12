@@ -30,10 +30,39 @@ class DashboardBridge:
 
     def setup_edges(self, edges: list[tuple[str, str]]) -> None:
         self.state.edges = [EdgeState(source=a, target=b) for a, b in edges]
+        neighbors: dict[str, set[str]] = {agent_id: set() for agent_id in self.state.agents}
+        for source, target in edges:
+            neighbors.setdefault(source, set()).add(target)
+            neighbors.setdefault(target, set()).add(source)
+        self.state.agent_neighbors = {
+            agent_id: sorted(peer_ids)
+            for agent_id, peer_ids in neighbors.items()
+        }
 
     def setup_budget(self, budget: int) -> None:
         self.state.budget = budget
         self.state.budget_remaining = budget
+
+    def setup_plan(
+        self,
+        *,
+        query: str,
+        topology_id: str,
+        topology_label: str,
+        topology_description: str,
+        agent_complexity: dict[str, int] | None = None,
+        agent_models: dict[str, str] | None = None,
+        agent_positions: dict[str, str] | None = None,
+        graph_view: dict | None = None,
+    ) -> None:
+        self.state.run_query = query
+        self.state.topology_id = topology_id
+        self.state.topology_label = topology_label
+        self.state.topology_description = topology_description
+        self.state.agent_complexity = dict(agent_complexity or {})
+        self.state.agent_models = dict(agent_models or {})
+        self.state.agent_positions = dict(agent_positions or {})
+        self.state.graph_view = dict(graph_view or {})
 
     async def on_message_routed(self, event: str, msg: Message) -> None:
         """Called by MessageBus event system."""

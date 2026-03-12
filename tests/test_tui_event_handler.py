@@ -35,6 +35,8 @@ def _make_tui() -> OrbTUI:
     tui._file_changes = {}
     tui._selected_file = None
     tui._workspace_tab = "timeline"
+    tui._plan = {}
+    tui._edges = []
     tui._awaiting_user = None
     tui._tick_count    = 0
     tui._active_edges  = {}
@@ -159,11 +161,28 @@ class TestTuiEventHandler:
                 {"id": "coordinator", "role": "Coordinator", "status": "idle", "model": ""},
                 {"id": "reviewer_a",  "role": "Reviewer A",  "status": "idle", "model": ""},
             ],
+            "plan": {"topology": {"id": "dual-review", "label": "Dual Review"}},
             "edges": [], "messages": [],
             "stats": {"message_count": 0, "elapsed": 0},
             "run_active": False, "completed": False,
         })
         assert tui._topology_name == "dual-review"
+
+    def test_init_captures_edges_for_generic_neighbors(self):
+        tui = _make_tui()
+        tui._handle_server_event({
+            "type": "init",
+            "agents": [
+                {"id": "coder", "role": "Coder", "status": "idle", "model": ""},
+                {"id": "reviewer", "role": "Reviewer", "status": "idle", "model": ""},
+            ],
+            "edges": [{"source": "coder", "target": "reviewer"}],
+            "messages": [],
+            "stats": {"message_count": 0, "elapsed": 0},
+            "run_active": False,
+            "completed": False,
+        })
+        assert tui._edges == [("coder", "reviewer")]
 
     def test_init_with_initial_query_starts_run(self):
         tui = _make_tui()
@@ -224,7 +243,7 @@ class TestTuiEventHandler:
         })
         assert tui._routed == 1
 
-    def test_message_marks_sender_running(self):
+    def test_message_keeps_status_authoritative_to_server_events(self):
         tui = _make_tui()
         tui._agents = {
             "coordinator": AgentInfo("coordinator", "Coordinator"),
@@ -235,10 +254,10 @@ class TestTuiEventHandler:
             "from": "coordinator", "to": "coder",
             "msg_type": "task", "model": "haiku", "content": "x", "elapsed": 0,
         })
-        assert tui._agents["coordinator"].status == "running"
+        assert tui._agents["coordinator"].status == "idle"
         assert tui._agents["coordinator"].model == "haiku"
 
-    def test_message_marks_receiver_waiting(self):
+    def test_message_does_not_mark_receiver_waiting(self):
         tui = _make_tui()
         tui._agents = {
             "coordinator": AgentInfo("coordinator", "Coordinator"),
@@ -249,7 +268,7 @@ class TestTuiEventHandler:
             "from": "coordinator", "to": "coder",
             "msg_type": "task", "model": "", "content": "x", "elapsed": 0,
         })
-        assert tui._agents["coder"].status == "waiting"
+        assert tui._agents["coder"].status == "idle"
 
     def test_message_system_type_ignored(self):
         tui = _make_tui()
@@ -424,7 +443,7 @@ class TestTuiEventHandler:
         assert tui._routed == 8
         assert tui._last_diff == "diff text"
 
-    def test_run_complete_marks_all_agents_completed(self):
+    def test_run_complete_preserves_last_server_statuses(self):
         tui = _make_tui()
         tui._agents = {
             "coordinator": AgentInfo("coordinator", "Coordinator"),
@@ -436,7 +455,7 @@ class TestTuiEventHandler:
             "result": "", "diff": "", "elapsed": 1.0,
             "session_turn": 1, "routed": 2,
         })
-        assert tui._agents["coder"].status == "completed"
+        assert tui._agents["coder"].status == "running"
 
     def test_populate_detail_pane_writes_structured_sections(self):
         tui = _make_tui()
@@ -472,16 +491,52 @@ class TestTuiEventHandler:
     def test_header_bar_uses_topology_label(self):
         tui = _make_tui()
         tui._topology_name = "triangle"
+        tui._plan = {"topology": {"id": "triangle", "label": "Triad"}}
         rendered = HeaderBar(tui).render().plain
         assert "Triad" in rendered
         assert "triangle" not in rendered
 
+    def test_detail_pane_prefers_server_plan_neighbors_and_position(self):
+        tui = _make_tui()
+        tui._selected_agent = "coder"
+        tui._plan = {
+            "neighbors": {"coder": ["reviewer", "tester"]},
+            "positions": {"coder": "implementation hub"},
+        }
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._populate_detail_pane()
+        writes = " ".join(str(call.args[0]) for call in tui.query_one("#detail-log").write.call_args_list)
+        assert "implementation hub" in writes
+        assert "Reviewer" in writes
+        assert "Tester" in writes
+
     def test_graph_panel_shows_ask_badge_for_waiting_user(self):
         tui = _make_tui()
         tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._plan = {"graph_view": {"rows": [[{"node": "coder"}]], "order": ["coder"]}}
         tui._agents["coder"].activity_text = "⏳ Waiting for user: choose framework"
         rendered = GraphPanel(tui).render().plain
         assert "ASK" in rendered
+
+    def test_graph_panel_uses_server_graph_view(self):
+        tui = _make_tui()
+        tui._plan = {
+            "graph_view": {
+                "rows": [
+                    [{"node": "coordinator"}],
+                    [{"edge": ["coordinator", "coder"], "text": "│"}],
+                    [{"node": "coder"}],
+                ],
+                "order": ["coordinator", "coder"],
+            }
+        }
+        tui._agents = {
+            "coordinator": AgentInfo("coordinator", "Coordinator"),
+            "coder": AgentInfo("coder", "Coder"),
+        }
+        rendered = GraphPanel(tui).render().plain
+        assert "Coordinator" in rendered
+        assert "Coder" in rendered
 
     def test_pick_primary_result_prefers_worker_over_coordinator(self):
         agent_id, result = pick_primary_result({
