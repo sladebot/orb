@@ -20,6 +20,8 @@ from textual.widgets import Footer, Label, RichLog, Static, TextArea
 
 from .display import pick_primary_result
 
+logger = logging.getLogger(__name__)
+
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 AGENT_COLORS: dict[str, str] = {
@@ -80,6 +82,23 @@ AGENT_KEY_MAP: dict[str, str] = {
 TOPOLOGY_LABELS: dict[str, str] = {
     "triangle": "Triad",
     "dual-review": "Dual Review",
+}
+
+TOPOLOGY_EDGES: dict[str, list[tuple[str, str]]] = {
+    "triangle": [
+        ("coordinator", "coder"),
+        ("coder", "reviewer"),
+        ("coder", "tester"),
+        ("reviewer", "tester"),
+    ],
+    "dual-review": [
+        ("coordinator", "coder"),
+        ("coder", "reviewer_a"),
+        ("coder", "reviewer_b"),
+        ("reviewer_a", "reviewer_b"),
+        ("reviewer_a", "tester"),
+        ("reviewer_b", "tester"),
+    ],
 }
 
 # ─── Graph layout definitions ─────────────────────────────────────────────────
@@ -159,6 +178,50 @@ def _graph_node_status(info: "AgentInfo", tick_count: int) -> tuple[str, str]:
     return STATUS_ICON.get(info.status, "○"), STATUS_COLOR.get(info.status, "dim")
 
 
+def _neighbor_ids(topology: str, agent_id: str) -> list[str]:
+    neighbors: set[str] = set()
+    for a, b in TOPOLOGY_EDGES.get(topology, []):
+        if a == agent_id:
+            neighbors.add(b)
+        elif b == agent_id:
+            neighbors.add(a)
+    return sorted(neighbors, key=lambda aid: AGENT_ORDER.index(aid) if aid in AGENT_ORDER else 99)
+
+
+def _topology_position(topology: str, agent_id: str) -> str:
+    if topology == "triangle":
+        mapping = {
+            "coordinator": "entry router",
+            "coder": "implementation hub",
+            "reviewer": "quality edge",
+            "tester": "validation edge",
+        }
+        return mapping.get(agent_id, "worker")
+    if topology == "dual-review":
+        mapping = {
+            "coordinator": "entry router",
+            "coder": "implementation hub",
+            "reviewer_a": "review branch A",
+            "reviewer_b": "review branch B",
+            "tester": "validation sink",
+        }
+        return mapping.get(agent_id, "worker")
+    return "worker"
+
+
+def _event_icon(kind: str) -> tuple[str, str]:
+    return {
+        "task": ("→", "yellow"),
+        "feedback": ("↺", "orange1"),
+        "response": ("·", "white"),
+        "complete": ("✓", "green"),
+        "question": ("?", "yellow"),
+        "file": ("✎", "cyan"),
+        "status": ("◌", "dim"),
+        "system": ("•", "dim"),
+    }.get(kind, ("·", "white"))
+
+
 # ─── State ───────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -191,6 +254,30 @@ class AgentInfo:
         if not self.last_heartbeat:
             return None
         return max(0.0, time() - self.last_heartbeat)
+
+
+@dataclass
+class TimelineEntry:
+    kind: str
+    elapsed: float
+    title: str
+    summary: str
+    body: str = ""
+    agent_id: str = ""
+    from_id: str = ""
+    to_id: str = ""
+    model: str = ""
+
+
+@dataclass
+class FileChangeEntry:
+    path: str
+    agent_id: str
+    diff_text: str
+    summary: str
+    added: int
+    removed: int
+    is_new: bool = False
 
 
 # ─── TUI Messages ─────────────────────────────────────────────────────────────
@@ -407,11 +494,17 @@ class HelpScreen(Screen):
                 ("R", "Open the results screen after a run"),
                 ("Y", "Copy the selected or primary result"),
             ]),
+            ("Workspace Tabs", [
+                ("T", "Show the live multi-agent timeline"),
+                ("D", "Show changed files and diffs"),
+                ("O", "Show primary and supporting outputs"),
+                ("Ctrl+P", "Open the command launcher"),
+            ]),
             ("Navigation", [
                 ("/", "Focus the input composer"),
                 ("Tab", "Cycle through agents"),
                 ("1-6", "Inspect a specific agent"),
-                ("Esc", "Close the current inspector or overlay"),
+                ("Esc", "Clear the current selection or close an overlay"),
             ]),
             ("Reply Mode", [
                 ("Ctrl+G", "Clear the current reply draft"),
@@ -428,6 +521,69 @@ class HelpScreen(Screen):
             for key, desc in rows:
                 log.write(f"  [bold cyan]{key:<22}[/bold cyan] {desc}")
             log.write("")
+
+    def action_dismiss_screen(self) -> None:
+        self.app.pop_screen()
+
+
+class CommandScreen(Screen):
+    """Compact command launcher for the TUI."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Back"),
+        Binding("q", "dismiss_screen", "Back"),
+        Binding("1", "run_command('timeline')", show=False),
+        Binding("2", "run_command('changes')", show=False),
+        Binding("3", "run_command('output')", show=False),
+        Binding("4", "run_command('focus_input')", show=False),
+        Binding("5", "run_command('copy_result')", show=False),
+        Binding("6", "run_command('stop_run')", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    CommandScreen {
+        align: center middle;
+        background: rgba(5, 8, 12, 0.72);
+    }
+    #cmd-box {
+        width: 72;
+        height: auto;
+        background: #11161d;
+        border: round #2f3b4a;
+        padding: 1 2;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="cmd-box")
+
+    def on_mount(self) -> None:
+        self.query_one("#cmd-box", Static).update(
+            "[bold white]Commands[/bold white]\n"
+            "[dim]1[/dim] Timeline\n"
+            "[dim]2[/dim] Changes\n"
+            "[dim]3[/dim] Output\n"
+            "[dim]4[/dim] Focus input\n"
+            "[dim]5[/dim] Copy result\n"
+            "[dim]6[/dim] Stop run\n\n"
+            "[dim]Esc[/dim] Close"
+        )
+
+    def action_run_command(self, command: str) -> None:
+        app = self.app
+        self.app.pop_screen()
+        if command == "timeline":
+            app.action_show_timeline()
+        elif command == "changes":
+            app.action_show_changes()
+        elif command == "output":
+            app.action_show_output()
+        elif command == "focus_input":
+            app.action_focus_input()
+        elif command == "copy_result":
+            app.action_copy_result()
+        elif command == "stop_run":
+            app.call_later(app.action_cancel_run)
 
     def action_dismiss_screen(self) -> None:
         self.app.pop_screen()
@@ -451,7 +607,7 @@ class QueryInput(TextArea):
 
 
 class HeaderBar(Static):
-    """Top stats bar with budget progress bar."""
+    """Top stats bar with run-health summary."""
     _v: reactive[int] = reactive(0)
 
     def __init__(self, state: "OrbTUI", **kw: Any) -> None:
@@ -469,9 +625,12 @@ class HeaderBar(Static):
             None,
         )
         elapsed = time() - s._run_start if s._run_start else s._last_elapsed
+        waiting = [aid for aid, info in s._agents.items() if info.status == "waiting"]
+        stale = [aid for aid, info in s._agents.items() if info.heartbeat_age and info.heartbeat_age > 6]
+        active_tab = s._workspace_tab.title()
 
         t.append("  ORB", style="bold magenta")
-        t.append(f"  [{_topology_label(s._topology_name)}]", style="dim")
+        t.append(f"  {_topology_label(s._topology_name)}", style="dim")
         t.append("  │  ", style="dim")
 
         if s._awaiting_user:
@@ -499,17 +658,28 @@ class HeaderBar(Static):
         t.append(f"  {s._routed}/{s._budget} msgs  ", style="dim")
         t.append(bar, style=bar_style)
 
-        if s._selected_agent and s._selected_agent in s._agents:
-            label = AGENT_LABELS.get(s._selected_agent, s._selected_agent)
-            color = AGENT_COLORS.get(s._selected_agent, "white")
-            t.append("  │  ", style="dim")
-            t.append("inspect ", style="dim")
-            t.append(label, style=f"bold {color}")
-
         if getattr(s, "_server_port", None):
             t.append("  │  ", style="dim")
             t.append(f"::{s._server_port}", style="dim")
 
+        t.append("\n ")
+        t.append(f"Workspace {active_tab}", style="bold white")
+        t.append("  ·  ", style="dim")
+        t.append(f"{len(s._timeline_entries)} timeline", style="dim")
+        t.append("  ·  ", style="dim")
+        t.append(f"{len(s._file_changes)} files", style="dim")
+        if waiting:
+            t.append("  ·  ", style="dim")
+            t.append("waiting ", style="dim")
+            t.append(", ".join(AGENT_LABELS.get(aid, aid) for aid in waiting[:2]), style="bold yellow")
+        if stale:
+            t.append("  ·  ", style="dim")
+            t.append(f"{len(stale)} stale", style="bold red")
+        if s._selected_agent and s._selected_agent in s._agents:
+            label = AGENT_LABELS.get(s._selected_agent, s._selected_agent)
+            color = AGENT_COLORS.get(s._selected_agent, "white")
+            t.append("  ·  inspect ", style="dim")
+            t.append(label, style=f"bold {color}")
         return t
 
     def bump(self) -> None:
@@ -577,7 +747,8 @@ class GraphPanel(Static):
             t.append("\n")
 
         # ── Agent roster ───────────────────────────────────────────────
-        t.append("\n  " + "─" * 42 + "\n\n", style="dim")
+        t.append("\n  [bold white]Agents[/bold white]\n", style="")
+        t.append("  " + "─" * 36 + "\n", style="dim")
         ordered = [a for a in AGENT_ORDER if a in s._agents]
         ordered += [a for a in s._agents if a not in AGENT_ORDER]
 
@@ -622,7 +793,7 @@ class GraphPanel(Static):
             )
             if activity:
                 t.append("     ⎿ ", style="dim")
-                t.append(_truncate(activity, 58) + "\n", style="dim italic")
+                t.append(_truncate(activity, 34) + "\n", style="dim italic")
 
         return t
 
@@ -659,26 +830,7 @@ class ModeBar(Static):
             t.append("  ○ ready", style="dim")
             t.append(" · type a task  ", style="dim")
 
-        t.append("│  / focus  ctrl+k stop  r results  ? help  ", style="dim")
-
-        if s._agents:
-            ordered = [a for a in AGENT_ORDER if a in s._agents]
-            for agent_id in ordered:
-                info  = s._agents.get(agent_id)
-                color = AGENT_COLORS.get(agent_id, "white")
-                icon  = STATUS_ICON.get(info.status if info else "idle", "○")
-                i_clr = STATUS_COLOR.get(info.status if info else "idle", "dim")
-                key   = AGENT_KEY_MAP.get(agent_id, "")
-                label = AGENT_LABELS.get(agent_id, agent_id)
-                sel   = agent_id == s._selected_agent
-                name_s = f"bold {color}" + (" underline" if sel else "")
-                t.append(f" {icon}", style=f"bold {i_clr}")
-                t.append(f"{label}", style=name_s)
-                if key:
-                    t.append(f"[{key}]", style="dim")
-                t.append("  ", style="dim")
-        else:
-            t.append("@mention or 1-6 to inspect agents", style="dim")
+        t.append("│  [t] timeline  [d] changes  [o] output  [/]-input  [ctrl+p] commands  [?] help  ", style="dim")
 
         return t
 
@@ -769,9 +921,10 @@ class OrbTUI(App[None]):
     }
 
     #header-bar {
-        height: 1;
+        height: 2;
         background: #161b22;
         border-bottom: solid #21262d;
+        padding: 0 1;
     }
 
     #body {
@@ -779,42 +932,90 @@ class OrbTUI(App[None]):
         height: 1fr;
     }
 
-    /* Left: graph + feed stacked */
+    /* Left: topology rail */
     #left-panel {
-        width: 1fr;
+        width: 38;
         layout: vertical;
     }
 
     #graph-panel {
-        height: auto;
+        height: 1fr;
         padding: 1 1;
-        border-bottom: solid #21262d;
+        border-right: solid #21262d;
         background: #0d1117;
     }
 
-    #feed-scroll {
+    /* Center workspace */
+    #center-panel {
+        width: 1fr;
+        layout: vertical;
+    }
+
+    #workspace-tabs {
+        height: 2;
+        background: #11161d;
+        border-bottom: solid #21262d;
+        padding: 0 2;
+    }
+
+    #timeline-scroll {
+        height: 1fr;
+        display: block;
+    }
+
+    #timeline-scroll.hidden {
+        display: none;
+    }
+
+    #message-feed, #result-log {
+        padding: 1 2;
+    }
+
+    #changes-pane {
+        height: 1fr;
+        layout: horizontal;
+        display: none;
+    }
+
+    #changes-pane.visible {
+        display: block;
+    }
+
+    #changes-files {
+        width: 30;
+        padding: 1 1;
+        border-right: solid #21262d;
+        background: #0f141b;
+    }
+
+    #changes-diff-scroll {
+        width: 1fr;
         height: 1fr;
     }
 
-    #message-feed {
-        padding: 0 2;
+    #changes-diff {
+        padding: 1 2;
+    }
+
+    #result-scroll {
+        height: 1fr;
+        display: none;
+    }
+
+    #result-scroll.visible {
+        display: block;
     }
 
     /* Right: detail pane */
     #detail-pane {
-        width: 46;
-        background: #0d1117;
+        width: 54;
+        background: #0f141b;
         border-left: solid #21262d;
-        display: none;
         layout: vertical;
     }
 
-    #detail-pane.visible {
-        display: block;
-    }
-
     #detail-header {
-        height: 3;
+        height: 4;
         background: #161b22;
         border-bottom: solid #21262d;
         padding: 0 1;
@@ -831,9 +1032,10 @@ class OrbTUI(App[None]):
     /* Bottom bars */
     #mode-bar {
         height: 1;
-        background: #0d1117;
+        background: #11161d;
         border-top: solid #21262d;
         color: #8b949e;
+        padding: 0 1;
     }
 
     #question-banner {
@@ -860,7 +1062,7 @@ class OrbTUI(App[None]):
     }
 
     #query-bar {
-        height: 3;
+        min-height: 3;
         layout: horizontal;
         background: #161b22;
         border-top: solid #21262d;
@@ -869,7 +1071,7 @@ class OrbTUI(App[None]):
     }
 
     #query-label {
-        width: 4;
+        width: 12;
         color: #484f58;
     }
 
@@ -898,35 +1100,6 @@ class OrbTUI(App[None]):
     Footer {
         background: #161b22;
         color: #484f58;
-    }
-
-    /* Code panel */
-    #code-panel {
-        width: 60;
-        background: #0d1117;
-        border-left: solid #21262d;
-        display: none;
-        layout: vertical;
-    }
-
-    #code-panel.visible {
-        display: block;
-    }
-
-    #code-panel-header {
-        height: 1;
-        background: #161b22;
-        border-bottom: solid #21262d;
-        padding: 0 1;
-        color: #8b949e;
-    }
-
-    #code-scroll {
-        height: 1fr;
-    }
-
-    #code-log {
-        padding: 0 1;
     }
 
     /* Log panel (--logs mode) */
@@ -960,6 +1133,10 @@ class OrbTUI(App[None]):
         Binding("tab",        "next_agent",   "Next agent"),
         Binding("slash",      "focus_input",  "Focus input", show=False),
         Binding("r",          "show_results", "Results"),
+        Binding("t",          "show_timeline", "Timeline", show=False),
+        Binding("d",          "show_changes", "Changes", show=False),
+        Binding("o",          "show_output", "Output", show=False),
+        Binding("ctrl+p",     "show_commands", "Commands", show=False),
         Binding("ctrl+k",     "cancel_run",   "Cancel run"),
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
         Binding("ctrl+g",     "cancel_reply", "Clear reply", show=False),
@@ -978,6 +1155,7 @@ class OrbTUI(App[None]):
         self,
         server_port: int = 8080,
         topology: str = "triangle",
+        budget: int = 200,
         show_logs: bool = False,
         initial_query: str | None = None,
         exit_after_run: bool = False,
@@ -985,6 +1163,7 @@ class OrbTUI(App[None]):
         super().__init__()
         self._server_port   = server_port
         self._topology_name = topology
+        self._budget        = budget
         self._show_logs     = show_logs
         self._initial_query = initial_query.strip() if initial_query else ""
         self._exit_after_run = exit_after_run
@@ -1002,6 +1181,10 @@ class OrbTUI(App[None]):
         self._last_elapsed: float = 0.0
         self._last_diff: str = ""
         self._turn_count: int = 0
+        self._timeline_entries: deque[TimelineEntry] = deque(maxlen=600)
+        self._file_changes: dict[str, FileChangeEntry] = {}
+        self._selected_file: str | None = None
+        self._workspace_tab: str = "timeline"
 
         # User-prompt handling — set when backend reports an agent waiting for user
         self._awaiting_user: str | None = None
@@ -1022,13 +1205,16 @@ class OrbTUI(App[None]):
         with Horizontal(id="body"):
             with Vertical(id="left-panel"):
                 yield GraphPanel(state=self, id="graph-panel")
-                with VerticalScroll(id="feed-scroll"):
+            with Vertical(id="center-panel"):
+                yield Static(id="workspace-tabs")
+                with VerticalScroll(id="timeline-scroll"):
                     yield RichLog(id="message-feed", highlight=True, markup=True, wrap=True)
-
-            with Vertical(id="code-panel"):
-                yield Static("", id="code-panel-header")
-                with VerticalScroll(id="code-scroll"):
-                    yield RichLog(id="code-log", highlight=False, markup=True, wrap=False)
+                with Horizontal(id="changes-pane"):
+                    yield RichLog(id="changes-files", highlight=True, markup=True, wrap=True)
+                    with VerticalScroll(id="changes-diff-scroll"):
+                        yield RichLog(id="changes-diff", highlight=False, markup=True, wrap=False)
+                with VerticalScroll(id="result-scroll"):
+                    yield RichLog(id="result-log", highlight=True, markup=True, wrap=True)
 
             with Vertical(id="detail-pane"):
                 yield Static(id="detail-header")
@@ -1046,7 +1232,7 @@ class OrbTUI(App[None]):
             yield RichLog(id="log-feed", highlight=False, markup=True, wrap=True)
 
         with Horizontal(id="query-bar"):
-            yield Label(" >  ", id="query-label")
+            yield Label(" task > ", id="query-label")
             yield QueryInput(id="query-input", soft_wrap=True)
 
         yield Footer()
@@ -1058,8 +1244,14 @@ class OrbTUI(App[None]):
         if self._initial_query:
             feed.write("[dim]Connecting to backend and starting task…[/dim]")
         else:
-            feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. [bold]y[/bold]=copy result  drag to select &amp; copy text[/dim]")
+            feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. [bold]ctrl+p[/bold]=commands  [bold]t/d/o[/bold]=workspace tabs[/dim]")
             self.query_one("#query-input", TextArea).focus()
+        self._update_workspace_tabs()
+        self._set_workspace_tab("timeline")
+        self._populate_detail_pane()
+        self._update_detail_header()
+        self._update_changes_view()
+        self._update_result_view()
         self._elapsed_task = asyncio.create_task(self._tick())
         self._ws_task = asyncio.create_task(self._start_ws_client())
 
@@ -1071,6 +1263,14 @@ class OrbTUI(App[None]):
             self._log_handler = handler
         else:
             self._log_handler = None
+
+    def _safe_query_one(self, selector: str, widget_type: Any | None = None) -> Any | None:
+        try:
+            if widget_type is None:
+                return self.query_one(selector)
+            return self.query_one(selector, widget_type)
+        except Exception:
+            return None
 
     async def on_unmount(self) -> None:
         if self._http_session is not None:
@@ -1086,6 +1286,166 @@ class OrbTUI(App[None]):
         )
         body.update(text)
         banner.add_class("visible")
+
+    def _update_workspace_tabs(self) -> None:
+        tabs = self._safe_query_one("#workspace-tabs", Static)
+        if tabs is None:
+            return
+        active = self._workspace_tab
+        parts = [
+            ("timeline", "T", "Timeline", len(self._timeline_entries)),
+            ("changes", "D", "Changes", len(self._file_changes)),
+            ("output", "O", "Output", len(self._completions)),
+        ]
+        text = RichText()
+        for idx, (name, key, label, count) in enumerate(parts):
+            if idx:
+                text.append("   ", style="dim")
+            style = "bold white on #1f6feb" if active == name else "bold white"
+            text.append(f" {label} ", style=style)
+            text.append(f"[{key}]", style="dim")
+            if count:
+                text.append(f" {count}", style="dim")
+        tabs.update(text)
+
+    def _set_workspace_tab(self, tab: str) -> None:
+        self._workspace_tab = tab
+        timeline = self._safe_query_one("#timeline-scroll")
+        changes = self._safe_query_one("#changes-pane")
+        result = self._safe_query_one("#result-scroll")
+        if not all((timeline, changes, result)):
+            self._update_workspace_tabs()
+            return
+        if tab == "timeline":
+            timeline.remove_class("hidden")
+            changes.remove_class("visible")
+            result.remove_class("visible")
+        elif tab == "changes":
+            timeline.add_class("hidden")
+            changes.add_class("visible")
+            result.remove_class("visible")
+        else:
+            timeline.add_class("hidden")
+            changes.remove_class("visible")
+            result.add_class("visible")
+        self._update_workspace_tabs()
+        self._refresh_all()
+
+    def _render_timeline_entry(self, entry: TimelineEntry) -> None:
+        log = self._safe_query_one("#message-feed", RichLog)
+        if log is None:
+            return
+        icon, color = _event_icon(entry.kind)
+        title = entry.title
+        summary = entry.summary
+        log.write(
+            f"[dim][{entry.elapsed:5.1f}s][/dim] "
+            f"[bold {color}]{icon} {title}[/bold {color}]"
+        )
+        if summary:
+            log.write(f"  [dim]{summary}[/dim]")
+        if entry.body:
+            for line in entry.body.splitlines():
+                if line.strip():
+                    log.write(f"    {line}")
+        log.write("")
+
+    def _record_timeline_entry(self, entry: TimelineEntry) -> None:
+        self._timeline_entries.append(entry)
+        self._render_timeline_entry(entry)
+
+    def _rebuild_timeline(self) -> None:
+        log = self._safe_query_one("#message-feed", RichLog)
+        if log is None:
+            return
+        log.clear()
+        if not self._timeline_entries:
+            log.write("[dim]Timeline is empty. Start a task to see multi-agent activity.[/dim]")
+            return
+        for entry in self._timeline_entries:
+            self._render_timeline_entry(entry)
+
+    def _update_changes_view(self) -> None:
+        files_log = self._safe_query_one("#changes-files", RichLog)
+        diff_log = self._safe_query_one("#changes-diff", RichLog)
+        if files_log is None or diff_log is None:
+            return
+        files_log.clear()
+        diff_log.clear()
+        if not self._file_changes:
+            files_log.write("[dim]No files changed yet.[/dim]")
+            diff_log.write("[dim]File diffs will appear here when agents write to disk.[/dim]")
+            return
+
+        ordered = sorted(self._file_changes.values(), key=lambda item: item.path)
+        if not self._selected_file or self._selected_file not in self._file_changes:
+            self._selected_file = ordered[-1].path
+
+        for item in ordered:
+            selected = item.path == self._selected_file
+            color = AGENT_COLORS.get(item.agent_id, "white")
+            prefix = "›" if selected else " "
+            style = f"bold {color}" if selected else "white"
+            files_log.write(
+                f"[{style}]{prefix} {item.path}[/{style}]  "
+                f"[green]+{item.added}[/green][dim]/[/dim][red]-{item.removed}[/red]"
+            )
+            files_log.write(f"  [dim]{item.agent_id} · {item.summary}[/dim]")
+            files_log.write("")
+
+        selected = self._file_changes[self._selected_file]
+        diff_log.write(
+            f"[bold {AGENT_COLORS.get(selected.agent_id, 'white')}]{selected.path}[/bold {AGENT_COLORS.get(selected.agent_id, 'white')}]"
+            f" [dim]· {selected.summary}[/dim]\n"
+        )
+        for line in selected.diff_text.splitlines():
+            if line.startswith("@@"):
+                diff_log.write(f"[cyan]{line}[/cyan]")
+            elif line.startswith("+++") or line.startswith("---"):
+                diff_log.write(f"[bold]{line}[/bold]")
+            elif line.startswith("+"):
+                diff_log.write(f"[green]{line}[/green]")
+            elif line.startswith("-"):
+                diff_log.write(f"[red]{line}[/red]")
+            else:
+                diff_log.write(f"[dim]{line}[/dim]")
+
+    def _update_result_view(self) -> None:
+        log = self._safe_query_one("#result-log", RichLog)
+        if log is None:
+            return
+        log.clear()
+        if not self._completions:
+            log.write("[dim]No final output yet. Completed agent results will accumulate here.[/dim]")
+            return
+        primary_id, primary_result = pick_primary_result(self._completions)
+        if primary_result:
+            label = AGENT_LABELS.get(primary_id or "", "Primary")
+            color = AGENT_COLORS.get(primary_id or "", "white")
+            log.write(f"[bold {color}]Primary Output · {label}[/bold {color}]")
+            log.write(primary_result)
+            log.write("")
+        supporting = [(aid, result) for aid, result in self._completions.items() if aid != primary_id and result]
+        if supporting:
+            log.write("[bold white]Supporting Outputs[/bold white]")
+            log.write("")
+            for aid, result in supporting:
+                label = AGENT_LABELS.get(aid, aid)
+                color = AGENT_COLORS.get(aid, "white")
+                log.write(f"[bold {color}]{label}[/bold {color}]")
+                log.write(result)
+                log.write("")
+        if self._last_diff:
+            log.write("[bold yellow]Latest Workspace Diff[/bold yellow]")
+            for line in self._last_diff.splitlines()[:120]:
+                if line.startswith("+"):
+                    log.write(f"[green]{line}[/green]")
+                elif line.startswith("-"):
+                    log.write(f"[red]{line}[/red]")
+                elif line.startswith("@@"):
+                    log.write(f"[cyan]{line}[/cyan]")
+                else:
+                    log.write(f"[dim]{line}[/dim]")
 
     def _hide_question_banner(self) -> None:
         self.query_one("#question-banner").remove_class("visible")
@@ -1116,9 +1476,16 @@ class OrbTUI(App[None]):
                 self._update_detail_header()
 
     def _refresh_all(self) -> None:
-        self.query_one("#header-bar",  HeaderBar).bump()
-        self.query_one("#graph-panel", GraphPanel).bump()
-        self.query_one("#mode-bar",    ModeBar).bump()
+        header = self._safe_query_one("#header-bar", HeaderBar)
+        graph = self._safe_query_one("#graph-panel", GraphPanel)
+        mode = self._safe_query_one("#mode-bar", ModeBar)
+        if header:
+            header.bump()
+        if graph:
+            graph.bump()
+        if mode:
+            mode.bump()
+        self._update_workspace_tabs()
 
     # ── Input handling ────────────────────────────────────────────────────────
 
@@ -1147,7 +1514,7 @@ class OrbTUI(App[None]):
             target = self._awaiting_user
             self._awaiting_user = None
             self._awaiting_user_question = ""
-            self.query_one("#query-label", Label).update(" >  ")
+            self.query_one("#query-label", Label).update(" task > ")
             self._hide_question_banner()
             await self._post_json("/api/inject", {"to": target, "message": raw})
             return
@@ -1188,15 +1555,26 @@ class OrbTUI(App[None]):
         self._agents       = {}
         self._detail_feed  = deque(maxlen=500)
         self._completions  = {}
+        self._timeline_entries = deque(maxlen=600)
+        self._file_changes = {}
+        self._selected_file = None
         self._routed       = 0
         self._run_start    = time()
         self._run_status   = "Running"
         self._active_edges = {}
 
         self.query_one("#detail-log", RichLog).clear()
-        feed = self.query_one("#message-feed", RichLog)
-        feed.clear()
-        feed.write(f"[bold cyan]▶ Task:[/bold cyan] {query}\n")
+        self._rebuild_timeline()
+        self._update_changes_view()
+        self._update_result_view()
+        self._record_timeline_entry(TimelineEntry(
+            kind="task",
+            elapsed=0.0,
+            title="New task",
+            summary=query,
+            body="Runtime building graph and dispatching entry task.",
+        ))
+        self._set_workspace_tab("timeline")
         self._refresh_all()
 
         resp = await self._post_json("/api/start", {
@@ -1205,7 +1583,12 @@ class OrbTUI(App[None]):
         })
         if not resp.get("ok"):
             self._run_status = "Error"
-            feed.write(f"\n[bold red]✗ Error:[/bold red] {resp.get('error', 'start failed')}")
+            self._record_timeline_entry(TimelineEntry(
+                kind="status",
+                elapsed=0.0,
+                title="Run failed to start",
+                summary=resp.get("error", "start failed"),
+            ))
             self._refresh_all()
 
     # ── WebSocket client ──────────────────────────────────────────────────────
@@ -1262,7 +1645,12 @@ class OrbTUI(App[None]):
             self._on_server_file_write(data)
         elif t == "stopped":
             self._run_status = "Error"
-            self.query_one("#message-feed", RichLog).write("\n[dim]Run cancelled.[/dim]")
+            self._record_timeline_entry(TimelineEntry(
+                kind="status",
+                elapsed=self._last_elapsed,
+                title="Run cancelled",
+                summary="Execution stopped before completion.",
+            ))
             self._refresh_all()
         elif t == "stats":
             self._routed = data.get("message_count", self._routed)
@@ -1272,6 +1660,9 @@ class OrbTUI(App[None]):
         self._agents = {}
         self._detail_feed = deque(maxlen=500)
         self._completions = {}
+        self._timeline_entries = deque(maxlen=600)
+        self._file_changes = {}
+        self._selected_file = None
         self._routed = 0
         self._active_edges = {}
 
@@ -1302,10 +1693,15 @@ class OrbTUI(App[None]):
         elif completed:
             self._run_status = "Idle"
 
-        feed = self.query_one("#message-feed", RichLog)
-        feed.clear()
+        self._rebuild_timeline()
         if self._last_query and run_active:
-            feed.write(f"[bold cyan]▶ Task:[/bold cyan] {self._last_query}\n")
+            self._record_timeline_entry(TimelineEntry(
+                kind="task",
+                elapsed=0.0,
+                title="Resumed task",
+                summary=self._last_query,
+                body=f"Topology {_topology_label(self._topology_name)} already active.",
+            ))
         for msg in data.get("messages", []):
             msg_type = msg.get("msg_type", "")
             if msg_type == "system":
@@ -1329,6 +1725,8 @@ class OrbTUI(App[None]):
         if self._initial_query and not self._initial_query_started and not run_active:
             asyncio.create_task(self._auto_start_initial_query())
 
+        self._update_changes_view()
+        self._update_result_view()
         self._refresh_all()
 
     def _on_server_message(self, data: dict) -> None:
@@ -1390,6 +1788,7 @@ class OrbTUI(App[None]):
             self._append_to_detail(entry)
             self.query_one("#detail-scroll").scroll_end(animate=False)
 
+        self._update_result_view()
         self._refresh_all()
 
     def _on_server_agent_status(self, data: dict) -> None:
@@ -1443,9 +1842,15 @@ class OrbTUI(App[None]):
         if text.startswith("⏳ Waiting for user"):
             self._awaiting_user = aid
             self._awaiting_user_question = text
-            feed = self.query_one("#message-feed", RichLog)
-            feed.write(f"[bold yellow]{aid} asks user:[/bold yellow] {text}")
-            self.query_one("#query-label", Label).update(f" ↩ {aid}: ")
+            self._record_timeline_entry(TimelineEntry(
+                kind="question",
+                elapsed=self._last_elapsed,
+                title=f"{AGENT_LABELS.get(aid, aid)} needs input",
+                summary=text,
+                body="Reply in the composer below. Only this node is waiting.",
+                agent_id=aid,
+            ))
+            self.query_one("#query-label", Label).update(f" reply {aid}> ")
             ta = self.query_one("#query-input", TextArea)
             ta.add_class("user-reply-mode")
             ta.remove_class("inject-mode")
@@ -1455,7 +1860,7 @@ class OrbTUI(App[None]):
         elif text == "" and self._awaiting_user == aid:
             self._awaiting_user = None
             self._awaiting_user_question = ""
-            self.query_one("#query-label", Label).update(" >  ")
+            self.query_one("#query-label", Label).update(" task > ")
             self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
             self._hide_question_banner()
 
@@ -1468,6 +1873,15 @@ class OrbTUI(App[None]):
             self._agents[aid].activity_text = ""
         if result and not result.startswith("Consensus:") and result != "[shutdown]":
             self._completions[aid] = result
+            self._record_timeline_entry(TimelineEntry(
+                kind="complete",
+                elapsed=self._last_elapsed,
+                title=f"{AGENT_LABELS.get(aid, aid)} completed",
+                summary=_truncate(result, 110),
+                body=result,
+                agent_id=aid,
+            ))
+        self._update_result_view()
         self._refresh_all()
 
     def _on_server_run_complete(self, data: dict) -> None:
@@ -1482,19 +1896,19 @@ class OrbTUI(App[None]):
                 info.set_status("completed")
             info.activity_text = ""
 
-        sep  = "─" * 48
-        feed = self.query_one("#message-feed", RichLog)
-        feed.write(
-            f"\n[dim]{sep}[/dim]\n"
-            f"[dim]── Turn {self._turn_count} complete"
-            f"  ({self._last_elapsed:.1f}s · {self._routed} messages) ──[/dim]\n"
-            f"[dim]Type your next message or question…[/dim]\n"
-        )
+        self._record_timeline_entry(TimelineEntry(
+            kind="status",
+            elapsed=self._last_elapsed,
+            title=f"Turn {self._turn_count} complete",
+            summary=f"{self._last_elapsed:.1f}s · {self._routed} messages",
+            body="Type your next message or question in the composer.",
+        ))
 
         if "coordinator" in self._agents and not self._selected_agent:
             self.action_select("coordinator")
 
         self.query_one("#query-input", TextArea).focus()
+        self._update_result_view()
         self._refresh_all()
         if self._exit_after_run:
             self.call_after_refresh(self.action_quit)
@@ -1519,42 +1933,29 @@ class OrbTUI(App[None]):
         removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
         stat    = f"+{added} -{removed}" if not is_new else f"+{len(new_lines)} (new file)"
 
-        feed = self.query_one("#message-feed", RichLog)
-        feed.write(
-            f"[{color}]{agent_id}[/{color}]"
-            f"[dim] wrote [/dim][cyan]{path}[/cyan]"
-            f"  [green]+{added}[/green] [red]-{removed}[/red]"
-        )
-
-        panel = self.query_one("#code-panel")
-        panel.add_class("visible")
-        hdr  = self.query_one("#code-panel-header", Static)
         mode = "new file" if is_new else "modified"
-        hdr.update(
-            f" [{color}]{agent_id}[/{color}]"
-            f"[dim] · [/dim][cyan]{path}[/cyan]"
-            f"[dim] · {mode} · [/dim]"
-            f"[green]+{added}[/green][dim]/[/dim][red]-{removed}[/red]"
+        diff_text = "\n".join(diff_lines) if diff_lines else "\n".join(
+            f"+{i:3} {l.rstrip()}" for i, l in enumerate(new_lines, 1)
         )
-
-        log = self.query_one("#code-log", RichLog)
-        log.clear()
-        if diff_lines:
-            for line in diff_lines:
-                line = line.rstrip("\n")
-                if line.startswith("@@"):
-                    log.write(f"[cyan]{line}[/cyan]")
-                elif line.startswith("+++") or line.startswith("---"):
-                    log.write(f"[bold]{line}[/bold]")
-                elif line.startswith("+"):
-                    log.write(f"[green]{line}[/green]")
-                elif line.startswith("-"):
-                    log.write(f"[red]{line}[/red]")
-                else:
-                    log.write(f"[dim]{line}[/dim]")
-        else:
-            for i, l in enumerate(new_lines, 1):
-                log.write(f"[green]+{i:3} {l.rstrip()}[/green]")
+        self._file_changes[path] = FileChangeEntry(
+            path=path,
+            agent_id=agent_id,
+            diff_text=diff_text,
+            summary=f"{mode} · +{added}/-{removed}",
+            added=added,
+            removed=removed,
+            is_new=is_new,
+        )
+        self._selected_file = path
+        self._record_timeline_entry(TimelineEntry(
+            kind="file",
+            elapsed=self._last_elapsed,
+            title=f"{AGENT_LABELS.get(agent_id, agent_id)} changed {path}",
+            summary=f"{mode} · +{added}/-{removed}",
+            body="Open the Changes tab to inspect the full diff.",
+            agent_id=agent_id,
+        ))
+        self._update_changes_view()
 
         if agent_id in self._agents:
             self._agents[agent_id].activity_text = f"wrote {path} ({stat})"
@@ -1581,26 +1982,24 @@ class OrbTUI(App[None]):
     # ── Feed ──────────────────────────────────────────────────────────────────
 
     def _write_feed(self, entry: dict) -> None:
-        feed    = self.query_one("#message-feed", RichLog)
         from_id = entry["from_"]
         to_id   = entry["to"]
-        f_color = AGENT_COLORS.get(str(from_id).lower(), "white")
-        t_color = "green" if to_id == "[COMPLETE]" else AGENT_COLORS.get(str(to_id).lower(), "white")
-        model_s = f" [{_short_model(entry['model'])}]" if entry["model"] else ""
         ttype   = entry.get("type", "")
-        t_clr   = MSG_TYPE_COLOR.get(ttype, "white")
-        badge   = f" [{t_clr}]{{{ttype}}}[/{t_clr}]" if ttype not in ("", "response") else ""
         preview = _truncate(str(entry.get("preview", "")), 90)
-
-        feed.write(
-            f"[dim][{entry['elapsed']:5.1f}s][/dim] "
-            f"[{f_color}]{from_id}[/{f_color}]"
-            f"[dim]{model_s}[/dim]{badge}"
-            f"[dim] → [/dim]"
-            f"[{t_color}]{to_id}[/{t_color}]"
-            f"[dim]:  [/dim]"
-            f"[dim]\"{preview}\"[/dim]"
-        )
+        model_s = f" · {_short_model(entry['model'])}" if entry["model"] else ""
+        title = f"{AGENT_LABELS.get(str(from_id).lower(), from_id)} → {AGENT_LABELS.get(str(to_id).lower(), to_id)}{model_s}"
+        body = entry.get("payload", "") if ttype in {"feedback", "complete"} else ""
+        self._record_timeline_entry(TimelineEntry(
+            kind=ttype or "response",
+            elapsed=float(entry["elapsed"]),
+            title=title,
+            summary=preview,
+            body=body,
+            agent_id=str(from_id).lower(),
+            from_id=str(from_id),
+            to_id=str(to_id),
+            model=entry.get("model", ""),
+        ))
 
     def _append_to_detail(self, entry: dict) -> None:
         """Append one entry to the detail log with full payload."""
@@ -1645,28 +2044,35 @@ class OrbTUI(App[None]):
 
     def _populate_detail_pane(self) -> None:
         """Rebuild detail pane from scratch for the selected agent."""
-        if not self._selected_agent:
-            return
         log  = self.query_one("#detail-log", RichLog)
         log.clear()
+        if not self._selected_agent:
+            log.write("[dim]Select an agent with Tab or 1-6 to inspect its state.[/dim]")
+            return
         info = self._agents.get(self._selected_agent)
         if not info:
             return
 
         color = AGENT_COLORS.get(self._selected_agent, "white")
         label = AGENT_LABELS.get(self._selected_agent, self._selected_agent)
+        neighbors = _neighbor_ids(self._topology_name, self._selected_agent)
 
         agent_entries = [
             e for e in self._detail_feed
             if e.get("from_") == self._selected_agent
             or e.get("to") == self._selected_agent
         ]
+        outbound = [e for e in agent_entries if e.get("from_") == self._selected_agent]
+        inbound = [e for e in agent_entries if e.get("to") == self._selected_agent]
+        touched = [path for path, change in sorted(self._file_changes.items()) if change.agent_id == self._selected_agent]
 
         log.write(f"[bold {color}]■ {label}[/bold {color}] [dim]{info.role}[/dim]")
         log.write("")
         log.write("[bold white]Overview[/bold white]")
         log.write(f"  [dim]status[/dim]  {info.status}")
-        log.write(f"  [dim]messages[/dim]  {len(agent_entries)}")
+        log.write(f"  [dim]topology position[/dim]  {_topology_position(self._topology_name, self._selected_agent)}")
+        log.write(f"  [dim]neighbors[/dim]  {', '.join(AGENT_LABELS.get(aid, aid) for aid in neighbors) or 'none'}")
+        log.write(f"  [dim]messages[/dim]  {len(agent_entries)} total · {len(inbound)} in · {len(outbound)} out")
         if info.model:
             log.write(f"  [dim]model[/dim]  {info.model}")
         if info.complexity_score:
@@ -1674,16 +2080,31 @@ class OrbTUI(App[None]):
         if info.heartbeat_age is not None:
             heartbeat_label = "live" if info.heartbeat_age <= 6 else "stale"
             log.write(f"  [dim]heartbeat[/dim]  {heartbeat_label} ({info.heartbeat_age:.1f}s ago)")
+        if touched:
+            log.write(f"  [dim]files touched[/dim]  {len(touched)}")
 
         if info.activity_text:
             log.write("")
             log.write("[bold white]Current Activity[/bold white]")
             log.write(f"  {info.activity_text}")
+        if self._awaiting_user == self._selected_agent and self._awaiting_user_question:
+            log.write("")
+            log.write("[bold yellow]Waiting On User[/bold yellow]")
+            log.write(f"  {self._awaiting_user_question}")
+
+        if touched:
+            log.write("")
+            log.write("[bold white]Files[/bold white]")
+            for path in touched[-6:]:
+                change = self._file_changes[path]
+                log.write(
+                    f"  [cyan]{path}[/cyan]  [green]+{change.added}[/green][dim]/[/dim][red]-{change.removed}[/red]"
+                )
 
         log.write("")
-        log.write("[bold white]Recent Messages[/bold white]")
+        log.write("[bold white]Recent Transcript[/bold white]")
         if agent_entries:
-            for entry in agent_entries[-8:]:
+            for entry in agent_entries[-10:]:
                 self._append_to_detail(entry)
         else:
             log.write("  [dim]No messages yet.[/dim]")
@@ -1700,7 +2121,7 @@ class OrbTUI(App[None]):
     def _update_detail_header(self) -> None:
         hdr = self.query_one("#detail-header", Static)
         if not self._selected_agent:
-            hdr.update("")
+            hdr.update("[dim]Inspector[/dim]\n[dim]Select an agent to inspect topology, transcript, and artifacts.[/dim]")
             return
         info  = self._agents.get(self._selected_agent)
         color = AGENT_COLORS.get(self._selected_agent, "white")
@@ -1729,24 +2150,24 @@ class OrbTUI(App[None]):
         if info and info.heartbeat_age is not None:
             hb_style = "green" if info.heartbeat_age <= 6 else "red"
             t.append(f"hb {info.heartbeat_age:.1f}s  ", style=hb_style)
+        neighbors = _neighbor_ids(self._topology_name, self._selected_agent)
+        if neighbors:
+            t.append(f"nbrs {len(neighbors)}  ", style="dim")
         if info and info.activity_text:
             t.append(info.activity_text[:50], style="italic dim")
         else:
-            t.append("Esc to close", style="dim")
+            t.append("Select a message or file tab for more context", style="dim")
         hdr.update(t)
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def action_select(self, agent_id: str) -> None:
-        pane = self.query_one("#detail-pane")
         if self._selected_agent == agent_id:
             self._selected_agent = None
-            pane.remove_class("visible")
         else:
             self._selected_agent = agent_id
-            pane.add_class("visible")
-            self._populate_detail_pane()
-            self._update_detail_header()
+        self._populate_detail_pane()
+        self._update_detail_header()
         self._refresh_all()
 
     def action_next_agent(self) -> None:
@@ -1762,11 +2183,24 @@ class OrbTUI(App[None]):
 
     def action_deselect(self) -> None:
         self._selected_agent = None
-        self.query_one("#detail-pane").remove_class("visible")
+        self._populate_detail_pane()
+        self._update_detail_header()
         self._refresh_all()
 
     def action_focus_input(self) -> None:
         self.query_one("#query-input", TextArea).focus()
+
+    def action_show_timeline(self) -> None:
+        self._set_workspace_tab("timeline")
+
+    def action_show_changes(self) -> None:
+        self._set_workspace_tab("changes")
+
+    def action_show_output(self) -> None:
+        self._set_workspace_tab("output")
+
+    def action_show_commands(self) -> None:
+        self.push_screen(CommandScreen())
 
     def action_show_results(self) -> None:
         if self._run_status not in ("Complete", "Idle") or not self._completions:
@@ -1787,7 +2221,8 @@ class OrbTUI(App[None]):
             await self._post_json("/api/stop", {})
 
     def action_clear_feed(self) -> None:
-        self.query_one("#message-feed", RichLog).clear()
+        self._timeline_entries.clear()
+        self._rebuild_timeline()
 
     def action_copy_result(self) -> None:
         """Copy the selected agent's result or the primary worker result."""
@@ -1801,15 +2236,8 @@ class OrbTUI(App[None]):
         if not text and self._completions:
             _, text = pick_primary_result(self._completions)
 
-        # Fall back to code panel content (last written file)
-        if not text:
-            try:
-                log = self.query_one("#code-log", RichLog)
-                # RichLog stores rendered lines; grab the plain text
-                lines = [seg.text for line in log._lines for seg in line._spans]
-                text = "".join(lines).strip()
-            except Exception:
-                pass
+        if not text and self._selected_file and self._selected_file in self._file_changes:
+            text = self._file_changes[self._selected_file].diff_text.strip()
 
         if text:
             self.copy_to_clipboard(text)
@@ -1835,6 +2263,7 @@ async def _launch(
     model_overrides: dict | None,
     tier_override: Any,
     topology: str,
+    budget: int,
     show_logs: bool,
     server_port: int,
     server_host: str = "0.0.0.0",
@@ -1855,6 +2284,7 @@ async def _launch(
         await OrbTUI(
             server_port=server_port,
             topology=topology,
+            budget=budget,
             show_logs=show_logs,
             initial_query=initial_query,
             exit_after_run=exit_after_run,
@@ -1880,7 +2310,7 @@ def run_tui(
     asyncio.run(_launch(
         providers=providers, config=config,
         model_overrides=model_overrides, tier_override=tier_override,
-        topology=topology, show_logs=show_logs,
+        topology=topology, budget=budget, show_logs=show_logs,
         server_port=server_port, server_host="127.0.0.1",
         initial_query=initial_query, exit_after_run=exit_after_run,
     ))
@@ -1902,7 +2332,29 @@ async def run_tui_with_dashboard(
     await _launch(
         providers=providers, config=config,
         model_overrides=model_overrides, tier_override=tier_override,
-        topology=topology, show_logs=show_logs,
+        topology=topology, budget=budget, show_logs=show_logs,
         server_port=dashboard_port, server_host="0.0.0.0",
+        initial_query=initial_query, exit_after_run=exit_after_run,
+    )
+
+
+async def run_tui_async(
+    providers: dict,
+    config: Any,
+    model_overrides: dict | None = None,
+    tier_override: Any = None,
+    topology: str = "triangle",
+    budget: int = 200,
+    show_logs: bool = False,
+    server_port: int = 18080,
+    initial_query: str | None = None,
+    exit_after_run: bool = False,
+) -> None:
+    """Async TUI-only mode for callers already inside an event loop."""
+    await _launch(
+        providers=providers, config=config,
+        model_overrides=model_overrides, tier_override=tier_override,
+        topology=topology, budget=budget, show_logs=show_logs,
+        server_port=server_port, server_host="127.0.0.1",
         initial_query=initial_query, exit_after_run=exit_after_run,
     )

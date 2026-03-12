@@ -43,13 +43,28 @@ async def test_async_main_passes_query_into_tui_mode():
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._setup_log_file"), \
          patch("orb.cli.main.build_providers", return_value={"mock": object()}), \
-         patch("orb.cli.tui.run_tui") as run_tui:
+         patch("orb.cli.tui.run_tui_async", new_callable=AsyncMock) as run_tui:
         await async_main()
 
     run_tui.assert_called_once()
     _, kwargs = run_tui.call_args
     assert kwargs["initial_query"] == "write hello world"
     assert kwargs["exit_after_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_async_main_passes_budget_into_tui_dashboard_mode():
+    args = _base_args(tui=True, dashboard=True, budget=321, query="write hello world")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("orb.cli.main.build_providers", return_value={"mock": object()}), \
+         patch("orb.cli.tui.run_tui_with_dashboard", new_callable=AsyncMock) as run_tui_with_dashboard:
+        await async_main()
+
+    run_tui_with_dashboard.assert_awaited_once()
+    _, kwargs = run_tui_with_dashboard.call_args
+    assert kwargs["budget"] == 321
 
 
 @pytest.mark.asyncio

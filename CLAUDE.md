@@ -4,6 +4,9 @@
 
 **Always keep TUI (`orb/cli/tui.py`) and dashboard (`web/server.py`, `web/static/app.js`) in sync.**
 
+## Rules
+1. For any change or fixes first write test, then make changes, and make sure to pass the test.
+
 Any feature, fix, or behaviour change that affects one must be applied to the other:
 - Message type changes (e.g. `MessageType.TASK` → `RESPONSE`)
 - New agent callbacks (`_on_activity`, `_on_file_write`, `_on_complete`)
@@ -13,3 +16,4 @@ Any feature, fix, or behaviour change that affects one must be applied to the ot
 - Inject flow changes
 
 When in doubt, grep for the same pattern in both files before shipping.
+

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from orb.cli.display import pick_primary_result
-from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar, GraphPanel, HelpScreen
+from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar, GraphPanel, HelpScreen, CommandScreen
 
 
 def _make_tui() -> OrbTUI:
@@ -31,6 +31,10 @@ def _make_tui() -> OrbTUI:
     tui._last_elapsed  = 0.0
     tui._last_diff     = ""
     tui._turn_count    = 0
+    tui._timeline_entries = []
+    tui._file_changes = {}
+    tui._selected_file = None
+    tui._workspace_tab = "timeline"
     tui._awaiting_user = None
     tui._tick_count    = 0
     tui._active_edges  = {}
@@ -49,12 +53,16 @@ def _make_tui() -> OrbTUI:
     mock_scroll  = MagicMock()
     mock_label   = MagicMock()
     mock_ta      = MagicMock()
-    mock_code    = MagicMock()
-    mock_code_hdr = MagicMock()
-    mock_code_log = MagicMock()
     mock_qbanner = MagicMock()
     mock_qbanner_hdr = MagicMock()
     mock_qbanner_body = MagicMock()
+    mock_workspace_tabs = MagicMock()
+    mock_timeline_scroll = MagicMock()
+    mock_changes_pane = MagicMock()
+    mock_result_scroll = MagicMock()
+    mock_changes_files = MagicMock()
+    mock_changes_diff = MagicMock()
+    mock_result_log = MagicMock()
 
     def _query_one(selector, *args):
         mapping = {
@@ -64,12 +72,16 @@ def _make_tui() -> OrbTUI:
             "#detail-scroll": mock_scroll,
             "#query-label":  mock_label,
             "#query-input":  mock_ta,
-            "#code-panel":   mock_code,
-            "#code-panel-header": mock_code_hdr,
-            "#code-log":     mock_code_log,
             "#question-banner": mock_qbanner,
             "#question-banner-header": mock_qbanner_hdr,
             "#question-banner-body": mock_qbanner_body,
+            "#workspace-tabs": mock_workspace_tabs,
+            "#timeline-scroll": mock_timeline_scroll,
+            "#changes-pane": mock_changes_pane,
+            "#result-scroll": mock_result_scroll,
+            "#changes-files": mock_changes_files,
+            "#changes-diff": mock_changes_diff,
+            "#result-log": mock_result_log,
         }
         return mapping.get(selector, MagicMock())
 
@@ -81,6 +93,7 @@ def _make_tui() -> OrbTUI:
     tui.action_select     = MagicMock()
     tui.call_after_refresh = MagicMock()
     tui.notify = MagicMock()
+    tui._update_workspace_tabs = MagicMock()
 
     # Store mocks for assertion in tests
     tui._mock_feed = mock_feed
@@ -88,6 +101,7 @@ def _make_tui() -> OrbTUI:
     tui._mock_qbanner_hdr = mock_qbanner_hdr
     tui._mock_qbanner_body = mock_qbanner_body
     tui._mock_ta = mock_ta
+    tui._mock_changes_files = mock_changes_files
     return tui
 
 
@@ -313,7 +327,7 @@ class TestTuiEventHandler:
         })
         assert tui._awaiting_user == "coder"
         assert tui._awaiting_user_question == "⏳ Waiting for user: what framework?"
-        tui._mock_feed.write.assert_called()
+        assert len(tui._timeline_entries) == 1
         tui._mock_qbanner.add_class.assert_called_once_with("visible")
         tui._mock_qbanner_body.update.assert_called_once()
 
@@ -348,6 +362,20 @@ class TestTuiEventHandler:
         })
         assert tui._agents["coder"].last_heartbeat == 123.45
         assert tui._agents["coder"].status == "running"
+
+    def test_file_write_updates_changes_workspace(self):
+        tui = _make_tui()
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._handle_server_event({
+            "type": "file_write",
+            "agent": "coder",
+            "path": "app/main.py",
+            "content": "print('hi')\n",
+            "old_content": "",
+        })
+        assert "app/main.py" in tui._file_changes
+        assert tui._selected_file == "app/main.py"
+        tui._mock_changes_files.write.assert_called()
 
     # ── complete ─────────────────────────────────────────────────────────────
 
@@ -430,7 +458,7 @@ class TestTuiEventHandler:
 
         writes = " ".join(str(call.args[0]) for call in tui.query_one("#detail-log").write.call_args_list)
         assert "Overview" in writes
-        assert "Recent Messages" in writes
+        assert "Recent Transcript" in writes
         assert "Result" in writes
 
     def test_header_bar_shows_waiting_for_user_state(self):
@@ -470,6 +498,13 @@ class TestTuiEventHandler:
         tui.action_show_help()
         tui.push_screen.assert_called_once()
         assert isinstance(tui.push_screen.call_args.args[0], HelpScreen)
+
+    def test_show_commands_pushes_command_screen(self):
+        tui = _make_tui()
+        tui.push_screen = MagicMock()
+        tui.action_show_commands()
+        tui.push_screen.assert_called_once()
+        assert isinstance(tui.push_screen.call_args.args[0], CommandScreen)
 
     # ── stats ─────────────────────────────────────────────────────────────────
 

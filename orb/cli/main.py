@@ -273,7 +273,7 @@ async def async_main() -> None:
 
     # --tui: TUI is always a frontend; backend always runs (port exposed only with --dashboard)
     if args.tui:
-        from .tui import run_tui_with_dashboard, run_tui
+        from .tui import run_tui_with_dashboard, run_tui_async
         if args.dashboard:
             await run_tui_with_dashboard(
                 providers=providers,
@@ -289,7 +289,7 @@ async def async_main() -> None:
             )
         else:
             # No public dashboard: backend on loopback-only port 18080
-            run_tui(
+            await run_tui_async(
                 providers=providers,
                 config=config,
                 model_overrides=model_overrides or None,
