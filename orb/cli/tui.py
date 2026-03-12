@@ -137,6 +137,16 @@ def _budget_bar(routed: int, budget: int, width: int = 10) -> tuple[str, str]:
     return bar, style
 
 
+def _graph_node_status(info: "AgentInfo", tick_count: int) -> tuple[str, str]:
+    if info.activity_text.startswith("⏳ Waiting for user"):
+        return "?", "yellow"
+    if info.activity_text.startswith("wrote "):
+        return "✎", "cyan"
+    if info.status == "running":
+        return SPINNERS[tick_count % len(SPINNERS)], STATUS_COLOR.get(info.status, "green")
+    return STATUS_ICON.get(info.status, "○"), STATUS_COLOR.get(info.status, "dim")
+
+
 # ─── State ───────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -428,19 +438,13 @@ class GraphPanel(Static):
                     if not info:
                         t.append(f"[{agent_id}]", style="dim")
                         continue
-                    icon   = STATUS_ICON.get(info.status, "○")
-                    i_clr  = STATUS_COLOR.get(info.status, "dim")
+                    icon, i_clr = _graph_node_status(info, s._tick_count)
                     color  = AGENT_COLORS.get(agent_id, "white")
                     label  = AGENT_LABELS.get(agent_id, agent_id)
                     sel    = agent_id == s._selected_agent
                     key    = AGENT_KEY_MAP.get(agent_id, "")
                     name_s = f"bold {color}" + (" reverse" if sel else "")
-                    # spinner for running
-                    if info.status == "running":
-                        spin = SPINNERS[s._tick_count % len(SPINNERS)]
-                        t.append(spin + " ", style=f"bold {i_clr}")
-                    else:
-                        t.append(icon + " ", style=f"bold {i_clr}")
+                    t.append(icon + " ", style=f"bold {i_clr}")
                     t.append(label, style=name_s)
                     if key:
                         t.append(f"[{key}]", style="dim")
@@ -465,18 +469,12 @@ class GraphPanel(Static):
             info   = s._agents[agent_id]
             color  = AGENT_COLORS.get(agent_id, "white")
             label  = AGENT_LABELS.get(agent_id, agent_id.title())
-            icon   = STATUS_ICON.get(info.status, "○")
-            i_clr  = STATUS_COLOR.get(info.status, "dim")
+            icon, i_clr = _graph_node_status(info, s._tick_count)
             key    = AGENT_KEY_MAP.get(agent_id, "")
             sel    = agent_id == s._selected_agent
 
-            # Status line
             t.append("  ")
-            if info.status == "running":
-                spin = SPINNERS[s._tick_count % len(SPINNERS)]
-                t.append(spin + " ", style=f"bold {i_clr}")
-            else:
-                t.append(icon + " ", style=f"bold {i_clr}")
+            t.append(icon + " ", style=f"bold {i_clr}")
 
             name_s = f"bold {color}" + (" reverse" if sel else "")
             t.append(label, style=name_s)
@@ -490,6 +488,10 @@ class GraphPanel(Static):
                 meta.append(f"⚡{info.complexity_score}")
             if info.status in ("running", "waiting") and info.time_in_state > 1:
                 meta.append(f"{info.time_in_state:.0f}s")
+            if info.activity_text.startswith("⏳ Waiting for user"):
+                meta.append("ASK")
+            elif info.activity_text.startswith("wrote "):
+                meta.append("FILE")
             if key:
                 meta.append(f"[{key}]")
             if meta:

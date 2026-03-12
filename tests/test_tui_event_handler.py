@@ -8,7 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 
-from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar
+from orb.cli.tui import OrbTUI, AgentInfo, HeaderBar, GraphPanel
 
 
 def _make_tui() -> OrbTUI:
@@ -427,6 +427,13 @@ class TestTuiEventHandler:
         rendered = HeaderBar(tui).render().plain
         assert "USER INPUT" in rendered
         assert "coder" in rendered.lower()
+
+    def test_graph_panel_shows_ask_badge_for_waiting_user(self):
+        tui = _make_tui()
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        tui._agents["coder"].activity_text = "⏳ Waiting for user: choose framework"
+        rendered = GraphPanel(tui).render().plain
+        assert "ASK" in rendered
 
     # ── stats ─────────────────────────────────────────────────────────────────
 
