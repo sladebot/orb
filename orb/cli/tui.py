@@ -18,6 +18,8 @@ from textual.reactive import reactive
 from textual import events, on
 from textual.widgets import Footer, Label, RichLog, Static, TextArea
 
+from .display import pick_primary_result
+
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 AGENT_COLORS: dict[str, str] = {
@@ -234,7 +236,7 @@ class ResultScreen(Screen):
         hdr.update(t)
 
         ftr = self.query_one("#rs-footer", Static)
-        ftr.update("[dim][q/Esc] back  [s] save  [y] copy result  [bold]shift+drag[/bold] terminal select[/dim]")
+        ftr.update("[dim][q/Esc] back  [s] save  [y] copy result  drag to select text[/dim]")
 
         log = self.query_one("#rs-log", RichLog)
 
@@ -279,13 +281,8 @@ class ResultScreen(Screen):
         self.app.pop_screen()
 
     def action_copy_result(self) -> None:
-        """Copy the coordinator/synthesis result to clipboard."""
-        synth_order = ["coordinator"] + [a for a in AGENT_ORDER if a != "coordinator"]
-        text = ""
-        for aid in synth_order:
-            if aid in self._completions:
-                text = self._completions[aid]
-                break
+        """Copy the primary worker result to clipboard."""
+        _, text = pick_primary_result(self._completions)
         if text:
             self.app.copy_to_clipboard(text)
             self.app.notify("Result copied to clipboard", severity="information", timeout=2)
@@ -627,6 +624,9 @@ class TUILogHandler(logging.Handler):
 # ─── Main App ─────────────────────────────────────────────────────────────────
 
 class OrbTUI(App[None]):
+    # Disable Textual's mouse capture so the terminal can handle text selection.
+    # Keyboard navigation (1-6 for agents, tab, etc.) still works fully.
+    ENABLE_MOUSE = False
 
     CSS = """
     Screen {
@@ -700,6 +700,29 @@ class OrbTUI(App[None]):
         background: #0d1117;
         border-top: solid #21262d;
         color: #8b949e;
+    }
+
+    #question-banner {
+        display: none;
+        layout: vertical;
+        background: #1a1f14;
+        border-top: solid #5b4a17;
+        border-bottom: solid #5b4a17;
+        padding: 0 1;
+    }
+
+    #question-banner.visible {
+        display: block;
+    }
+
+    #question-banner-header {
+        height: 1;
+        color: #f2cc60;
+    }
+
+    #question-banner-body {
+        color: #e6edf3;
+        padding: 0 0 1 0;
     }
 
     #query-bar {
@@ -805,6 +828,7 @@ class OrbTUI(App[None]):
         Binding("r",          "show_results", "Results"),
         Binding("ctrl+k",     "cancel_run",   "Cancel run"),
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
+        Binding("ctrl+g",     "cancel_reply", "Clear reply", show=False),
         Binding("y",          "copy_result",  "Copy result"),
         Binding("ctrl+enter", "submit_input", "Send", show=False),
         Binding("1", "select('coordinator')",         show=False),
@@ -820,11 +844,16 @@ class OrbTUI(App[None]):
         server_port: int = 8080,
         topology: str = "triangle",
         show_logs: bool = False,
+        initial_query: str | None = None,
+        exit_after_run: bool = False,
     ) -> None:
         super().__init__()
         self._server_port   = server_port
         self._topology_name = topology
         self._show_logs     = show_logs
+        self._initial_query = initial_query.strip() if initial_query else ""
+        self._exit_after_run = exit_after_run
+        self._initial_query_started = False
 
         # Run state (populated by WebSocket events from backend)
         self._agents: dict[str, AgentInfo] = {}
@@ -841,6 +870,7 @@ class OrbTUI(App[None]):
 
         # User-prompt handling — set when backend reports an agent waiting for user
         self._awaiting_user: str | None = None
+        self._awaiting_user_question: str = ""
 
         # Animation state
         self._tick_count: int = 0
@@ -872,6 +902,10 @@ class OrbTUI(App[None]):
 
         yield ModeBar(state=self, id="mode-bar")
 
+        with Vertical(id="question-banner"):
+            yield Static("", id="question-banner-header")
+            yield Static("", id="question-banner-body")
+
         with Vertical(id="log-panel"):
             yield Static(" Logs  [dim]~/.orb/run.log  ·  orb logs -f to stream outside TUI[/dim]", id="log-panel-header")
             yield RichLog(id="log-feed", highlight=False, markup=True, wrap=True)
@@ -886,8 +920,11 @@ class OrbTUI(App[None]):
         import aiohttp
         self._http_session = aiohttp.ClientSession()
         feed = self.query_one("#message-feed", RichLog)
-        feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. Paste multi-line freely. [bold]y[/bold]=copy result  [bold]shift+drag[/bold]=terminal select[/dim]")
-        self.query_one("#query-input", TextArea).focus()
+        if self._initial_query:
+            feed.write("[dim]Connecting to backend and starting task…[/dim]")
+        else:
+            feed.write("[dim]Ready. Type a task and press [bold]enter[/bold] to send. [bold]y[/bold]=copy result  drag to select &amp; copy text[/dim]")
+            self.query_one("#query-input", TextArea).focus()
         self._elapsed_task = asyncio.create_task(self._tick())
         self._ws_task = asyncio.create_task(self._start_ws_client())
 
@@ -903,6 +940,29 @@ class OrbTUI(App[None]):
     async def on_unmount(self) -> None:
         if self._http_session is not None:
             await self._http_session.close()
+
+    def _show_question_banner(self, agent_id: str, text: str) -> None:
+        banner = self.query_one("#question-banner")
+        header = self.query_one("#question-banner-header", Static)
+        body = self.query_one("#question-banner-body", Static)
+        label = AGENT_LABELS.get(agent_id, agent_id.title())
+        header.update(
+            f"[bold yellow]Replying to {label}[/bold yellow] [dim]Enter to send  Ctrl+G to clear draft[/dim]"
+        )
+        body.update(text)
+        banner.add_class("visible")
+
+    def _hide_question_banner(self) -> None:
+        self.query_one("#question-banner").remove_class("visible")
+        self.query_one("#question-banner-header", Static).update("")
+        self.query_one("#question-banner-body", Static).update("")
+
+    async def _auto_start_initial_query(self) -> None:
+        if self._initial_query_started or not self._initial_query:
+            return
+        self._initial_query_started = True
+        await asyncio.sleep(0)
+        await self._start_new_run(self._initial_query)
 
     # ── Tick / animation ──────────────────────────────────────────────────────
 
@@ -951,7 +1011,9 @@ class OrbTUI(App[None]):
         if self._awaiting_user:
             target = self._awaiting_user
             self._awaiting_user = None
+            self._awaiting_user_question = ""
             self.query_one("#query-label", Label).update(" >  ")
+            self._hide_question_banner()
             await self._post_json("/api/inject", {"to": target, "message": raw})
             return
 
@@ -977,6 +1039,14 @@ class OrbTUI(App[None]):
         else:
             ta.remove_class("inject-mode")
             ta.remove_class("user-reply-mode")
+
+    def action_cancel_reply(self) -> None:
+        if not self._awaiting_user:
+            return
+        ta = self.query_one("#query-input", TextArea)
+        ta.clear()
+        ta.focus()
+        self.notify("Reply draft cleared", severity="information", timeout=2)
 
     async def _start_new_run(self, query: str) -> None:
         self._last_query   = query
@@ -1118,6 +1188,9 @@ class OrbTUI(App[None]):
                     self._agents[aid].messages.append(entry)
             self._write_feed(entry)
 
+        if self._initial_query and not self._initial_query_started and not run_active:
+            asyncio.create_task(self._auto_start_initial_query())
+
         self._refresh_all()
 
     def _on_server_message(self, data: dict) -> None:
@@ -1219,15 +1292,22 @@ class OrbTUI(App[None]):
 
         if text.startswith("⏳ Waiting for user"):
             self._awaiting_user = aid
+            self._awaiting_user_question = text
+            feed = self.query_one("#message-feed", RichLog)
+            feed.write(f"[bold yellow]{aid} asks user:[/bold yellow] {text}")
             self.query_one("#query-label", Label).update(f" ↩ {aid}: ")
             ta = self.query_one("#query-input", TextArea)
             ta.add_class("user-reply-mode")
             ta.remove_class("inject-mode")
             ta.focus()
+            self._show_question_banner(aid, text)
+            self.action_select(aid)
         elif text == "" and self._awaiting_user == aid:
             self._awaiting_user = None
+            self._awaiting_user_question = ""
             self.query_one("#query-label", Label).update(" >  ")
             self.query_one("#query-input", TextArea).remove_class("user-reply-mode")
+            self._hide_question_banner()
 
     def _on_server_complete(self, data: dict) -> None:
         aid    = data.get("agent", "")
@@ -1266,6 +1346,8 @@ class OrbTUI(App[None]):
 
         self.query_one("#query-input", TextArea).focus()
         self._refresh_all()
+        if self._exit_after_run:
+            self.call_after_refresh(self.action_quit)
 
     def _on_server_file_write(self, data: dict) -> None:
         import difflib
@@ -1546,17 +1628,16 @@ class OrbTUI(App[None]):
         self.query_one("#message-feed", RichLog).clear()
 
     def action_copy_result(self) -> None:
-        """Copy the selected agent's result (or synthesis result) to clipboard."""
+        """Copy the selected agent's result or the primary worker result."""
         text = ""
 
         # Prefer selected agent's last completion result
         if self._selected_agent and self._selected_agent in self._completions:
             text = self._completions[self._selected_agent]
 
-        # Fall back to synthesis / first completion
+        # Fall back to the primary worker result
         if not text and self._completions:
-            synth = "coordinator"
-            text = self._completions.get(synth) or next(iter(self._completions.values()), "")
+            _, text = pick_primary_result(self._completions)
 
         # Fall back to code panel content (last written file)
         if not text:
@@ -1595,6 +1676,8 @@ async def _launch(
     show_logs: bool,
     server_port: int,
     server_host: str = "0.0.0.0",
+    initial_query: str | None = None,
+    exit_after_run: bool = False,
 ) -> None:
     from web.server import DashboardServer
     from web.state import DashboardState
@@ -1608,7 +1691,11 @@ async def _launch(
     await server.start()
     try:
         await OrbTUI(
-            server_port=server_port, topology=topology, show_logs=show_logs,
+            server_port=server_port,
+            topology=topology,
+            show_logs=show_logs,
+            initial_query=initial_query,
+            exit_after_run=exit_after_run,
         ).run_async()
     finally:
         await server.stop()
@@ -1623,6 +1710,8 @@ def run_tui(
     budget: int = 200,
     show_logs: bool = False,
     server_port: int = 18080,
+    initial_query: str | None = None,
+    exit_after_run: bool = False,
 ) -> None:
     """TUI-only mode: backend runs on a local-only port."""
     import asyncio
@@ -1631,6 +1720,7 @@ def run_tui(
         model_overrides=model_overrides, tier_override=tier_override,
         topology=topology, show_logs=show_logs,
         server_port=server_port, server_host="127.0.0.1",
+        initial_query=initial_query, exit_after_run=exit_after_run,
     ))
 
 
@@ -1643,6 +1733,8 @@ async def run_tui_with_dashboard(
     budget: int = 200,
     dashboard_port: int = 8080,
     show_logs: bool = False,
+    initial_query: str | None = None,
+    exit_after_run: bool = False,
 ) -> None:
     """TUI + public dashboard: backend serves both the TUI and the browser."""
     await _launch(
@@ -1650,4 +1742,5 @@ async def run_tui_with_dashboard(
         model_overrides=model_overrides, tier_override=tier_override,
         topology=topology, show_logs=show_logs,
         server_port=dashboard_port, server_host="0.0.0.0",
+        initial_query=initial_query, exit_after_run=exit_after_run,
     )

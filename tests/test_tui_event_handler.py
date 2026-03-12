@@ -35,6 +35,10 @@ def _make_tui() -> OrbTUI:
     tui._elapsed_task  = None
     tui._ws_task       = None
     tui._log_handler   = None
+    tui._initial_query = ""
+    tui._exit_after_run = False
+    tui._initial_query_started = False
+    tui._awaiting_user_question = ""
 
     # Stub every widget query so state tests don't need a real Textual app
     mock_feed    = MagicMock()
@@ -46,6 +50,9 @@ def _make_tui() -> OrbTUI:
     mock_code    = MagicMock()
     mock_code_hdr = MagicMock()
     mock_code_log = MagicMock()
+    mock_qbanner = MagicMock()
+    mock_qbanner_hdr = MagicMock()
+    mock_qbanner_body = MagicMock()
 
     def _query_one(selector, *args):
         mapping = {
@@ -58,6 +65,9 @@ def _make_tui() -> OrbTUI:
             "#code-panel":   mock_code,
             "#code-panel-header": mock_code_hdr,
             "#code-log":     mock_code_log,
+            "#question-banner": mock_qbanner,
+            "#question-banner-header": mock_qbanner_hdr,
+            "#question-banner-body": mock_qbanner_body,
         }
         return mapping.get(selector, MagicMock())
 
@@ -67,9 +77,15 @@ def _make_tui() -> OrbTUI:
     tui._append_to_detail = MagicMock()
     tui._update_detail_header = MagicMock()
     tui.action_select     = MagicMock()
+    tui.call_after_refresh = MagicMock()
+    tui.notify = MagicMock()
 
     # Store mocks for assertion in tests
     tui._mock_feed = mock_feed
+    tui._mock_qbanner = mock_qbanner
+    tui._mock_qbanner_hdr = mock_qbanner_hdr
+    tui._mock_qbanner_body = mock_qbanner_body
+    tui._mock_ta = mock_ta
     return tui
 
 
@@ -132,6 +148,35 @@ class TestTuiEventHandler:
             "run_active": False, "completed": False,
         })
         assert tui._topology_name == "dual-review"
+
+    def test_init_with_initial_query_starts_run(self):
+        tui = _make_tui()
+        tui._initial_query = "write hello world"
+        with patch("orb.cli.tui.asyncio.create_task") as create_task:
+            tui._handle_server_event({
+                "type": "init",
+                "agents": [],
+                "edges": [],
+                "messages": [],
+                "stats": {"message_count": 0, "elapsed": 0},
+                "run_active": False,
+                "completed": False,
+            })
+        create_task.assert_called_once()
+        create_task.call_args.args[0].close()
+
+    def test_run_complete_auto_quits_when_enabled(self):
+        tui = _make_tui()
+        tui._exit_after_run = True
+        tui._agents = {"coordinator": AgentInfo("coordinator", "Coordinator")}
+        tui._handle_server_event({
+            "type": "run_complete",
+            "elapsed": 1.2,
+            "routed": 3,
+            "session_turn": 1,
+            "diff": "",
+        })
+        tui.call_after_refresh.assert_called_once_with(tui.action_quit)
 
     def test_init_resets_existing_state(self):
         tui = _make_tui()
@@ -265,16 +310,30 @@ class TestTuiEventHandler:
             "agent": "coder", "activity": "⏳ Waiting for user: what framework?",
         })
         assert tui._awaiting_user == "coder"
+        assert tui._awaiting_user_question == "⏳ Waiting for user: what framework?"
+        tui._mock_feed.write.assert_called()
+        tui._mock_qbanner.add_class.assert_called_once_with("visible")
+        tui._mock_qbanner_body.update.assert_called_once()
 
     def test_agent_activity_empty_clears_awaiting_user(self):
         tui = _make_tui()
         tui._agents = {"coder": AgentInfo("coder", "Coder")}
         tui._awaiting_user = "coder"
+        tui._awaiting_user_question = "⏳ Waiting for user: what framework?"
         tui._handle_server_event({
             "type": "agent_activity",
             "agent": "coder", "activity": "",
         })
         assert tui._awaiting_user is None
+        assert tui._awaiting_user_question == ""
+        tui._mock_qbanner.remove_class.assert_called_once_with("visible")
+
+    def test_cancel_reply_clears_draft(self):
+        tui = _make_tui()
+        tui._awaiting_user = "coder"
+        tui.action_cancel_reply()
+        tui._mock_ta.clear.assert_called_once()
+        tui.notify.assert_called_once()
 
     # ── complete ─────────────────────────────────────────────────────────────
 
