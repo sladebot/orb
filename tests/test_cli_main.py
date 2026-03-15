@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -32,6 +33,11 @@ def _base_args(**overrides) -> Namespace:
         exit_after_run=False,
         verbose=False,
         quiet=True,
+        no_open=False,
+        daemon_action=None,
+        host=None,
+        port=None,
+        workdir=None,
     )
     data.update(overrides)
     return Namespace(**data)
@@ -85,6 +91,22 @@ async def test_async_main_connects_tui_to_existing_daemon():
 
 
 @pytest.mark.asyncio
+async def test_async_main_tui_subcommand_defaults_to_local_daemon():
+    args = _base_args(subcommand="tui", query="hello")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock) as attach_tui, \
+         patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
+        await async_main()
+
+    attach_tui.assert_awaited_once()
+    _, kwargs = attach_tui.call_args
+    assert kwargs["connect_url"] == "http://127.0.0.1:8080"
+    assert kwargs["initial_query"] == "hello"
+
+
+@pytest.mark.asyncio
 async def test_async_main_tui_uses_file_only_logging():
     args = _base_args(tui=True, verbose=True, quiet=False)
 
@@ -124,6 +146,32 @@ async def test_async_main_dashboard_connect_starts_remote_run():
 
 
 @pytest.mark.asyncio
+async def test_async_main_dashboard_subcommand_opens_browser():
+    args = _base_args(subcommand="dashboard", connect="127.0.0.1:9090", query="write hello world")
+
+    fake_response = MagicMock()
+    fake_response.__aenter__ = AsyncMock(return_value=fake_response)
+    fake_response.__aexit__ = AsyncMock(return_value=None)
+    fake_response.json = AsyncMock(return_value={"ok": True})
+
+    fake_session = MagicMock()
+    fake_session.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_session.__aexit__ = AsyncMock(return_value=None)
+    fake_session.post.return_value = fake_response
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("aiohttp.ClientSession", return_value=fake_session), \
+         patch("webbrowser.open") as open_browser, \
+         patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
+        await async_main()
+
+    fake_session.post.assert_called_once()
+    assert fake_session.post.call_args.args[0] == "http://127.0.0.1:9090/api/start"
+    open_browser.assert_called_once_with("http://127.0.0.1:9090")
+
+
+@pytest.mark.asyncio
 async def test_async_main_runs_daemon_server():
     args = _base_args(subcommand="daemon", host="127.0.0.1", port=9090)
     stop_event = AsyncMock()
@@ -147,12 +195,116 @@ async def test_async_main_runs_daemon_server():
          patch("orb.cli.main.print_header"), \
          patch("orb.cli.main.build_providers", return_value={"mock": object()}), \
          patch("logging.basicConfig") as basic_config, \
+         patch("orb.cli.main.tempfile.mkdtemp", return_value="/tmp/orb-daemon-test"), \
+         patch("orb.cli.main.os.chdir") as chdir, \
+         patch("orb.cli.main._save_daemon_state"), \
+         patch("orb.cli.main._clear_daemon_state"), \
          patch("web.server.DashboardServer", FakeDashboardServer), \
          patch("asyncio.Event", return_value=FakeEvent()), \
          patch("asyncio.get_running_loop", return_value=fake_loop):
         await async_main()
 
     basic_config.assert_not_called()
+    chdir.assert_called_once_with(Path("/tmp/orb-daemon-test").resolve())
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_honors_explicit_workdir():
+    args = _base_args(subcommand="daemon", host="127.0.0.1", port=9090, workdir="/tmp/orb-fixed")
+
+    class FakeEvent:
+        async def wait(self):
+            return None
+
+        def set(self):
+            return None
+
+    class FakeDashboardServer:
+        def __init__(self, *_args, **_kwargs):
+            self.set_providers = MagicMock()
+            self.start = AsyncMock()
+            self.stop = AsyncMock()
+
+    fake_loop = MagicMock()
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main.print_header"), \
+         patch("orb.cli.main.build_providers", return_value={"mock": object()}), \
+         patch("orb.cli.main.Path.mkdir") as mkdir, \
+         patch("orb.cli.main.tempfile.mkdtemp", side_effect=AssertionError("should not create temp dir")), \
+         patch("orb.cli.main.os.chdir") as chdir, \
+         patch("web.server.DashboardServer", FakeDashboardServer), \
+         patch("asyncio.Event", return_value=FakeEvent()), \
+         patch("asyncio.get_running_loop", return_value=fake_loop):
+        await async_main()
+
+    mkdir.assert_called()
+    chdir.assert_called_once_with(Path("/tmp/orb-fixed").resolve())
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_start_starts_background_process():
+    args = _base_args(subcommand="daemon", daemon_action="start", host="0.0.0.0", port=8080)
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("orb.cli.main._start_managed_daemon", return_value={
+             "pid": 1234,
+             "host": "0.0.0.0",
+             "port": 8080,
+             "workdir": "/tmp/orb-daemon-x",
+         }) as start_daemon, \
+         patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
+        await async_main()
+
+    start_daemon.assert_called_once_with("0.0.0.0", 8080, None)
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_stop_uses_managed_stop():
+    args = _base_args(subcommand="daemon", daemon_action="stop")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon:
+        await async_main()
+
+    stop_daemon.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_restart_restarts_background_process():
+    args = _base_args(subcommand="daemon", daemon_action="restart")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon, \
+         patch("orb.cli.main._start_managed_daemon", return_value={
+             "pid": 5678,
+             "host": "127.0.0.1",
+             "port": 8080,
+             "workdir": "/tmp/orb-daemon-y",
+         }) as start_daemon:
+        await async_main()
+
+    stop_daemon.assert_awaited_once()
+    start_daemon.assert_called_once_with("127.0.0.1", 8080, None)
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_status_reports_running_process():
+    args = _base_args(subcommand="daemon", daemon_action="status")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._load_daemon_state", return_value={
+             "pid": 4321,
+             "host": "0.0.0.0",
+             "port": 8080,
+             "workdir": "/tmp/orb-daemon-z",
+         }), \
+         patch("orb.cli.main._pid_is_alive", return_value=True), \
+         patch("orb.cli.main._clear_daemon_state") as clear_state:
+        await async_main()
+
+    clear_state.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from ..messaging.message import Message, MessageType
 from .base import AgentNode
 from .conversation import ConversationHistory
 from .prompt_builder import build_system_prompt
+from .request_context import build_request_messages
 from .tools import send_message_tool, complete_task_tool, filesystem_tools
 from .types import AgentConfig, AgentStatus, TopologyContext
 
@@ -49,6 +50,7 @@ class LLMAgent(AgentNode):
         self._model_overrides = model_overrides or {}
         self._selector = ModelSelector(base_complexity=config.base_complexity)
         self._conversation = ConversationHistory(max_messages=config.max_history)
+        self._shared_transcript = None
         self._memory = MemoryGraph()
         self._on_complete = on_complete
         self._on_activity = on_activity
@@ -187,10 +189,21 @@ class LLMAgent(AgentNode):
 
         model_config = candidates[0]
         provider = self._providers[model_config.provider]
+        shared_transcript = ""
+        if self._shared_transcript is not None:
+            shared_transcript = self._shared_transcript.render_for_model(
+                self.node_id,
+                neighbor_ids=sorted(self.neighbors),
+                focus_chain_id=msg.chain_id,
+            )
+        request_messages = build_request_messages(
+            self._conversation.get_messages(),
+            shared_transcript,
+        )
 
         # Call LLM
         request = CompletionRequest(
-            messages=self._conversation.get_messages(),
+            messages=request_messages,
             tools=self._tools,
             system=self._system_prompt,
             model_config=model_config,
@@ -300,7 +313,10 @@ class LLMAgent(AgentNode):
                 )
                 self._conversation.add_user(nudge)
                 request = CompletionRequest(
-                    messages=self._conversation.get_messages(),
+                    messages=build_request_messages(
+                        self._conversation.get_messages(),
+                        shared_transcript,
+                    ),
                     tools=self._tools,
                     system=self._system_prompt,
                     model_config=model_config,
@@ -347,7 +363,10 @@ class LLMAgent(AgentNode):
                     )
                 # All calls were filesystem ops — add results and let the model continue
                 request = CompletionRequest(
-                    messages=self._conversation.get_messages(),
+                    messages=build_request_messages(
+                        self._conversation.get_messages(),
+                        shared_transcript,
+                    ),
                     tools=self._tools,
                     system=self._system_prompt,
                     model_config=model_config,

@@ -439,7 +439,7 @@ class HelpScreen(Screen):
             ("Navigation", [
                 ("/", "Focus the input composer"),
                 ("Tab", "Cycle through agents"),
-                ("1-6", "Inspect a specific agent"),
+                ("1-6 / Ctrl+1-6", "Inspect a specific agent"),
                 ("Esc", "Clear the current selection or close an overlay"),
             ]),
             ("Reply Mode", [
@@ -1085,11 +1085,17 @@ class OrbTUI(App[None]):
         Binding("question_mark", "show_help", "Help", show=False),
         Binding("ctrl+enter", "submit_input", "Send", show=False),
         Binding("1", "select('coordinator')",         show=False),
+        Binding("ctrl+1", "select('coordinator')",    show=False),
         Binding("2", "select('coder')",               show=False),
+        Binding("ctrl+2", "select('coder')",          show=False),
         Binding("3", "select('reviewer')",            show=False),
+        Binding("ctrl+3", "select('reviewer')",       show=False),
         Binding("4", "select('reviewer_a')",          show=False),
+        Binding("ctrl+4", "select('reviewer_a')",     show=False),
         Binding("5", "select('reviewer_b')",          show=False),
+        Binding("ctrl+5", "select('reviewer_b')",     show=False),
         Binding("6", "select('tester')",              show=False),
+        Binding("ctrl+6", "select('tester')",         show=False),
     ]
 
     def __init__(
@@ -1988,7 +1994,7 @@ class OrbTUI(App[None]):
         log  = self.query_one("#detail-log", RichLog)
         log.clear()
         if not self._selected_agent:
-            log.write("[dim]Select an agent with Tab or 1-6 to inspect its state.[/dim]")
+            log.write("[dim]Select an agent with Tab, 1-6, or Ctrl+1-6 to inspect its state.[/dim]")
             return
         info = self._agents.get(self._selected_agent)
         if not info:

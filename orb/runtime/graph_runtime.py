@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from web.state import DashboardState
+from .transcript import RunTranscript
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class GraphRuntime:
         self._conv_carryover: dict[str, list] = {}
         self._turn_count: int = 0
         self._last_result = None
+        self._run_transcript = RunTranscript()
 
     @staticmethod
     def _topology_meta(topology_id: str) -> tuple[str, str, dict[str, str]]:
@@ -146,6 +148,7 @@ class GraphRuntime:
         except Exception as exc:
             logger.exception("Failed to inject message")
             return 500, {"ok": False, "error": str(exc)}
+        self._run_transcript.add_message(msg)
 
         await self._broadcast(json.dumps({
             "type": "message",
@@ -187,6 +190,7 @@ class GraphRuntime:
 
         self.state.reset()
         self._last_result = None
+        self._run_transcript = RunTranscript()
         self.state.run_query = query
         self.state.topology_id = selected_topology
         self.state.topology_label = topology_label
@@ -551,6 +555,8 @@ class GraphRuntime:
 
         await self._broadcast(json.dumps(self.current_init_event() | {"run_active": True}))
         orchestrator.bus.on_event(bridge.on_message_routed)
+        orchestrator.bus.on_event(lambda _event, msg: self._run_transcript.add_message(msg))
+        orchestrator._transcript = self._run_transcript
 
         original_on_complete = orchestrator._on_agent_complete
 
@@ -573,6 +579,7 @@ class GraphRuntime:
         for agent in orchestrator.agents.values():
             agent._on_activity = on_agent_activity
             agent._on_heartbeat = on_agent_heartbeat
+            agent._shared_transcript = self._run_transcript
 
         def _make_file_write_cb(aid: str):
             def cb(_, path: str, content: str, old_content: str = "") -> None:

@@ -88,7 +88,8 @@ class DashboardBridge:
         # Update agent status and msg_count for sender
         if msg.from_ in self.state.agents:
             agent = self.state.agents[msg.from_]
-            agent.status = "running"
+            if agent.status not in {"completed", "error"}:
+                agent.status = "running"
             agent.model = msg.metadata.get("model", agent.model)
             agent.msg_count += 1
             complexity = msg.metadata.get("complexity")
@@ -162,9 +163,10 @@ class DashboardBridge:
         ts = float(payload.get("ts", time.time()))
         status = payload.get("status", "")
         if agent_id in self.state.agents:
-            self.state.agents[agent_id].last_heartbeat = ts
-            if status:
-                self.state.agents[agent_id].status = status
+            agent = self.state.agents[agent_id]
+            agent.last_heartbeat = ts
+            if status and agent.status not in {"completed", "error"}:
+                agent.status = status
 
         await self._send({
             "type": "agent_heartbeat",

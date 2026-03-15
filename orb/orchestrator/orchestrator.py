@@ -46,6 +46,9 @@ class Orchestrator:
 
     async def _on_agent_complete(self, agent_id: str, result: str) -> None:
         self._completions[agent_id] = result
+        transcript = getattr(self, "_transcript", None)
+        if transcript is not None:
+            transcript.add_completion(agent_id, result)
         logger.info(f"Agent {agent_id} completed ({len(self._completions)}/{len(self.agents)})")
 
         synthesis = self.config.synthesis_agent
@@ -67,6 +70,8 @@ class Orchestrator:
                     )
                     try:
                         await other_agent.channel.send(shutdown_msg)
+                        if transcript is not None:
+                            transcript.add_message(shutdown_msg)
                     except Exception:
                         logger.warning(f"Could not send shutdown COMPLETE to {other_id}")
             self._completion_event.set()
@@ -86,6 +91,8 @@ class Orchestrator:
                         )
                         try:
                             await other_agent.channel.send(consensus_msg)
+                            if transcript is not None:
+                                transcript.add_message(consensus_msg)
                         except Exception:
                             logger.warning(f"Could not send consensus COMPLETE to {other_id}")
 
@@ -106,6 +113,8 @@ class Orchestrator:
                     )
                     try:
                         await synth_agent.channel.send(notify_msg)
+                        if transcript is not None:
+                            transcript.add_message(notify_msg)
                     except Exception:
                         logger.warning("Could not notify synthesis agent")
 
@@ -141,6 +150,9 @@ class Orchestrator:
 
         # Direct delivery to entry agent (user is not a graph node)
         await self.agents[entry].channel.send(initial_msg)
+        transcript = getattr(self, "_transcript", None)
+        if transcript is not None:
+            transcript.add_message(initial_msg)
 
         if self._event_logger:
             self._event_logger("injected", initial_msg)

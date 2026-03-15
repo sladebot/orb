@@ -11,6 +11,7 @@ from orb.llm.types import CompletionRequest, CompletionResponse, ToolCall, Model
 from orb.messaging.bus import MessageBus
 from orb.messaging.channel import AgentChannel
 from orb.messaging.message import Message, MessageType
+from orb.runtime.transcript import RunTranscript
 
 
 class MockLLMClient(LLMClient):
@@ -194,6 +195,34 @@ class TestLLMAgent:
         await agent_a.process(msg)
 
         assert agent_a.status == AgentStatus.WAITING
+
+    async def test_model_request_includes_shared_transcript_context(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(
+                    id="tc1",
+                    name="complete_task",
+                    input={"result": "Done"},
+                )],
+            ),
+        ])
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock)
+        transcript = RunTranscript()
+        transcript.add_message(Message(from_="user", to="agent_a", type=MessageType.TASK, payload="Build a CLI tool"))
+        transcript.add_message(Message(from_="agent_b", to="agent_a", type=MessageType.FEEDBACK, payload="Need tests"))
+        agent_a._shared_transcript = transcript
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Continue")
+        await agent_a.process(msg)
+
+        assert mock.requests
+        first_message = mock.requests[0].messages[0]
+        assert first_message["role"] == "user"
+        assert "Shared session transcript" in first_message["content"]
+        assert "Build a CLI tool" in first_message["content"]
+        assert "Need tests" in first_message["content"]
 
     async def test_repeated_directory_listing_uses_turn_cache(self):
         mock = MockLLMClient([

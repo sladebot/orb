@@ -147,8 +147,11 @@ Opens a prompt loop. Submit tasks one at a time; agents are rebuilt fresh each r
 # Start an isolated local backend and open the TUI
 orb --tui
 
-# Attach the TUI to an existing Orb daemon
-orb --tui --connect http://127.0.0.1:8080
+# Preferred daemon client flow
+orb tui
+
+# Attach the TUI to a specific Orb daemon
+orb tui --connect http://127.0.0.1:8080
 ```
 
 Launches a full-screen Textual TUI. Type tasks directly in the input bar. You can submit multiple tasks in sequence without restarting.
@@ -156,26 +159,41 @@ Launches a full-screen Textual TUI. Type tasks directly in the input bar. You ca
 ### Daemon mode
 
 ```bash
-# Local-only daemon
+# Foreground daemon
 orb daemon --host 127.0.0.1 --port 8080
 
-# Reachable from other devices (for example over Tailscale)
-orb daemon --host 0.0.0.0 --port 8080
+# Equivalent explicit foreground form
+orb daemon run --host 127.0.0.1 --port 8080
+
+# Background daemon lifecycle
+orb daemon start --host 0.0.0.0 --port 8080
+orb daemon status
+orb daemon restart --host 0.0.0.0 --port 8080
+orb daemon stop
 ```
 
-The daemon owns the backend runtime, API, WebSocket event stream, and dashboard. Attach UIs to it separately:
+`orb daemon start` creates a managed background process. By default each daemon start gets a fresh temp workspace under `/tmp/orb-daemon-*`; pass `--workdir` to keep a fixed workspace. The daemon owns the backend runtime, API, WebSocket event stream, dashboard, topology selection, and graph execution. Attach UIs to it separately:
 
 ```bash
 # Attach TUI
-orb --tui --connect http://127.0.0.1:8080
+orb tui
+
+# Open the browser dashboard
+orb dashboard
 
 # Start a run remotely, then inspect in the browser dashboard
-orb --dashboard --connect http://127.0.0.1:8080 "build a REST API"
+orb dashboard "build a REST API"
 ```
 
 ### Web dashboard
 
 ```bash
+# Preferred daemon client flow
+orb dashboard
+
+# Start a run on the daemon, then open the dashboard
+orb dashboard "build a REST API"
+
 # Start dashboard and wait for a task from the browser (embedded backend)
 orb --dashboard
 
@@ -187,7 +205,7 @@ orb --dashboard --dashboard-port 3000
 
 # Preferred production flow: run daemon, then open its URL
 orb daemon --host 127.0.0.1 --port 8080
-# open http://127.0.0.1:8080
+orb dashboard
 ```
 
 Opens a WebSocket-backed web UI at `http://localhost:8080`. The canvas graph shows agent nodes and animates edges as messages flow.
@@ -201,7 +219,7 @@ orb --tui --dashboard --dashboard-port 3000
 
 Runs the TUI in the foreground and serves the web dashboard as a sidecar. Both views update from the same event stream.
 
-For persistent or multi-device use, prefer `orb daemon` plus `--connect` instead of the embedded sidecar mode.
+For persistent or multi-device use, prefer `orb daemon` plus `orb tui` / `orb dashboard` instead of the embedded sidecar mode.
 
 ---
 
@@ -263,24 +281,27 @@ The TUI is built with [Textual](https://github.com/Textualize/textual).
 ### Layout
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  ORB  │  Triad  │  msgs 12  │  budget 188  │  Running │  ← stats bar
-├──────────────────────────────────┬──────────────────┤
-│  Topology graph (fixed)          │                  │
-│  ─────────────────────────────── │  Agent detail    │
-│  Agent nodes + latest activity   │  pane (opens     │
-│  (always visible, no scroll)     │  on selection)   │
-├──────────────────────────────────│                  │
-│  Message feed (scrollable)       │                  │
-│                                  │                  │
-├──────────────────────────────────┴──────────────────┤
-│  @ Coordinator [1]  Coder [2]  Reviewer [3] ...     │  ← agent bar
-├─────────────────────────────────────────────────────┤
-│  >  Describe a task…                                │  ← input
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│ ORB  Triad  Running  msgs 12  budget 188  t/d/o  ctrl+p  ?   │
+├──────────────────────────────────────┬────────────────────────┤
+│ Live graph + run health              │ Agent inspector        │
+│ Active nodes, waiting nodes,         │ Selected node status,  │
+│ heartbeat, and last activity         │ neighbors, activity,   │
+│                                      │ transcript, result     │
+├──────────────────────────────────────┼────────────────────────┤
+│ Timeline / Changes / Output          │                        │
+│ Timeline: high-signal activity       │                        │
+│ Changes: changed files + diffs       │                        │
+│ Output: primary + supporting result  │                        │
+├───────────────────────────────────────────────────────────────┤
+│ task > Describe a task…                                     │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-The live panel (top section) is fixed — it always shows the topology graph and each agent's current status with their latest message activity. The message feed below it scrolls independently.
+The graph and inspector stay visible while the center workspace switches between:
+- `Timeline` for routed activity and user questions
+- `Changes` for changed files and diffs
+- `Output` for primary and supporting completions
 
 ### Agent status icons
 
@@ -292,36 +313,33 @@ The live panel (top section) is fixed — it always shows the topology graph and
 | `✓` | completed |
 | `✗` | error |
 
-### Code panel
-
-When an agent writes a file, a **code panel** automatically appears on the right side of the screen. It shows the full file content with line numbers and syntax coloring. The panel header displays the agent name, file path, language, and line count.
-
 ### Agent detail pane
 
 Select any agent to open the detail pane on the right, which shows:
-- Live activity text (what the agent is currently doing)
-- Model name
-- Message count
-- Time in current state
-- Full message history
+- Live status and heartbeat age
+- Topology position and neighbors
+- Current activity text
+- Message count and recent transcript
+- Files touched by that node
 - Completion result (once finished)
 
 ### Keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
-| `1` | Select / inspect Coordinator |
-| `2` | Select / inspect Coder |
-| `3` | Select / inspect Reviewer (or Reviewer A in dual-review) |
-| `4` | Select / inspect Reviewer A (dual-review) |
-| `5` | Select / inspect Reviewer B (dual-review) |
-| `6` | Select / inspect Tester |
+| `t` | Show Timeline |
+| `d` | Show Changes |
+| `o` | Show Output |
+| `Ctrl+P` | Open command launcher |
+| `1-6` or `Ctrl+1-6` | Select / inspect an agent |
 | `Tab` | Cycle to next agent |
 | `Escape` | Deselect / close detail pane |
+| `?` | Open help overlay |
 | `r` | Open result screen (files changed + diff + agent results) |
 | `s` | Save results to file (from result screen) |
-| `y` | Copy result to clipboard (selected agent, or synthesis result) |
+| `y` | Copy result to clipboard (selected agent, or primary result) |
 | `Ctrl+K` | Cancel the current run |
+| `Ctrl+G` | Clear the current reply draft |
 | `Ctrl+L` | Clear the message feed |
 | `/` | Focus the input bar |
 | `Ctrl+C` | Quit |
@@ -342,11 +360,15 @@ Press `r` after a run completes to open the full-screen result screen, which sho
 - Colored diff of all file changes
 - Each agent's final result
 
-Press `s` to save the output to a timestamped markdown file (`orb_result_YYYYMMDD_HHMMSS.md`). Press `y` to copy the synthesis result to the clipboard.
+Press `s` to save the output to a timestamped markdown file (`orb_result_YYYYMMDD_HHMMSS.md`). Press `y` to copy the selected or primary result to the clipboard.
 
 ### Conversational follow-ups
 
-After a run completes, typing a new task continues the session with full context. Each agent's conversation history is preserved across runs, and a session summary is prepended to the new task so agents remember what was built before.
+After a run completes, typing a new task continues the session with full context. Orb now preserves a shared run transcript plus each agent's local execution history, so follow-up tasks carry forward:
+- user requests and replies
+- agent-to-agent messages
+- direct worker completions
+- summarized prior session context
 
 ```
 orb --tui
@@ -388,7 +410,7 @@ Coordinator
    Tester ────────╯
 ```
 
-Four agents: Coordinator routes and synthesizes; Coder writes and iterates; Reviewer checks for correctness, style, and edge cases; Tester writes and runs test cases.
+Four agents: Coordinator routes inputs through the graph; Coder writes and iterates; Reviewer checks correctness and edge cases; Tester validates behavior. The coordinator does not synthesize task content itself.
 
 ```bash
 orb --topology triangle "write a binary search tree"
@@ -594,11 +616,15 @@ Bus events (`injected`, `routed`) are emitted to registered listeners — the te
 
 ### Orchestrator
 
-The `Orchestrator` wires agents to channels, injects the initial task into the entry agent (`coordinator`), and monitors completion. When all worker agents have called `complete_task`, the orchestrator notifies the synthesis agent (also `coordinator`) to produce the final answer, then shuts down remaining agents.
+The `Orchestrator` wires agents to channels, injects the initial task into the entry agent (`coordinator`), and monitors completion. The coordinator is a router, not a synthesis agent. Runtime state, topology choice, and completion tracking live in the backend daemon so the TUI and dashboard remain subscriber-only clients.
 
 ### Agent
 
-Each `LLMAgent` holds an `AgentChannel` (async queue), a system prompt built from its role description and neighbor roster, and a rolling conversation history. On each turn, the agent calls the LLM with a tool set:
+Each `LLMAgent` holds an `AgentChannel` (async queue), a system prompt built from its role description and neighbor roster, local execution history, and access to the shared run transcript. On each turn, the agent calls the LLM with:
+- a filtered shared transcript window
+- its local execution/tool history
+- topology context and neighbor roster
+- the tool set below
 
 | Tool | Description |
 |------|-------------|
@@ -609,11 +635,11 @@ Each `LLMAgent` holds an `AgentChannel` (async queue), a system prompt built fro
 | `list_directory` | List files in a directory |
 | `run_command` | Execute a shell command in the sandbox |
 
-If the LLM returns a text-only response (no tool call), the agent nudges it up to 3 times before giving up. If the preferred model fails, the agent walks through a prioritized fallback list of available providers and tiers.
+If the LLM returns a text-only response (no tool call), the agent nudges it up to 3 times before giving up. If the preferred model fails, the agent walks through a prioritized fallback list of available providers and tiers. Heartbeats are emitted while agents are live so subscriber UIs can show liveness without owning runtime logic.
 
 ### Sandbox
 
-Agents with `enable_filesystem=True` share a `Sandbox` scoped to the current working directory. All file writes and command executions are routed through the sandbox.
+Agents with `enable_filesystem=True` share a `Sandbox` scoped to the daemon workspace. For foreground CLI runs that is the current working directory; for `orb daemon` it is the daemon workdir (by default a fresh `/tmp/orb-daemon-*` directory). All file writes and command executions are routed through the sandbox.
 
 ### Web dashboard
 
@@ -624,7 +650,7 @@ Browser (vanilla JS) ←─ WebSocket ─→ aiohttp server ←─ events ─→
       stats bar                       / (static files)
 ```
 
-The `DashboardBridge` adapts raw bus events into JSON state updates broadcast to all connected clients.
+The `DashboardBridge` adapts raw bus events into JSON state updates broadcast to all connected clients. The daemon is authoritative for agent lifecycle state, topology metadata, and graph rendering data; the TUI and dashboard render that state rather than recreating orchestration locally.
 
 ---
 

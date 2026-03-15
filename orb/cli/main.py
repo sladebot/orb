@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import signal
+import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -19,6 +25,7 @@ from .repl import run_repl
 
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
+DAEMON_STATE_FILE = os.path.join(tempfile.gettempdir(), "orb-daemon.json")
 _LEVEL_COLORS = {
     "DEBUG":    "\033[2m",       # dim
     "INFO":     "\033[36m",      # cyan
@@ -131,9 +138,32 @@ def parse_args() -> argparse.Namespace:
     cfg_set.add_argument("value", help="New value (e.g. false)")
 
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+    tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
+    tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
+    tui_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    tui_parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Requested topology when starting a new run")
+    tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
+    tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
+    tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
+    dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
+    dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
+    dashboard_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    dashboard_parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Requested topology when starting a new run")
+    dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
+    daemon_common = argparse.ArgumentParser(add_help=False)
+    daemon_common.add_argument("--host", default=None, help="Daemon bind host")
+    daemon_common.add_argument("--port", type=int, default=None, help="Daemon bind port")
+    daemon_common.add_argument("--workdir", type=str, help="Daemon workspace directory")
     daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
     daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
     daemon_parser.add_argument("--port", type=int, default=8080, help="Daemon bind port (default: 8080)")
+    daemon_parser.add_argument("--workdir", type=str, help="Daemon workspace directory (default: create a fresh /tmp/orb-daemon-* dir each start)")
+    daemon_sub = daemon_parser.add_subparsers(dest="daemon_action")
+    daemon_sub.add_parser("run", parents=[daemon_common], help="Run the daemon in the foreground")
+    daemon_sub.add_parser("start", parents=[daemon_common], help="Start the daemon in the background")
+    daemon_sub.add_parser("restart", parents=[daemon_common], help="Restart the managed daemon")
+    daemon_sub.add_parser("stop", help="Stop the managed daemon")
+    daemon_sub.add_parser("status", help="Show managed daemon status")
 
     # Main run args (attached to the root parser so 'orb <query>' still works)
     parser.add_argument("query", nargs="?", help="Task query (omit for interactive mode)")
@@ -159,6 +189,147 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="Enable verbose logging (default: on)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose logging")
     return parser.parse_args()
+
+
+def _normalize_connect_url(url: str | None, default: str = "http://127.0.0.1:8080") -> str:
+    base = (url or default).rstrip("/")
+    if "://" not in base:
+        base = f"http://{base}"
+    return base
+
+
+def _resolve_daemon_workdir(workdir: str | None) -> Path:
+    if workdir:
+        path = Path(workdir).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return Path(tempfile.mkdtemp(prefix="orb-daemon-", dir="/tmp")).resolve()
+
+
+def _daemon_state_path() -> Path:
+    return Path(DAEMON_STATE_FILE)
+
+
+def _load_daemon_state() -> dict | None:
+    path = _daemon_state_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _save_daemon_state(*, pid: int, host: str, port: int, workdir: Path) -> None:
+    path = _daemon_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "pid": pid,
+        "host": host,
+        "port": port,
+        "workdir": str(workdir),
+        "started_at": time.time(),
+    }))
+
+
+def _clear_daemon_state(expected_pid: int | None = None) -> None:
+    path = _daemon_state_path()
+    if not path.exists():
+        return
+    if expected_pid is not None:
+        state = _load_daemon_state()
+        if state and int(state.get("pid", -1)) != expected_pid:
+            return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _daemon_command(host: str, port: int, workdir: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "orb.cli.main",
+        "daemon",
+        "run",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--workdir",
+        str(workdir),
+    ]
+
+
+def _start_managed_daemon(host: str, port: int, workdir: str | None) -> dict:
+    active = _load_daemon_state()
+    if active and _pid_is_alive(int(active.get("pid", -1))):
+        raise RuntimeError(f"Orb daemon already running (pid {active['pid']})")
+
+    resolved_workdir = _resolve_daemon_workdir(workdir)
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    log_handle = open(LOG_FILE, "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        _daemon_command(host, port, resolved_workdir),
+        stdin=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
+        start_new_session=True,
+        close_fds=True,
+    )
+    log_handle.close()
+    time.sleep(0.5)
+    if proc.poll() is not None:
+        raise RuntimeError(f"Orb daemon failed to start (exit code {proc.returncode}). Check {LOG_FILE}")
+    _save_daemon_state(pid=proc.pid, host=host, port=port, workdir=resolved_workdir)
+    return {
+        "pid": proc.pid,
+        "host": host,
+        "port": port,
+        "workdir": str(resolved_workdir),
+    }
+
+
+async def _stop_managed_daemon() -> bool:
+    state = _load_daemon_state()
+    if not state:
+        print("  Orb daemon is not running.")
+        return False
+
+    pid = int(state.get("pid", -1))
+    if pid <= 0 or not _pid_is_alive(pid):
+        _clear_daemon_state()
+        print("  Orb daemon is not running.")
+        return False
+
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if not _pid_is_alive(pid):
+            _clear_daemon_state(expected_pid=pid)
+            print(f"  Stopped Orb daemon (pid {pid}).")
+            return True
+        await asyncio.sleep(0.1)
+
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not _pid_is_alive(pid):
+            _clear_daemon_state(expected_pid=pid)
+            print(f"  Force-stopped Orb daemon (pid {pid}).")
+            return True
+        await asyncio.sleep(0.1)
+
+    raise RuntimeError(f"Failed to stop Orb daemon pid {pid}")
 
 
 async def async_main() -> None:
@@ -214,11 +385,49 @@ async def async_main() -> None:
         return
 
     if args.subcommand == "daemon":
+        daemon_action = getattr(args, "daemon_action", None)
+        if daemon_action == "status":
+            state = _load_daemon_state()
+            if not state or not _pid_is_alive(int(state.get("pid", -1))):
+                _clear_daemon_state()
+                print("  Orb daemon is not running.")
+                return
+            print(f"  Orb daemon is running (pid {state['pid']})")
+            print(f"  URL:       http://{state['host']}:{state['port']}")
+            print(f"  Workspace: {state['workdir']}")
+            return
+        if daemon_action == "stop":
+            await _stop_managed_daemon()
+            return
+        if daemon_action == "restart":
+            await _stop_managed_daemon()
+            host = args.host or "127.0.0.1"
+            port = args.port or 8080
+            info = _start_managed_daemon(host, port, args.workdir)
+            print(f"  Restarted Orb daemon (pid {info['pid']})")
+            print(f"  URL:       http://{info['host']}:{info['port']}")
+            print(f"  Workspace: {info['workdir']}")
+            return
+        if daemon_action == "start":
+            host = args.host or "127.0.0.1"
+            port = args.port or 8080
+            info = _start_managed_daemon(host, port, args.workdir)
+            print(f"  Started Orb daemon (pid {info['pid']})")
+            print(f"  URL:       http://{info['host']}:{info['port']}")
+            print(f"  Workspace: {info['workdir']}")
+            return
+
         from web.server import DashboardServer
         from web.state import DashboardState
 
+        daemon_host = args.host or "127.0.0.1"
+        daemon_port = args.port or 8080
+        daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
+        os.chdir(daemon_workdir)
+        _save_daemon_state(pid=os.getpid(), host=daemon_host, port=daemon_port, workdir=daemon_workdir)
+
         dash_state = DashboardState()
-        dashboard_server = DashboardServer(dash_state, host=args.host, port=args.port)
+        dashboard_server = DashboardServer(dash_state, host=daemon_host, port=daemon_port)
         dashboard_server.set_providers(
             providers=build_providers(local_only=False, cloud_only=False),
             config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
@@ -228,9 +437,10 @@ async def async_main() -> None:
 
         await dashboard_server.start()
         print_header()
-        print(f"  Orb daemon listening at http://{args.host}:{args.port}")
-        print("  TUI attach: orb --tui --connect http://127.0.0.1:{0}".format(args.port))
-        print(f"  Dashboard:  http://{args.host}:{args.port}")
+        print(f"  Orb daemon listening at http://{daemon_host}:{daemon_port}")
+        print(f"  Workspace:  {daemon_workdir}")
+        print("  TUI attach: orb tui --connect http://127.0.0.1:{0}".format(daemon_port))
+        print(f"  Dashboard:  http://{daemon_host}:{daemon_port}")
         print("  Press Ctrl-C to shut down.\n")
 
         stop_event = asyncio.Event()
@@ -247,6 +457,7 @@ async def async_main() -> None:
         except asyncio.CancelledError:
             pass
         finally:
+            _clear_daemon_state(expected_pid=os.getpid())
             await dashboard_server.stop()
         return
 
@@ -256,7 +467,7 @@ async def async_main() -> None:
         return
 
     fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
-    file_only_logging = bool(args.tui) or args.subcommand == "daemon"
+    file_only_logging = bool(args.tui) or args.subcommand in {"daemon", "tui"}
     if file_only_logging:
         level = logging.DEBUG if args.verbose and not args.quiet else logging.WARNING
         logging.basicConfig(level=level, format=fmt, handlers=[], force=True)
@@ -269,6 +480,73 @@ async def async_main() -> None:
 
     # Always write to ~/.orb/run.log so 'orb logs' can stream it
     _setup_log_file(fmt)
+
+    if args.subcommand == "tui":
+        from .tui import attach_tui
+
+        await attach_tui(
+            connect_url=_normalize_connect_url(args.connect),
+            topology=args.topology,
+            budget=args.budget,
+            show_logs=args.logs,
+            initial_query=args.query,
+            exit_after_run=args.exit_after_run,
+        )
+        return
+
+    if args.subcommand == "dashboard":
+        import aiohttp
+        import webbrowser
+
+        base = _normalize_connect_url(args.connect)
+
+        if args.query:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{base}/api/start", json={
+                    "query": args.query,
+                    "topology": args.topology,
+                }) as resp:
+                    payload = await resp.json()
+                    if not payload.get("ok"):
+                        print_error(payload.get("error", "Failed to start run"))
+                        sys.exit(1)
+                    print("  Started run on daemon.")
+        if not args.no_open:
+            webbrowser.open(base)
+        print(f"  Open dashboard at {base}")
+        return
+
+    if args.tui and args.connect:
+        from .tui import attach_tui
+
+        await attach_tui(
+            connect_url=_normalize_connect_url(args.connect),
+            topology=args.topology,
+            budget=args.budget,
+            show_logs=args.logs,
+            initial_query=args.query,
+            exit_after_run=args.exit_after_run,
+        )
+        return
+
+    if args.dashboard and args.connect:
+        import aiohttp
+
+        base = _normalize_connect_url(args.connect)
+
+        if args.query:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{base}/api/start", json={
+                    "query": args.query,
+                    "topology": args.topology,
+                }) as resp:
+                    payload = await resp.json()
+                    if not payload.get("ok"):
+                        print_error(payload.get("error", "Failed to start run"))
+                        sys.exit(1)
+                    print("  Started run on daemon.")
+        print(f"  Open dashboard at {base}")
+        return
 
     trace = args.trace and not args.no_trace
     providers = build_providers(
@@ -317,19 +595,9 @@ async def async_main() -> None:
     elif args.cloud_only:
         tier_override = ModelTier.CLOUD_FAST
 
-    # --tui: TUI is always a frontend; backend always runs (port exposed only with --dashboard)
+    # --tui: legacy embedded TUI mode; prefer `orb tui` to attach to a daemon
     if args.tui:
-        from .tui import attach_tui, run_tui_with_dashboard, run_tui_async
-        if args.connect:
-            await attach_tui(
-                connect_url=args.connect,
-                topology=args.topology,
-                budget=args.budget,
-                show_logs=args.logs,
-                initial_query=args.query,
-                exit_after_run=args.exit_after_run,
-            )
-            return
+        from .tui import run_tui_with_dashboard, run_tui_async
         if args.dashboard:
             await run_tui_with_dashboard(
                 providers=providers,
@@ -356,27 +624,6 @@ async def async_main() -> None:
                 initial_query=args.query,
                 exit_after_run=args.exit_after_run,
             )
-        return
-
-    if args.dashboard and args.connect:
-        import aiohttp
-
-        base = args.connect.rstrip("/")
-        if "://" not in base:
-            base = f"http://{base}"
-
-        if args.query:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{base}/api/start", json={
-                    "query": args.query,
-                    "topology": args.topology,
-                }) as resp:
-                    payload = await resp.json()
-                    if not payload.get("ok"):
-                        print_error(payload.get("error", "Failed to start run"))
-                        sys.exit(1)
-                    print("  Started run on daemon.")
-        print(f"  Open dashboard at {base}")
         return
 
     # --dashboard without a query: serve the UI and wait for the browser to start a run
