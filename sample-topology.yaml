@@ -1,0 +1,144 @@
+version: "1.0"
+
+# Sample custom topology — copy this file to ~/.orb/topologies.yaml
+# (or merge its topologies block into an existing one)
+# and it will be picked up automatically by Orb at startup.
+#
+# This file defines a "Research & Build" pipeline:
+# a 6-agent topology where a Researcher investigates the problem space
+# before implementation begins, and a Security Reviewer runs in parallel
+# with the Code Reviewer to catch vulnerabilities independently.
+#
+# Graph:
+#
+#            Coordinator
+#                 │
+#            Researcher
+#                 │
+#               Coder
+#              ╱     ╲
+#    Security Rev   Code Rev
+#              ╲     ╱
+#               Tester
+
+topologies:
+  research-build:
+    id: "research-build"
+    label: "Research & Build"
+    description: "Researcher investigates before implementation; dual reviewers cover correctness and security."
+    entry_agent: "coordinator"
+
+    agents:
+      coordinator:
+        role: "Coordinator"
+        description: >
+          You are the routing coordinator for this team.
+          When you receive the user's task, send it to the Researcher first — they
+          will investigate requirements and context before any code is written.
+          Do NOT answer the task, do NOT write code, and do NOT analyze the task yourself.
+          You only route work and surface direct user clarifications to the correct node.
+        base_complexity: 20
+        suppress_context_guidelines: true
+
+      researcher:
+        role: "Researcher"
+        description: >
+          You investigate the problem space before implementation begins.
+          Analyse the task requirements, identify edge cases, look up relevant
+          patterns, and produce a concise research brief that the Coder can act on.
+          Use the sandbox to read any existing code or files that are relevant.
+          When your brief is ready, send it to the Coder along with the original task.
+        base_complexity: 55
+        enable_filesystem: true
+
+      coder:
+        role: "Coder"
+        description: >
+          You implement the solution based on the Researcher's brief and the original task.
+          Use the shared sandbox to write, read, and run code.
+          Once your implementation is in place, hand it off to both the Security Reviewer
+          and the Code Reviewer simultaneously so they can work in parallel.
+          Incorporate all feedback before marking your work complete.
+        base_complexity: 60
+        enable_filesystem: true
+
+      security_reviewer:
+        role: "Security Reviewer"
+        description: >
+          You review the implementation specifically for security vulnerabilities:
+          injection flaws, insecure defaults, sensitive data exposure, authentication
+          gaps, and dependency risks.
+          Read the relevant files from the sandbox, produce a concrete list of findings,
+          and communicate them directly to the Coder.
+          Coordinate with the Code Reviewer if you find issues that overlap with
+          correctness or logic.
+        base_complexity: 70
+        enable_filesystem: true
+
+      code_reviewer:
+        role: "Code Reviewer"
+        description: >
+          You review the implementation for correctness, code quality, edge cases,
+          and maintainability. Read files from the sandbox and send actionable
+          feedback to the Coder.
+          Coordinate with the Security Reviewer if findings overlap.
+          Do not approve until the Coder has addressed your feedback.
+        base_complexity: 65
+        enable_filesystem: true
+
+      tester:
+        role: "Tester"
+        description: >
+          You validate the implementation by writing and running tests in the sandbox.
+          Cover the happy path, edge cases, and any specific scenarios raised by
+          the Security Reviewer or Code Reviewer.
+          Report concrete pass/fail results to the Coder and both reviewers.
+        base_complexity: 35
+        enable_filesystem: true
+
+    edges:
+      - [coordinator, researcher]
+      - [researcher, coder]
+      - [coder, security_reviewer]
+      - [coder, code_reviewer]
+      - [security_reviewer, coder]
+      - [code_reviewer, coder]
+      - [security_reviewer, code_reviewer]
+      - [code_reviewer, security_reviewer]
+      - [coder, tester]
+      - [tester, coder]
+      - [tester, security_reviewer]
+      - [tester, code_reviewer]
+
+    workflow_steps:
+      - "Coordinator receives the user task and routes it to the Researcher."
+      - "Researcher investigates requirements, patterns, and edge cases, then briefs the Coder."
+      - "Coder implements the solution in the shared sandbox."
+      - "Coder hands the work to Security Reviewer and Code Reviewer simultaneously."
+      - "Security Reviewer checks for vulnerabilities; Code Reviewer checks for correctness."
+      - "Reviewers coordinate with each other on overlapping findings."
+      - "Tester writes and runs tests, reporting results back to the Coder and reviewers."
+      - "Each node completes only after finishing its own role in the workflow."
+
+    completion_rules:
+      coordinator:
+        - "Route the incoming task to the Researcher without solving it yourself."
+        - "Complete after the initial routing."
+      researcher:
+        - "Produce a concrete research brief before completing."
+        - "Forward the brief and the original task text to the Coder."
+      coder:
+        - "Do not complete immediately after first-pass implementation."
+        - "Hand off to both Security Reviewer and Code Reviewer before completing."
+        - "Address all reviewer and tester feedback before marking work done."
+      security_reviewer:
+        - "Review files in the sandbox for security issues before completing."
+        - "Send a specific list of findings to the Coder."
+        - "Coordinate with the Code Reviewer on any findings that overlap."
+      code_reviewer:
+        - "Review files in the sandbox for correctness and quality before completing."
+        - "Send actionable feedback to the Coder."
+        - "Coordinate with the Security Reviewer on overlapping findings."
+      tester:
+        - "Write and run tests covering happy path and edge cases before completing."
+        - "Report concrete pass/fail results to the Coder and both reviewers."
