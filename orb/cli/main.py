@@ -6,11 +6,15 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+from importlib import resources
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -25,7 +29,7 @@ from .repl import run_repl
 
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
-DAEMON_STATE_FILE = os.path.join(tempfile.gettempdir(), "orb-daemon.json")
+DAEMON_STATE_FILE = os.path.join(os.path.expanduser("~"), ".orb", "daemon.json")
 _LEVEL_COLORS = {
     "DEBUG":    "\033[2m",       # dim
     "INFO":     "\033[36m",      # cyan
@@ -138,17 +142,21 @@ def parse_args() -> argparse.Namespace:
     cfg_set.add_argument("value", help="New value (e.g. false)")
 
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+    topologies_parser = subparsers.add_parser("topologies", help="Manage user topology definitions")
+    topologies_sub = topologies_parser.add_subparsers(dest="topologies_action")
+    topologies_init = topologies_sub.add_parser("init", help="Create ~/.orb/topologies.yaml from the bundled sample")
+    topologies_init.add_argument("--force", action="store_true", help="Overwrite ~/.orb/topologies.yaml if it already exists")
     tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     tui_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
-    tui_parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Requested topology when starting a new run")
+    tui_parser.add_argument("--topology", choices=["auto", "triad", "dual-review", "hierarchy"], default="auto", help="Requested topology when starting a new run")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
     tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
-    dashboard_parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Requested topology when starting a new run")
+    dashboard_parser.add_argument("--topology", choices=["auto", "triad", "dual-review", "hierarchy"], default="auto", help="Requested topology when starting a new run")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
     daemon_common.add_argument("--host", default=None, help="Daemon bind host")
@@ -162,8 +170,8 @@ def parse_args() -> argparse.Namespace:
     daemon_sub.add_parser("run", parents=[daemon_common], help="Run the daemon in the foreground")
     daemon_sub.add_parser("start", parents=[daemon_common], help="Start the daemon in the background")
     daemon_sub.add_parser("restart", parents=[daemon_common], help="Restart the managed daemon")
-    daemon_sub.add_parser("stop", help="Stop the managed daemon")
-    daemon_sub.add_parser("status", help="Show managed daemon status")
+    daemon_sub.add_parser("stop", parents=[daemon_common], help="Stop the managed daemon")
+    daemon_sub.add_parser("status", parents=[daemon_common], help="Show managed daemon status")
 
     # Main run args (attached to the root parser so 'orb <query>' still works)
     parser.add_argument("query", nargs="?", help="Task query (omit for interactive mode)")
@@ -196,6 +204,18 @@ def _normalize_connect_url(url: str | None, default: str = "http://127.0.0.1:808
     if "://" not in base:
         base = f"http://{base}"
     return base
+
+
+def _init_topologies_file(force: bool = False) -> Path:
+    from orb.topologies.loader import USER_TOPOLOGIES_PATH
+
+    target = USER_TOPOLOGIES_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not force:
+        raise FileExistsError(f"{target} already exists. Use --force to overwrite it.")
+    sample = resources.files("orb").joinpath("sample-topology.yaml").read_text()
+    target.write_text(sample)
+    return target
 
 
 def _resolve_daemon_workdir(workdir: str | None) -> Path:
@@ -270,10 +290,54 @@ def _daemon_command(host: str, port: int, workdir: Path) -> list[str]:
     ]
 
 
+def _port_in_use(host: str, port: int) -> bool:
+    probe_host = "" if host == "0.0.0.0" else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((probe_host, port))
+        except OSError:
+            return True
+    return False
+
+
+def _find_listening_pid(port: int) -> int | None:
+    try:
+        proc = subprocess.run(
+            ["lsof", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return None
+    output = (proc.stdout or "").strip().splitlines()
+    if not output:
+        return None
+    try:
+        return int(output[0].strip())
+    except ValueError:
+        return None
+
+
+def _port_looks_like_orb_daemon(host: str, port: int) -> bool:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    try:
+        with urlopen(f"http://{probe_host}:{port}/api/state", timeout=0.75) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return False
+    return body.get("type") == "init"
+
+
 def _start_managed_daemon(host: str, port: int, workdir: str | None) -> dict:
     active = _load_daemon_state()
     if active and _pid_is_alive(int(active.get("pid", -1))):
         raise RuntimeError(f"Orb daemon already running (pid {active['pid']})")
+    if _port_in_use(host, port):
+        raise RuntimeError(
+            f"Port {port} is already in use. Stop the existing daemon or choose a different --port."
+        )
 
     resolved_workdir = _resolve_daemon_workdir(workdir)
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -299,18 +363,38 @@ def _start_managed_daemon(host: str, port: int, workdir: str | None) -> dict:
     }
 
 
-async def _stop_managed_daemon() -> bool:
+async def _stop_managed_daemon(port: int = 8080) -> bool:
     state = _load_daemon_state()
     if not state:
-        print("  Orb daemon is not running.")
-        return False
+        pid = _find_listening_pid(port)
+        if pid is None:
+            print("  Orb daemon is not running.")
+            return False
+        if not _port_looks_like_orb_daemon("127.0.0.1", port):
+            raise RuntimeError(
+                f"Port {port} is occupied by pid {pid}, but it does not look like an Orb daemon."
+            )
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not _pid_is_alive(pid):
+                print(f"  Stopped Orb daemon on port {port} (pid {pid}).")
+                return True
+            await asyncio.sleep(0.1)
+        os.kill(pid, signal.SIGKILL)
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if not _pid_is_alive(pid):
+                print(f"  Force-stopped Orb daemon on port {port} (pid {pid}).")
+                return True
+            await asyncio.sleep(0.1)
+        raise RuntimeError(f"Failed to stop Orb daemon pid {pid}")
 
     pid = int(state.get("pid", -1))
     if pid <= 0 or not _pid_is_alive(pid):
         _clear_daemon_state()
         print("  Orb daemon is not running.")
         return False
-
     os.kill(pid, signal.SIGTERM)
     deadline = time.time() + 5.0
     while time.time() < deadline:
@@ -384,23 +468,44 @@ async def async_main() -> None:
         await run_onboarding()
         return
 
+    if args.subcommand == "topologies":
+        if getattr(args, "topologies_action", None) == "init":
+            try:
+                target = _init_topologies_file(force=getattr(args, "force", False))
+            except FileExistsError as exc:
+                print_error(str(exc))
+                sys.exit(1)
+            print(f"Initialized topology file at {target}")
+            return
+        print_error("Unknown topologies command")
+        sys.exit(1)
+
     if args.subcommand == "daemon":
         daemon_action = getattr(args, "daemon_action", None)
         if daemon_action == "status":
             state = _load_daemon_state()
             if not state or not _pid_is_alive(int(state.get("pid", -1))):
                 _clear_daemon_state()
-                print("  Orb daemon is not running.")
+                port = args.port or 8080
+                pid = _find_listening_pid(port)
+                if pid is None:
+                    print("  Orb daemon is not running.")
+                    return
+                if _port_looks_like_orb_daemon("127.0.0.1", port):
+                    print(f"  Orb daemon is running on port {port} (pid {pid})")
+                    print("  State:     unmanaged")
+                    return
+                print(f"  Port {port} is occupied by pid {pid}, but it is not an Orb daemon.")
                 return
             print(f"  Orb daemon is running (pid {state['pid']})")
             print(f"  URL:       http://{state['host']}:{state['port']}")
             print(f"  Workspace: {state['workdir']}")
             return
         if daemon_action == "stop":
-            await _stop_managed_daemon()
+            await _stop_managed_daemon(args.port or 8080)
             return
         if daemon_action == "restart":
-            await _stop_managed_daemon()
+            await _stop_managed_daemon(args.port or 8080)
             host = args.host or "127.0.0.1"
             port = args.port or 8080
             info = _start_managed_daemon(host, port, args.workdir)
@@ -672,7 +777,7 @@ async def async_main() -> None:
             model_overrides=model_overrides or None,
             trace=trace,
             tier_override=tier_override,
-            topology=args.topology if args.topology != "auto" else "triangle",
+            topology=args.topology if args.topology != "auto" else "triad",
         )
     else:
         print_header()
@@ -681,7 +786,7 @@ async def async_main() -> None:
         orchestrator = None
 
         if not args.dashboard and trace:
-            topology_id = args.topology if args.topology != "auto" else "triangle"
+            topology_id = args.topology if args.topology != "auto" else "triad"
             orchestrator = create_orchestrator(
                 topology_id,
                 providers=providers,

@@ -101,7 +101,7 @@ class TestServerAPI:
     async def test_api_start_accepts_valid_request(self, client):
         resp = await client.post("/api/start", json={
             "query": "write hello world",
-            "topology": "triangle",
+            "topology": "triad",
         })
         assert resp.status == 200
         data = await resp.json()
@@ -110,11 +110,11 @@ class TestServerAPI:
     async def test_api_start_rejects_concurrent_run(self, client):
         # Start first run
         await client.post("/api/start", json={
-            "query": "task 1", "topology": "triangle",
+            "query": "task 1", "topology": "triad",
         })
         # Immediately try second run — should be rejected
         resp = await client.post("/api/start", json={
-            "query": "task 2", "topology": "triangle",
+            "query": "task 2", "topology": "triad",
         })
         data = await resp.json()
         assert data["ok"] is False

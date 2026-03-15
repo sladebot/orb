@@ -2,7 +2,7 @@
 
 ## Overview
 
-An LLM agent harness where agents are **graph nodes** (not a hierarchy) with **bidirectional communication** via Go-style async channels. The first demo is 3 agents (Coder, Reviewer, Tester) in a fully-connected triangle.
+An LLM agent harness where agents are **graph nodes** (not a hierarchy) with **bidirectional communication** via Go-style async channels. The first demo is 3 agents (Coder, Reviewer, Tester) in a fully-connected triad.
 
 **Stack:** Python 3.12, asyncio, multi-provider LLM (Anthropic, OpenAI, Ollama)
 **Environment:** conda (`orb`)
@@ -30,7 +30,7 @@ An LLM agent harness where agents are **graph nodes** (not a hierarchy) with **b
 |------|-------------|-------|--------------|
 | G1.1 | Implement `NodeId` type alias and `Edge` dataclass with undirected equality | `orb/graph/types.py` | — |
 | G1.2 | Implement `Graph` class — adjacency dict, `add_node`, `add_edge`, `remove_node`, `remove_edge`, `get_neighbors`, `has_edge`, `nodes`/`edges` properties | `orb/graph/graph.py` | G1.1 |
-| G1.3 | Write graph unit tests — add/remove nodes, neighbor queries, edge validation, triangle topology | `tests/test_graph.py` | G1.2 |
+| G1.3 | Write graph unit tests — add/remove nodes, neighbor queries, edge validation, triad topology | `tests/test_graph.py` | G1.2 |
 
 ### Team Graph — Messaging
 
@@ -78,7 +78,7 @@ G1.4 ──→ G1.5 ──→ G1.8             A1.3 ──→ A1.4 ──→ A1.
 ### Sprint 1 — Definition of Done
 
 - [ ] `pytest tests/test_graph.py tests/test_channel.py tests/test_bus.py tests/test_memory_graph.py` — all pass
-- [ ] Graph supports undirected edges with triangle topology
+- [ ] Graph supports undirected edges with triad topology
 - [ ] Channels support async send/receive with backpressure and close semantics
 - [ ] Bus validates edges, enforces hop limit / budget / cooldown
 - [ ] Memory graph supports BFS traversal and typed node queries
@@ -156,7 +156,7 @@ L2.1 ──→ L2.2 ──→ L2.3a            A2.1 (parallel)
 
 ## Sprint 3 — Triangle Demo & Orchestration
 
-**Goal:** 3-agent triangle topology running end-to-end with orchestration, tracing, and lifecycle management.
+**Goal:** 3-agent triad topology running end-to-end with orchestration, tracing, and lifecycle management.
 
 ### Team Platform — Tracing
 
@@ -176,15 +176,15 @@ L2.1 ──→ L2.2 ──→ L2.3a            A2.1 (parallel)
 
 | Task | Description | Files | Dependencies |
 |------|-------------|-------|--------------|
-| P3.5 | Define agent configs for Coder (base_complexity=50), Reviewer (base_complexity=60), Tester (base_complexity=30) with role-specific descriptions and context sharing guidance | `orb/topologies/triangle.py` | Sprint 2 A2.5 |
-| P3.6 | Implement `create_triangle()` factory — builds graph with 3 nodes + 3 edges, creates bus with middleware, instantiates LLMAgent per node, initializes with neighbor roles, returns configured Orchestrator | `orb/topologies/triangle.py` | P3.3, P3.5 |
-| P3.7 | Write triangle topology tests — verify 3 agents, fully connected graph, agents have tools and system prompts | `tests/test_triangle.py` | P3.6 |
+| P3.5 | Define agent configs for Coder (base_complexity=50), Reviewer (base_complexity=60), Tester (base_complexity=30) with role-specific descriptions and context sharing guidance | `orb/topologies/triad.py` | Sprint 2 A2.5 |
+| P3.6 | Implement `create_triad()` factory — builds graph with 3 nodes + 3 edges, creates bus with middleware, instantiates LLMAgent per node, initializes with neighbor roles, returns configured Orchestrator | `orb/topologies/triad.py` | P3.3, P3.5 |
+| P3.7 | Write triad topology tests — verify 3 agents, fully connected graph, agents have tools and system prompts | `tests/test_triad.py` | P3.6 |
 
 ### Team Platform — Integration Test
 
 | Task | Description | Files | Dependencies |
 |------|-------------|-------|--------------|
-| P3.8 | Write E2E integration test — gated behind `ANTHROPIC_API_KEY` env var, runs fibonacci task through full triangle, verifies completions and message count | `tests/integration/test_e2e.py` | P3.6 |
+| P3.8 | Write E2E integration test — gated behind `ANTHROPIC_API_KEY` env var, runs fibonacci task through full triad, verifies completions and message count | `tests/integration/test_e2e.py` | P3.6 |
 
 ### Sprint 3 — Parallel Execution Map
 
@@ -214,7 +214,7 @@ P3.8
 
 ### Sprint 3 — Definition of Done
 
-- [ ] `pytest tests/test_triangle.py tests/test_orchestrator.py` — all pass
+- [ ] `pytest tests/test_triad.py tests/test_orchestrator.py` — all pass
 - [ ] Triangle topology creates fully-connected 3-agent graph
 - [ ] Orchestrator manages lifecycle: inject task → agents collaborate → collect results
 - [ ] Tracing prints real-time message flow with model info and timing
@@ -237,7 +237,7 @@ P3.8
 
 | Task | Description | Files | Dependencies |
 |------|-------------|-------|--------------|
-| P4.2 | Implement interactive REPL — loop with prompt, creates fresh triangle per query, prints results, supports quit/exit | `orb/cli/repl.py` | P4.1, Sprint 3 P3.6 |
+| P4.2 | Implement interactive REPL — loop with prompt, creates fresh triad per query, prints results, supports quit/exit | `orb/cli/repl.py` | P4.1, Sprint 3 P3.6 |
 
 ### Team Platform — CLI Entry Point
 
@@ -360,7 +360,7 @@ W5.1 ──→ W5.2 ──→ W5.3              W5.4 + W5.5 (parallel)
 ### Sprint 5 — Definition of Done
 
 - [ ] `orb --dashboard "Write a fibonacci function"` opens browser with live dashboard
-- [ ] Graph visualization shows 3 agents in triangle layout with role labels
+- [ ] Graph visualization shows 3 agents in triad layout with role labels
 - [ ] Edges animate when messages flow between agents
 - [ ] Agent nodes change color based on status (idle/running/completed)
 - [ ] Message log shows real-time message flow with model info
@@ -490,7 +490,7 @@ orb/
 │   └── retriever.py
 ├── topologies/
 │   ├── __init__.py
-│   └── triangle.py
+│   └── triad.py
 ├── orchestrator/
 │   ├── __init__.py
 │   ├── orchestrator.py
@@ -521,7 +521,7 @@ tests/
 ├── test_model_selector.py
 ├── test_prompt_builder.py
 ├── test_claude_agent.py
-├── test_triangle.py
+├── test_triad.py
 ├── test_orchestrator.py
 └── integration/
     ├── __init__.py

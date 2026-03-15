@@ -3,7 +3,7 @@
 test:
 	pytest tests/ \
 	  --ignore=tests/integration \
-	  --ignore=tests/test_triangle.py \
+	  --ignore=tests/test_triad.py \
 	  --ignore=tests/test_orchestrator.py \
 	  -v --tb=short
 

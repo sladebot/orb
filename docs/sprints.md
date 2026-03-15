@@ -26,7 +26,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 |----|------|------|--------|
 | G1.1 | `NodeId` type alias and `Edge` dataclass with undirected equality | `orb/graph/types.py` | ✅ |
 | G1.2 | `Graph` class — adjacency dict, add/remove nodes/edges, neighbor queries | `orb/graph/graph.py` | ✅ |
-| G1.3 | Graph unit tests — add/remove nodes, neighbors, edge validation, triangle | `tests/test_graph.py` | ✅ |
+| G1.3 | Graph unit tests — add/remove nodes, neighbors, edge validation, triad | `tests/test_graph.py` | ✅ |
 
 ### Team Graph — Messaging
 
@@ -57,7 +57,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 
 ### Definition of Done
 - [x] `pytest tests/test_graph.py tests/test_channel.py tests/test_bus.py tests/test_memory_graph.py` — all pass
-- [x] Graph supports undirected edges with triangle topology
+- [x] Graph supports undirected edges with triad topology
 - [x] Channels support async send/receive with backpressure and close semantics
 - [x] Bus validates edges, enforces hop limit / budget / cooldown
 - [x] Memory graph supports BFS traversal and typed node queries
@@ -121,7 +121,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 ## Sprint 3 — Triangle Demo & Orchestration
 **Week of Feb 17, 2026** | Status: ✅ Complete
 
-**Goal:** 3-agent triangle topology running end-to-end with orchestration, tracing, and lifecycle management.
+**Goal:** 3-agent triad topology running end-to-end with orchestration, tracing, and lifecycle management.
 
 ### Team Platform — Tracing
 
@@ -141,18 +141,18 @@ Weekly sprints. Each sprint runs Monday–Friday.
 
 | ID | Task | File | Status |
 |----|------|------|--------|
-| P3.5 | Agent configs for Coder (50), Reviewer (60), Tester (30) with role descriptions | `orb/topologies/triangle.py` | ✅ |
-| P3.6 | `create_triangle()` factory — builds graph + bus + agents + orchestrator | `orb/topologies/triangle.py` | ✅ |
-| P3.7 | Triangle topology tests — 3 agents, fully connected, tools and prompts initialized | `tests/test_triangle.py` | ✅ |
+| P3.5 | Agent configs for Coder (50), Reviewer (60), Tester (30) with role descriptions | `orb/topologies/triad.py` | ✅ |
+| P3.6 | `create_triad()` factory — builds graph + bus + agents + orchestrator | `orb/topologies/triad.py` | ✅ |
+| P3.7 | Triangle topology tests — 3 agents, fully connected, tools and prompts initialized | `tests/test_triad.py` | ✅ |
 
 ### Team Platform — Integration Test
 
 | ID | Task | File | Status |
 |----|------|------|--------|
-| P3.8 | E2E integration test — gated on `ANTHROPIC_API_KEY`, fibonacci task through full triangle | `tests/integration/test_e2e.py` | ✅ |
+| P3.8 | E2E integration test — gated on `ANTHROPIC_API_KEY`, fibonacci task through full triad | `tests/integration/test_e2e.py` | ✅ |
 
 ### Definition of Done
-- [x] `pytest tests/test_triangle.py tests/test_orchestrator.py` — all pass
+- [x] `pytest tests/test_triad.py tests/test_orchestrator.py` — all pass
 - [x] Triangle topology creates fully-connected 3-agent graph
 - [x] Orchestrator manages lifecycle: inject task → agents collaborate → collect results
 - [x] Tracing prints real-time message flow with model info and timing
@@ -171,7 +171,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 | ID | Task | File | Status |
 |----|------|------|--------|
 | P4.1 | Terminal display helpers using `rich` — `print_header()`, `print_result()`, `print_error()` | `orb/cli/display.py` | ✅ |
-| P4.2 | Interactive REPL — prompt loop, fresh triangle per query, quit/exit support | `orb/cli/repl.py` | ✅ |
+| P4.2 | Interactive REPL — prompt loop, fresh triad per query, quit/exit support | `orb/cli/repl.py` | ✅ |
 
 ### Team Platform — CLI Entry Point
 
@@ -226,7 +226,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 
 ### Definition of Done
 - [x] `orb --dashboard "Write a fibonacci function"` opens browser with live dashboard
-- [x] Graph shows 3 agents in triangle layout with role labels
+- [x] Graph shows 3 agents in triad layout with role labels
 - [x] Edges animate when messages flow between agents
 - [x] Agent nodes change color based on status (idle/running/completed)
 - [x] Message log shows real-time message flow with model info
@@ -245,7 +245,7 @@ Weekly sprints. Each sprint runs Monday–Friday.
 
 | ID | Item | Area | Priority |
 |----|------|------|----------|
-| S6.1 | Dynamic topology — support >3 agents and non-triangle graphs | Core | High |
+| S6.1 | Dynamic topology — support >3 agents and non-triad graphs | Core | High |
 | S6.2 | Streaming LLM responses — token-level streaming to dashboard | LLM | Medium |
 | S6.3 | Persistent memory — serialize/deserialize `MemoryGraph` to disk | Memory | Medium |
 | S6.4 | Cross-agent memory queries — agents can query each other's memory | Memory | Low |

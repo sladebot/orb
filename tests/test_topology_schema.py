@@ -139,6 +139,8 @@ class TestTopologySchema:
 
     def test_agent_defaults(self):
         agent = AgentSchema(role="W", description="D")
+        assert agent.category == "worker"
+        assert agent.position_label is None
         assert agent.base_complexity == 50
         assert agent.max_history == 20
         assert agent.enable_filesystem is False

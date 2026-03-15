@@ -14,7 +14,7 @@ from ..orchestrator.types import OrchestratorConfig
 from ..sandbox.sandbox import Sandbox
 from ..tracing.logger import EventLogger
 from .context import build_topology_contexts
-from .loader import get_loader
+from .loader import get_loader, normalize_topology_id
 from .schema import ModelSelectionSchema, TopologySchema
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ def create_orchestrator(
 ) -> Orchestrator:
     """Build an Orchestrator from a YAML-defined topology."""
     loader = get_loader()
+    topology_id = normalize_topology_id(topology_id)
     topo_def = loader.get(topology_id)
     if topo_def is None:
         available = ", ".join(loader.list_ids())

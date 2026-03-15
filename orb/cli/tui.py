@@ -81,8 +81,9 @@ AGENT_KEY_MAP: dict[str, str] = {
 }
 
 TOPOLOGY_LABELS: dict[str, str] = {
-    "triangle": "Triad",
+    "triad": "Triad",
     "dual-review": "Dual Review",
+    "hierarchy": "Hierarchy",
 }
 
 
@@ -1103,7 +1104,7 @@ class OrbTUI(App[None]):
         server_port: int = 8080,
         server_host: str = "127.0.0.1",
         server_scheme: str = "http",
-        topology: str = "triangle",
+        topology: str = "triad",
         budget: int = 200,
         show_logs: bool = False,
         initial_query: str | None = None,
@@ -2252,7 +2253,7 @@ def run_tui(
     config: Any,
     model_overrides: dict | None = None,
     tier_override: Any = None,
-    topology: str = "triangle",
+    topology: str = "triad",
     budget: int = 200,
     show_logs: bool = False,
     server_port: int = 18080,
@@ -2275,7 +2276,7 @@ async def run_tui_with_dashboard(
     config: Any,
     model_overrides: dict | None = None,
     tier_override: Any = None,
-    topology: str = "triangle",
+    topology: str = "triad",
     budget: int = 200,
     dashboard_port: int = 8080,
     show_logs: bool = False,
@@ -2297,7 +2298,7 @@ async def run_tui_async(
     config: Any,
     model_overrides: dict | None = None,
     tier_override: Any = None,
-    topology: str = "triangle",
+    topology: str = "triad",
     budget: int = 200,
     show_logs: bool = False,
     server_port: int = 18080,
@@ -2316,7 +2317,7 @@ async def run_tui_async(
 
 async def attach_tui(
     connect_url: str,
-    topology: str = "triangle",
+    topology: str = "triad",
     budget: int = 200,
     show_logs: bool = False,
     initial_query: str | None = None,

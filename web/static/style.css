@@ -1922,7 +1922,7 @@ body {
     font-size: 11px;
 }
 
-#topology-hint.topology-triangle    #topology-name { color: var(--blue); }
+#topology-hint.topology-triad #topology-name { color: var(--blue); }
 #topology-hint.topology-dual-review #topology-name { color: var(--purple); }
 
 #query-send {

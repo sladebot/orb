@@ -5,14 +5,14 @@ from orb.topologies import create_orchestrator
 from tests.test_claude_agent import MockLLMClient
 
 
-class TestTriangle:
-    def test_triangle_topology(self):
+class TestTriad:
+    def test_triad_topology(self):
         mock = MockLLMClient()
         mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
         overrides = {t: mock_model for t in ModelTier}
 
         orchestrator = create_orchestrator(
-            "triangle",
+            "triad",
             providers={"mock": mock},
             model_overrides=overrides,
             trace=False,
@@ -31,13 +31,13 @@ class TestTriangle:
         assert graph.has_edge("coder", "tester")
         assert graph.has_edge("reviewer", "tester")
 
-    def test_triangle_agents_initialized(self):
+    def test_triad_agents_initialized(self):
         mock = MockLLMClient()
         mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
         overrides = {t: mock_model for t in ModelTier}
 
         orchestrator = create_orchestrator(
-            "triangle",
+            "triad",
             providers={"mock": mock},
             model_overrides=overrides,
             trace=False,

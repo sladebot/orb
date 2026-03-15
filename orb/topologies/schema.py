@@ -5,7 +5,11 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-class ModelSelectionSchema(BaseModel):
+class OrbSchemaModel(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+
+class ModelSelectionSchema(OrbSchemaModel):
     """Optional model selection hints for multi-provider scenarios."""
 
     prefer_provider: str | None = None
@@ -13,11 +17,13 @@ class ModelSelectionSchema(BaseModel):
     fallback_providers: list[str] = Field(default_factory=list)
 
 
-class AgentSchema(BaseModel):
+class AgentSchema(OrbSchemaModel):
     """Schema for a single agent definition within a topology."""
 
     role: str
     description: str
+    category: str = "worker"
+    position_label: str | None = None
     base_complexity: int = 50
     max_history: int = 20
     enable_filesystem: bool = False
@@ -25,14 +31,23 @@ class AgentSchema(BaseModel):
     model_selection: ModelSelectionSchema | None = None
 
 
-class GraphViewSchema(BaseModel):
+class GraphViewSchema(OrbSchemaModel):
     """Graph visualization hints for the TUI/dashboard."""
 
     rows: list[list[dict[str, Any]]]
     order: list[str]
 
 
-class TopologySchema(BaseModel):
+class SelectionHintsSchema(OrbSchemaModel):
+    """Optional hints used by daemon-side topology recommendation."""
+
+    ideal_for: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    min_complexity: int = 0
+    max_complexity: int = 100
+
+
+class TopologySchema(OrbSchemaModel):
     """Schema for a complete topology definition."""
 
     id: str
@@ -45,6 +60,7 @@ class TopologySchema(BaseModel):
     workflow_steps: list[str]
     completion_rules: dict[str, list[str]]
     graph_view: GraphViewSchema | None = None
+    selection_hints: SelectionHintsSchema | None = None
 
     @field_validator("edges", mode="before")
     @classmethod
@@ -89,7 +105,7 @@ class TopologySchema(BaseModel):
         return self
 
 
-class TopologiesFileSchema(BaseModel):
+class TopologiesFileSchema(OrbSchemaModel):
     """Root schema for a topologies YAML file."""
 
     version: str = "1.0"

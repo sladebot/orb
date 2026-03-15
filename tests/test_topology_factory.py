@@ -13,9 +13,9 @@ def _mock_providers():
 
 
 class TestCreateOrchestrator:
-    def test_triangle_agents(self):
+    def test_triad_agents(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,
@@ -24,9 +24,9 @@ class TestCreateOrchestrator:
             "coordinator", "coder", "reviewer", "tester"
         }
 
-    def test_triangle_graph_edges(self):
+    def test_triad_graph_edges(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,
@@ -37,9 +37,9 @@ class TestCreateOrchestrator:
         assert graph.has_edge("coder", "tester")
         assert graph.has_edge("reviewer", "tester")
 
-    def test_triangle_entry_agent(self):
+    def test_triad_entry_agent(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,
@@ -69,13 +69,37 @@ class TestCreateOrchestrator:
         assert graph.has_edge("coder", "reviewer_b")
         assert graph.has_edge("reviewer_a", "reviewer_b")
 
+    def test_hierarchy_agents(self):
+        orch = create_orchestrator(
+            "hierarchy",
+            _mock_providers(),
+            model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
+            trace=False,
+        )
+        assert set(orch.agents.keys()) == {
+            "coordinator", "researcher", "coder", "reviewer", "tester"
+        }
+
+    def test_hierarchy_graph_edges(self):
+        orch = create_orchestrator(
+            "hierarchy",
+            _mock_providers(),
+            model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
+            trace=False,
+        )
+        graph = orch.bus.graph
+        assert graph.has_edge("coordinator", "researcher")
+        assert graph.has_edge("researcher", "coder")
+        assert graph.has_edge("coder", "reviewer")
+        assert graph.has_edge("coder", "tester")
+
     def test_unknown_topology_raises(self):
         with pytest.raises(ValueError, match="Unknown topology"):
             create_orchestrator("nonexistent", _mock_providers())
 
     def test_agents_have_system_prompt(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,
@@ -85,7 +109,7 @@ class TestCreateOrchestrator:
 
     def test_agents_have_tools(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,
@@ -97,7 +121,7 @@ class TestCreateOrchestrator:
 
     def test_filesystem_agents_have_file_tools(self):
         orch = create_orchestrator(
-            "triangle",
+            "triad",
             _mock_providers(),
             model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
             trace=False,

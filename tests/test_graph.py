@@ -83,7 +83,7 @@ class TestGraph:
         assert Edge("a", "b") == Edge("b", "a")
         assert Edge("a", "b") != Edge("a", "c")
 
-    def test_triangle(self):
+    def test_triad_mesh(self):
         g = Graph()
         for n in ["coder", "reviewer", "tester"]:
             g.add_node(n)

@@ -11,13 +11,14 @@ class TestTopologyLoader:
     def test_load_builtin_topologies(self):
         loader = TopologyLoader()
         topos = loader.load()
-        assert "triangle" in topos
+        assert "triad" in topos
         assert "dual-review" in topos
+        assert "hierarchy" in topos
 
-    def test_get_triangle(self):
+    def test_get_triad(self):
         loader = TopologyLoader()
         loader.load()
-        topo = loader.get("triangle")
+        topo = loader.get("triad")
         assert topo is not None
         assert topo.label == "Triad"
         assert "coordinator" in topo.agents
@@ -34,6 +35,16 @@ class TestTopologyLoader:
         assert "reviewer_a" in topo.agents
         assert "reviewer_b" in topo.agents
 
+    def test_get_hierarchy(self):
+        loader = TopologyLoader()
+        loader.load()
+        topo = loader.get("hierarchy")
+        assert topo is not None
+        assert topo.label == "Hierarchy"
+        assert "researcher" in topo.agents
+        assert topo.graph_view is not None
+        assert topo.agents["researcher"].category == "discovery"
+
     def test_get_unknown_returns_none(self):
         loader = TopologyLoader()
         loader.load()
@@ -43,8 +54,9 @@ class TestTopologyLoader:
         loader = TopologyLoader()
         loader.load()
         ids = loader.list_ids()
-        assert "triangle" in ids
+        assert "triad" in ids
         assert "dual-review" in ids
+        assert "hierarchy" in ids
 
     def test_user_file_overlay(self):
         user_yaml = """\
@@ -78,7 +90,7 @@ topologies:
                 topos = loader.load()
                 assert "custom" in topos
                 # builtins still present
-                assert "triangle" in topos
+                assert "triad" in topos
         finally:
             tmp.unlink()
 
@@ -220,6 +232,6 @@ topologies:
                 loader = TopologyLoader()
                 topos = loader.load()
                 # builtins should still load
-                assert "triangle" in topos
+                assert "triad" in topos
         finally:
             tmp.unlink()

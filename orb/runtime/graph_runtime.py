@@ -5,8 +5,10 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from json import JSONDecodeError
 
 from web.state import DashboardState
+from orb.messaging.channel import ChannelClosed
 from .transcript import RunTranscript
 
 logger = logging.getLogger(__name__)
@@ -33,34 +35,40 @@ class GraphRuntime:
         self._run_transcript = RunTranscript()
 
     @staticmethod
-    def _topology_meta(topology_id: str) -> tuple[str, str, dict[str, str]]:
+    def _available_topologies() -> dict:
         from orb.topologies import get_loader
 
-        loader = get_loader()
-        topo = loader.get(topology_id)
+        return get_loader().list_all()
+
+    @staticmethod
+    def _topology_meta(topology_id: str) -> tuple[str, str, dict[str, str]]:
+        from orb.topologies import normalize_topology_id
+
+        topo = GraphRuntime._available_topologies().get(normalize_topology_id(topology_id))
         if topo is None:
             return ("Unknown", "Unknown topology", {})
 
         positions: dict[str, str] = {}
-        for agent_id in topo.agents:
-            if agent_id == topo.entry_agent:
-                positions[agent_id] = "entry router"
-            elif "coder" in agent_id:
-                positions[agent_id] = "implementation hub"
-            elif "reviewer" in agent_id:
-                positions[agent_id] = f"review branch {agent_id.split('_')[-1].upper()}" if "_" in agent_id else "quality edge"
-            elif "tester" in agent_id:
-                positions[agent_id] = "validation edge"
-            else:
-                positions[agent_id] = agent_id
+        default_positions = {
+            "entry": "entry router",
+            "implementation": "implementation hub",
+            "review": "quality edge",
+            "validation": "validation edge",
+            "discovery": "discovery layer",
+            "worker": "worker node",
+        }
+        for agent_id, agent in topo.agents.items():
+            positions[agent_id] = (
+                agent.position_label
+                or default_positions.get(agent.category, "worker node")
+            )
         return (topo.label, topo.description, positions)
 
     @staticmethod
     def _topology_graph_view(topology_id: str) -> dict:
-        from orb.topologies import get_loader
+        from orb.topologies import normalize_topology_id
 
-        loader = get_loader()
-        topo = loader.get(topology_id)
+        topo = GraphRuntime._available_topologies().get(normalize_topology_id(topology_id))
         if topo is None:
             return {"rows": [], "order": []}
 
@@ -76,6 +84,47 @@ class GraphRuntime:
         for agent_id in order:
             rows.append([{"node": agent_id}])
         return {"rows": rows, "order": order}
+
+    @staticmethod
+    def _topology_options(selected_id: str) -> list[dict]:
+        options = []
+        for topology_id, topo in GraphRuntime._available_topologies().items():
+            options.append({
+                "topology": topology_id,
+                "label": topo.label,
+                "description": topo.description,
+                "chosen": topology_id == selected_id,
+            })
+        return options
+
+    @staticmethod
+    def _heuristic_topology_ranking(query: str, complexity: int) -> list[tuple[str, float]]:
+        query_l = query.lower()
+        scores: list[tuple[str, float]] = []
+        for topology_id, topo in GraphRuntime._available_topologies().items():
+            score = 0.0
+            hints = topo.selection_hints
+            if hints is not None:
+                if hints.min_complexity <= complexity <= hints.max_complexity:
+                    score += 2.0
+                else:
+                    score -= 0.5
+                for keyword in hints.keywords:
+                    if keyword.lower() in query_l:
+                        score += 1.0
+                for phrase in hints.ideal_for:
+                    if any(token in query_l for token in phrase.lower().split()):
+                        score += 0.2
+            categories = {agent.category for agent in topo.agents.values()}
+            if "discovery" in categories and any(token in query_l for token in ("research", "explore", "understand", "investigate", "plan")):
+                score += 1.0
+            if sum(1 for agent in topo.agents.values() if agent.category == "review") >= 2 and complexity >= 65:
+                score += 1.0
+            if sum(1 for agent in topo.agents.values() if agent.category == "review") == 1 and complexity < 65:
+                score += 0.5
+            scores.append((topology_id, score))
+        scores.sort(key=lambda item: item[1], reverse=True)
+        return scores
 
     @property
     def running(self) -> bool:
@@ -117,7 +166,7 @@ class GraphRuntime:
             self._run_task.cancel()
             try:
                 await self._run_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
 
     async def wait_for_run(self) -> None:
@@ -145,7 +194,7 @@ class GraphRuntime:
         )
         try:
             await agent.channel.send(msg)
-        except Exception as exc:
+        except ChannelClosed as exc:
             logger.exception("Failed to inject message")
             return 500, {"ok": False, "error": str(exc)}
         self._run_transcript.add_message(msg)
@@ -170,13 +219,15 @@ class GraphRuntime:
         topology: str,
         model_pin: str = "auto",
     ) -> tuple[int, dict]:
+        from orb.topologies import normalize_topology_id
+
         if not self._providers:
             return 500, {"ok": False, "error": "Server has no providers configured"}
         if self.running:
             return 200, {"ok": False, "error": "Run already in progress"}
 
         predicted = await self.predict_topology(query, model_pin=model_pin)
-        selected_topology = topology if topology != "auto" else predicted.get("topology", "triangle")
+        selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
         topology_label, topology_description, agent_positions = self._topology_meta(selected_topology)
         graph_view = self._topology_graph_view(selected_topology)
         agent_complexity = dict(predicted.get("agent_complexity") or {})
@@ -185,6 +236,7 @@ class GraphRuntime:
             overall_complexity,
             model_pin=model_pin,
             agent_complexity=agent_complexity,
+            topology_id=selected_topology,
         )
         agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
 
@@ -257,7 +309,13 @@ class GraphRuntime:
 
     async def predict_topology(self, query: str, model_pin: str = "auto") -> dict:
         if not query:
-            return {"topology": "triangle", "label": "Triad", "description": "Coder → Reviewer → Tester"}
+            first_id, topo = next(iter(self._available_topologies().items()))
+            return {
+                "topology": first_id,
+                "label": topo.label,
+                "description": topo.description,
+                "options": self._topology_options(first_id),
+            }
         return await self._llm_predict_topology(query, model_pin=model_pin)
 
     def _build_agent_model_map(
@@ -265,6 +323,7 @@ class GraphRuntime:
         complexity: int,
         model_pin: str = "auto",
         agent_complexity: dict | None = None,
+        topology_id: str = "triad",
     ) -> dict:
         from orb.llm.types import ModelTier, ModelConfig
 
@@ -336,66 +395,79 @@ class GraphRuntime:
                 return best(sonnet, haiku, opus)
             return best(opus, sonnet)
 
-        ac = agent_complexity or {}
-        coordinator_score = ac.get("coordinator", 20)
-        coder_score = ac.get("coder", complexity)
-        tester_score = ac.get("tester", 30)
-        reviewer_score = max(ac.get("reviewer", complexity), coder_score)
-
-        coordinator_cfg = pick(coordinator_score)
-        coder_cfg = pick(coder_score)
-        reviewer_cfg = pick(reviewer_score)
-        tester_cfg = pick(tester_score)
-
-        if not tester_cfg or not coder_cfg or not reviewer_cfg:
-            logger.warning("Failed to build agent-model map: missing config, proceeding without model hints")
+        topo = self._available_topologies().get(topology_id)
+        if topo is None:
+            logger.warning("Failed to build agent-model map: unknown topology '%s'", topology_id)
             return {}
 
-        if force_provider is None:
-            alt_candidates = [c for c in [opus, sonnet, haiku, q27, q9] if c is not None]
-            reviewer_a_cfg = reviewer_cfg
-            reviewer_b_cfg = next((c for c in alt_candidates if c.provider != reviewer_a_cfg.provider), reviewer_cfg)
-        else:
-            reviewer_a_cfg = reviewer_cfg
-            reviewer_b_cfg = reviewer_cfg
+        ac = agent_complexity or {}
+        implementation_scores = [
+            ac.get(agent_id, complexity)
+            for agent_id, agent in topo.agents.items()
+            if agent.category == "implementation"
+        ]
+        implementation_baseline = max(implementation_scores) if implementation_scores else complexity
+        scores: dict[str, int] = {}
+        for agent_id, agent in topo.agents.items():
+            if agent.category == "entry" or agent_id == topo.entry_agent:
+                scores[agent_id] = ac.get(agent_id, 20)
+            elif agent.category == "discovery":
+                scores[agent_id] = ac.get(agent_id, max(40, complexity - 10))
+            elif agent.category == "implementation":
+                scores[agent_id] = ac.get(agent_id, complexity)
+            elif agent.category == "review":
+                scores[agent_id] = max(ac.get(agent_id, complexity), implementation_baseline)
+            elif agent.category == "validation":
+                scores[agent_id] = ac.get(agent_id, 30)
+            else:
+                scores[agent_id] = ac.get(agent_id, complexity)
 
-        return {
-            "coordinator": coordinator_cfg,
-            "coder": coder_cfg,
-            "reviewer": reviewer_cfg,
-            "reviewer_a": reviewer_a_cfg,
-            "reviewer_b": reviewer_b_cfg,
-            "tester": tester_cfg,
-        }
+        result: dict[str, ModelConfig] = {}
+        reviewer_ids = [aid for aid, agent in topo.agents.items() if agent.category == "review"]
+        if reviewer_ids:
+            reviewer_cfg = pick(max(scores[rid] for rid in reviewer_ids))
+            if reviewer_cfg is None:
+                logger.warning("Failed to build reviewer model config, proceeding without model hints")
+                return {}
+            if len(reviewer_ids) >= 2 and force_provider is None:
+                alt_candidates = [c for c in [opus, sonnet, haiku, q27, q9] if c is not None]
+                result[reviewer_ids[0]] = reviewer_cfg
+                result[reviewer_ids[1]] = next((c for c in alt_candidates if c.provider != reviewer_cfg.provider), reviewer_cfg)
+                for reviewer_id in reviewer_ids[2:]:
+                    result[reviewer_id] = reviewer_cfg
+            else:
+                for reviewer_id in reviewer_ids:
+                    result[reviewer_id] = reviewer_cfg
+
+        for agent_id, score in scores.items():
+            if agent_id in result:
+                continue
+            cfg = pick(score)
+            if cfg is not None:
+                result[agent_id] = cfg
+
+        return result
 
     async def _llm_predict_topology(self, query: str, model_pin: str = "auto") -> dict:
         from orb.llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, OPENAI_MODELS, CODEX_MODELS
 
         def _default_result(complexity: int = 50, reason: str = "No cloud LLM provider available") -> dict:
-            topology = "triangle" if complexity < 65 else "dual-review"
-            labels = {
-                "triangle": ("Triad", "Coder → Reviewer → Tester"),
-                "dual-review": ("Dual Review", "2× Opus reviewers reach consensus"),
-            }
-            chosen_label, chosen_desc = labels[topology]
-            other = "dual-review" if topology == "triangle" else "triangle"
-            other_label, other_desc = labels[other]
-            agent_model_map = self._build_agent_model_map(complexity, model_pin)
+            available_topologies = self._available_topologies()
+            ranked = self._heuristic_topology_ranking(query, complexity)
+            topology = ranked[0][0] if ranked else next(iter(available_topologies.keys()))
+            topo = available_topologies[topology]
+            agent_model_map = self._build_agent_model_map(complexity, model_pin, topology_id=topology)
             agent_models = {
                 role: cfg.model_id for role, cfg in agent_model_map.items()
-                if role in ("coordinator", "coder", "reviewer", "tester")
             }
             return {
                 "topology": topology,
-                "label": chosen_label,
-                "description": chosen_desc,
+                "label": topo.label,
+                "description": topo.description,
                 "complexity": complexity,
                 "reason": reason,
                 "agent_models": agent_models,
-                "options": [
-                    {"topology": topology, "label": chosen_label, "description": chosen_desc, "chosen": True},
-                    {"topology": other, "label": other_label, "description": other_desc, "chosen": False},
-                ],
+                "options": self._topology_options(topology),
             }
 
         predict_provider = (
@@ -411,16 +483,21 @@ class GraphRuntime:
         using_codex = "anthropic" not in self._providers and "openai" not in self._providers and "openai-codex" in self._providers
         using_ollama = "anthropic" not in self._providers and "openai" not in self._providers and "openai-codex" not in self._providers
 
+        available_topologies = self._available_topologies()
         prompt = (
             f"Analyze this software task and respond with JSON only.\n\n"
             f"Task: {query}\n\n"
-            "Respond with this exact JSON structure:\n"
+            "Available topologies:\n"
+            + "\n".join(
+                f'- {topology_id}: {topo.label} — {topo.description}'
+                for topology_id, topo in available_topologies.items()
+            )
+            + "\n\nRespond with this exact JSON structure:\n"
             '{"complexity": <0-100 integer>, "reason": "<one sentence why>", '
-            '"topology": "<triangle or dual-review>", '
-            '"agent_complexity": {"coordinator": <0-100>, "coder": <0-100>, '
-            '"reviewer": <0-100>, "tester": <0-100>}}\n\n'
+            '"topology": "<one topology id from the list above>", '
+            '"agent_complexity": {"<agent_id>": <0-100>, "...": <0-100>}}\n\n'
             "complexity: overall task difficulty (0=trivial, 100=extremely complex/critical)\n"
-            "agent_complexity: per-role difficulty scores\n"
+            "agent_complexity: per-agent difficulty scores for the selected topology\n"
         )
 
         if using_openai:
@@ -463,42 +540,39 @@ class GraphRuntime:
             return _default_result()
         try:
             parsed = json.loads(raw.strip())
-        except Exception:
+        except JSONDecodeError:
             logger.warning("Failed to parse topology prediction response: %r", raw)
             return _default_result()
 
-        topology = parsed.get("topology", "triangle")
-        topology = "dual-review" if "dual" in topology or "review" in topology else "triangle"
-        labels = {
-            "triangle": ("Triad", "Coder → Reviewer → Tester"),
-            "dual-review": ("Dual Review", "2× Opus reviewers reach consensus"),
-        }
-        chosen_label, chosen_desc = labels[topology]
-        other = "dual-review" if topology == "triangle" else "triangle"
-        other_label, other_desc = labels[other]
+        topology = parsed.get("topology")
+        if topology not in available_topologies:
+            ranked = self._heuristic_topology_ranking(query, int(parsed.get("complexity", 50)))
+            topology = ranked[0][0] if ranked else next(iter(available_topologies.keys()))
+        topo = available_topologies[topology]
         overall_complexity = int(parsed.get("complexity", 50))
         agent_complexity = {
             k: max(0, min(100, int(v)))
             for k, v in (parsed.get("agent_complexity") or {}).items()
-            if k in ("coordinator", "coder", "reviewer", "tester")
+            if k in topo.agents
         }
-        agent_model_map = self._build_agent_model_map(overall_complexity, model_pin, agent_complexity)
+        agent_model_map = self._build_agent_model_map(
+            overall_complexity,
+            model_pin,
+            agent_complexity,
+            topology_id=topology,
+        )
         agent_models = {
             role: cfg.model_id for role, cfg in agent_model_map.items()
-            if role in ("coordinator", "coder", "reviewer", "tester")
         }
         return {
             "topology": topology,
-            "label": chosen_label,
-            "description": chosen_desc,
+            "label": topo.label,
+            "description": topo.description,
             "complexity": overall_complexity,
             "reason": parsed.get("reason", ""),
             "agent_complexity": agent_complexity,
             "agent_models": agent_models,
-            "options": [
-                {"topology": topology, "label": chosen_label, "description": chosen_desc, "chosen": True},
-                {"topology": other, "label": other_label, "description": other_desc, "chosen": False},
-            ],
+            "options": self._topology_options(topology),
         }
 
     async def _run_orchestrator(
@@ -515,7 +589,7 @@ class GraphRuntime:
         self._turn_count += 1
         bridge = DashboardBridge(self.state, self._broadcast)
         effective_overrides = dict(self._model_overrides or {})
-        agent_model_map = self._build_agent_model_map(complexity, model_pin, agent_complexity)
+        agent_model_map = self._build_agent_model_map(complexity, model_pin, agent_complexity, topology_id=topology)
         topology_label, topology_description, agent_positions = self._topology_meta(topology)
         graph_view = self._topology_graph_view(topology)
 
@@ -667,11 +741,8 @@ class GraphRuntime:
 
         if result:
             final_agent_id, final_result = self._pick_primary_result(result.completions)
-            try:
-                from orb.cli.diff_capture import capture_diff
-                diff = capture_diff()
-            except Exception:
-                diff = ""
+            from orb.cli.diff_capture import capture_diff
+            diff = capture_diff()
             if final_result:
                 await self._broadcast(json.dumps({
                     "type": "run_complete",

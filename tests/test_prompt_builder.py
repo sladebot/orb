@@ -31,7 +31,7 @@ class TestPromptBuilder:
             description="You write code.",
             neighbors={"reviewer": "Reviewer", "tester": "Tester"},
             topology=TopologyContext(
-                topology_id="triangle",
+                topology_id="triad",
                 topology_label="Triad",
                 node_id="coder",
                 role="Coder",

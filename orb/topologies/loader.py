@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from .defaults import BUILTIN_TOPOLOGIES_YAML
 from .schema import TopologiesFileSchema, TopologySchema
@@ -11,6 +12,10 @@ from .schema import TopologiesFileSchema, TopologySchema
 logger = logging.getLogger(__name__)
 
 USER_TOPOLOGIES_PATH = Path.home() / ".orb" / "topologies.yaml"
+
+
+def normalize_topology_id(topology_id: str) -> str:
+    return topology_id
 
 
 class TopologyLoader:
@@ -41,7 +46,7 @@ class TopologyLoader:
                     len(user.topologies),
                     USER_TOPOLOGIES_PATH,
                 )
-            except Exception as exc:
+            except (OSError, yaml.YAMLError, ValidationError, ValueError) as exc:
                 logger.warning("Failed to load user topologies: %s", exc)
 
         self._loaded = True
@@ -63,7 +68,7 @@ class TopologyLoader:
     def get(self, topology_id: str) -> TopologySchema | None:
         if not self._loaded:
             self.load()
-        return self._cache.get(topology_id)
+        return self._cache.get(normalize_topology_id(topology_id))
 
     def list_ids(self) -> list[str]:
         if not self._loaded:
@@ -81,7 +86,7 @@ class TopologyLoader:
             content = path.read_text()
             self._parse_yaml(content)
             return True, "Valid"
-        except Exception as exc:
+        except (OSError, yaml.YAMLError, ValidationError, ValueError) as exc:
             return False, str(exc)
 
     @staticmethod

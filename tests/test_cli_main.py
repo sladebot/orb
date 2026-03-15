@@ -122,6 +122,59 @@ async def test_async_main_tui_uses_file_only_logging():
 
 
 @pytest.mark.asyncio
+async def test_async_main_topologies_init_writes_sample():
+    args = _base_args(subcommand="topologies", topologies_action="init", force=False)
+    target = Path("/tmp/topologies.yaml")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._init_topologies_file", return_value=target) as init_topologies:
+        await async_main()
+
+    init_topologies.assert_called_once_with(force=False)
+
+
+@pytest.mark.asyncio
+async def test_async_main_topologies_init_existing_file_errors():
+    args = _base_args(subcommand="topologies", topologies_action="init", force=False)
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._init_topologies_file", side_effect=FileExistsError("exists")), \
+         pytest.raises(SystemExit) as exc:
+        await async_main()
+
+    assert exc.value.code == 1
+
+
+def test_init_topologies_file_copies_sample_and_respects_force(tmp_path):
+    from orb.cli.main import _init_topologies_file
+
+    target = tmp_path / "topologies.yaml"
+    sample_text = "topologies:\n  demo: {}\n"
+
+    class FakeResource:
+        def joinpath(self, name: str):
+            assert name == "sample-topology.yaml"
+            return self
+
+        def read_text(self):
+            return sample_text
+
+    with patch("orb.topologies.loader.USER_TOPOLOGIES_PATH", target), \
+         patch("orb.cli.main.resources.files", return_value=FakeResource()):
+        written = _init_topologies_file()
+        assert written == target
+        assert target.read_text() == sample_text
+
+        with pytest.raises(FileExistsError):
+            _init_topologies_file()
+
+        sample_text = "topologies:\n  demo2: {}\n"
+        written = _init_topologies_file(force=True)
+        assert written == target
+        assert target.read_text() == sample_text
+
+
+@pytest.mark.asyncio
 async def test_async_main_dashboard_connect_starts_remote_run():
     args = _base_args(dashboard=True, connect="http://127.0.0.1:9090", query="write hello world")
 
@@ -261,6 +314,16 @@ async def test_async_main_daemon_start_starts_background_process():
 
 
 @pytest.mark.asyncio
+async def test_start_managed_daemon_fails_fast_when_port_in_use():
+    from orb.cli.main import _start_managed_daemon
+
+    with patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._port_in_use", return_value=True):
+        with pytest.raises(RuntimeError, match="Port 8080 is already in use"):
+            _start_managed_daemon("0.0.0.0", 8080, None)
+
+
+@pytest.mark.asyncio
 async def test_async_main_daemon_stop_uses_managed_stop():
     args = _base_args(subcommand="daemon", daemon_action="stop")
 
@@ -268,7 +331,7 @@ async def test_async_main_daemon_stop_uses_managed_stop():
          patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon:
         await async_main()
 
-    stop_daemon.assert_awaited_once()
+    stop_daemon.assert_awaited_once_with(8080)
 
 
 @pytest.mark.asyncio
@@ -301,10 +364,70 @@ async def test_async_main_daemon_status_reports_running_process():
              "workdir": "/tmp/orb-daemon-z",
          }), \
          patch("orb.cli.main._pid_is_alive", return_value=True), \
+         patch("orb.cli.main._port_looks_like_orb_daemon", return_value=True), \
          patch("orb.cli.main._clear_daemon_state") as clear_state:
         await async_main()
 
     clear_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_status_reports_unmanaged_listener():
+    args = _base_args(subcommand="daemon", daemon_action="status", port=8080)
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._find_listening_pid", return_value=9999), \
+         patch("orb.cli.main._port_looks_like_orb_daemon", return_value=True), \
+         patch("orb.cli.main._clear_daemon_state") as clear_state:
+        await async_main()
+
+    clear_state.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_status_refuses_non_orb_listener(capsys):
+    args = _base_args(subcommand="daemon", daemon_action="status", port=8080)
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._find_listening_pid", return_value=9999), \
+         patch("orb.cli.main._port_looks_like_orb_daemon", return_value=False):
+        await async_main()
+
+    assert "not an Orb daemon" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_stop_managed_daemon_falls_back_to_port_listener():
+    from orb.cli.main import _stop_managed_daemon
+
+    with patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._find_listening_pid", return_value=9999), \
+         patch("orb.cli.main._port_looks_like_orb_daemon", return_value=True), \
+         patch("orb.cli.main.os.kill") as kill, \
+         patch("orb.cli.main._pid_is_alive", side_effect=[False]):
+        stopped = await _stop_managed_daemon(8080)
+
+    assert stopped is True
+    kill.assert_called_once_with(9999, __import__("signal").SIGTERM)
+
+
+@pytest.mark.asyncio
+async def test_stop_managed_daemon_rejects_non_orb_listener():
+    from orb.cli.main import _stop_managed_daemon
+
+    with patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._find_listening_pid", return_value=9999), \
+         patch("orb.cli.main._port_looks_like_orb_daemon", return_value=False):
+        with pytest.raises(RuntimeError, match="does not look like an Orb daemon"):
+            await _stop_managed_daemon(8080)
+
+
+def test_daemon_state_file_uses_stable_home_path():
+    import orb.cli.main as main_mod
+
+    assert str(main_mod._daemon_state_path()).endswith(".orb/daemon.json")
 
 
 @pytest.mark.asyncio

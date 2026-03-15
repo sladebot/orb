@@ -17,7 +17,7 @@ class TestE2E:
         try:
             config = OrchestratorConfig(timeout=120.0, budget=30, max_depth=5)
             orchestrator = create_orchestrator(
-                "triangle",
+                "triad",
                 providers={"anthropic": provider},
                 config=config,
                 trace=True,

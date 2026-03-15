@@ -141,6 +141,12 @@ Opens a prompt loop. Submit tasks one at a time; agents are rebuilt fresh each r
 /reload-topologies        # hot-reload ~/.orb/topologies.yaml
 ```
 
+To bootstrap a user topology file from Orb's bundled sample:
+
+```bash
+orb topologies init
+```
+
 ### Terminal TUI
 
 ```bash
@@ -233,7 +239,7 @@ orb [OPTIONS] [QUERY]
 |------|---------|-------------|
 | `query` | — | Task to run (omit for interactive mode) |
 | `-i`, `--interactive` | off | Interactive REPL mode |
-| `--topology` | `triangle` | Agent topology id — any builtin or custom id (e.g. `triangle`, `dual-review`). Run `orb --list-topologies` to see all available. |
+| `--topology` | `triad` | Agent topology id — any builtin or custom id (e.g. `triad`, `dual-review`). Run `orb --list-topologies` to see all available. |
 | `--budget N` | 200 | Global message budget (hard ceiling) |
 | `--timeout N` | 600.0 | Timeout in seconds |
 | `--max-depth N` | 10 | Max message hop depth per chain |
@@ -400,6 +406,12 @@ If a run is active (status = Running), new input is forwarded directly to the co
 
 Topologies are defined in YAML and loaded at startup. Orb ships two builtins; you can add your own at `~/.orb/topologies.yaml`.
 
+Initialize a starter file with:
+
+```bash
+orb topologies init
+```
+
 ### Triangle (default)
 
 ```
@@ -413,7 +425,7 @@ Coordinator
 Four agents: Coordinator routes inputs through the graph; Coder writes and iterates; Reviewer checks correctness and edge cases; Tester validates behavior. The coordinator does not synthesize task content itself.
 
 ```bash
-orb --topology triangle "write a binary search tree"
+orb --topology triad "write a binary search tree"
 ```
 
 ### Dual Review
@@ -436,7 +448,7 @@ orb --topology dual-review "write a concurrent queue"
 
 ### Custom topologies
 
-Define your own topology in YAML and place it at `~/.orb/topologies.yaml`. See `sample-topology.yaml` in the project root for a fully commented 6-agent example (Coordinator → Researcher → Coder → Security Reviewer + Code Reviewer → Tester).
+Define your own topology in YAML and place it at `~/.orb/topologies.yaml`. `orb topologies init` copies the bundled `sample-topology.yaml` into place as a starting point. The sample is a fully commented 6-agent example (Coordinator → Researcher → Coder → Security Reviewer + Code Reviewer → Tester).
 
 ```yaml
 # ~/.orb/topologies.yaml

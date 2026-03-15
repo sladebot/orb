@@ -72,7 +72,7 @@ Goal: make the demo flows easier to use and easier to document.
 - Add documented demo-oriented CLI examples to `README.md`.
 - Clarify which modes are interactive and which are automation-friendly.
 - Add a small set of recommended prompts and settings for reproducible demos.
-- Verify that both `triangle` and `dual-review` topologies behave sensibly in unattended flows.
+- Verify that both `triad` and `dual-review` topologies behave sensibly in unattended flows.
 
 Primary files:
 

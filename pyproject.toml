@@ -40,4 +40,5 @@ testpaths = ["tests"]
 include = ["orb*", "web*"]
 
 [tool.setuptools.package-data]
+orb = ["sample-topology.yaml"]
 web = ["static/*.html", "static/*.css", "static/*.js"]

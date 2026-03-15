@@ -67,7 +67,7 @@ class TestOrchestrator:
 
         config = OrchestratorConfig(timeout=5.0, budget=50)
         orchestrator = create_orchestrator(
-            "triangle",
+            "triad",
             providers={"mock": mock_with_flow},
             config=config,
             model_overrides=overrides,
@@ -93,7 +93,7 @@ class TestOrchestrator:
 
         config = OrchestratorConfig(timeout=0.5, budget=50)
         orchestrator = create_orchestrator(
-            "triangle",
+            "triad",
             providers={"mock": mock},
             config=config,
             model_overrides=overrides,
@@ -111,7 +111,7 @@ class TestOrchestrator:
 
         config = OrchestratorConfig(entry_agent="nonexistent")
         orchestrator = create_orchestrator(
-            "triangle",
+            "triad",
             providers={"mock": mock},
             config=config,
             model_overrides=overrides,

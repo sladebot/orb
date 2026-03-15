@@ -20,7 +20,7 @@ async def run_repl(
     model_overrides: dict[ModelTier, ModelConfig] | None = None,
     trace: bool = True,
     tier_override: ModelTier | None = None,
-    topology: str = "triangle",
+    topology: str = "triad",
 ) -> None:
     print_header()
     console.print("[dim]Type your query, or 'quit' to exit.[/dim]")
