@@ -3,3 +3,6 @@
 orb.egg-info/
 .env
 build/
+.DS_Store
+.python-version
+.venv/

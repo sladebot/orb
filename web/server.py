@@ -42,6 +42,7 @@ class DashboardServer:
         self._app.router.add_get("/api/run-status", self._run_status_handler)
         self._app.router.add_get("/api/predict-topology", self._predict_topology_handler)
         self._app.router.add_get("/api/models", self._models_handler)
+        self._app.router.add_get("/api/topologies", self._topologies_handler)
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
 
@@ -60,7 +61,18 @@ class DashboardServer:
         await site.start()
         logger.info("Dashboard server running at http://localhost:%s", self.port)
 
+        # Start topology file watcher for hot-reload
+        from orb.topologies import get_watcher
+        self._topology_watcher = get_watcher()
+        self._topology_watcher.on_reload(self._on_topologies_reloaded)
+        self._topology_watcher.start()
+
+    async def _on_topologies_reloaded(self) -> None:
+        await self.broadcast(json.dumps({"type": "topologies_reloaded"}))
+
     async def stop(self) -> None:
+        if hasattr(self, "_topology_watcher"):
+            self._topology_watcher.stop()
         self.runtime.unsubscribe(self.broadcast)
         await self.runtime.stop()
         for ws in list(self._clients):
@@ -119,8 +131,13 @@ class DashboardServer:
         model_pin = (body.get("model") or "auto").strip()
         if not query:
             return web.json_response({"ok": False, "error": "Query must not be empty"}, status=400)
-        if topology not in ("auto", "triangle", "dual-review"):
-            return web.json_response({"ok": False, "error": "topology must be 'auto', 'triangle' or 'dual-review'"}, status=400)
+        from orb.topologies import get_loader
+        valid_topologies = ["auto"] + get_loader().list_ids()
+        if topology not in valid_topologies:
+            return web.json_response(
+                {"ok": False, "error": f"topology must be one of: {', '.join(valid_topologies)}"},
+                status=400,
+            )
 
         status, payload = await self.runtime.start_run(
             query,
@@ -145,6 +162,21 @@ class DashboardServer:
 
     async def _models_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.models_payload())
+
+    async def _topologies_handler(self, request: web.Request) -> web.Response:
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        topologies = []
+        for tid in loader.list_ids():
+            topo = loader.get(tid)
+            topologies.append({
+                "id": tid,
+                "label": topo.label,
+                "description": topo.description,
+                "agents": list(topo.agents.keys()),
+            })
+        return web.json_response({"topologies": topologies})
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
