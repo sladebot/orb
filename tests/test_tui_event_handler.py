@@ -17,7 +17,7 @@ def _make_tui() -> OrbTUI:
     tui = object.__new__(OrbTUI)
     # Initialise only the data-layer attributes (bypass super().__init__)
     tui._server_port   = 8080
-    tui._topology_name = "triangle"
+    tui._topology_name = "triad"
     tui._show_logs     = False
     tui._agents        = {}
     tui._detail_feed   = []
@@ -490,11 +490,11 @@ class TestTuiEventHandler:
 
     def test_header_bar_uses_topology_label(self):
         tui = _make_tui()
-        tui._topology_name = "triangle"
-        tui._plan = {"topology": {"id": "triangle", "label": "Triad"}}
+        tui._topology_name = "triad"
+        tui._plan = {"topology": {"id": "triad", "label": "Triad"}}
         rendered = HeaderBar(tui).render().plain
         assert "Triad" in rendered
-        assert "triangle" not in rendered
+        assert "triad" not in rendered
 
     def test_detail_pane_prefers_server_plan_neighbors_and_position(self):
         tui = _make_tui()

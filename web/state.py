@@ -37,12 +37,20 @@ class MessageRecord:
 
 
 @dataclass
+class ActivityRecord:
+    agent: str
+    activity: str
+    elapsed: float
+
+
+@dataclass
 class DashboardState:
     """Snapshot of the full system state for dashboard rendering."""
 
     agents: dict[str, AgentState] = field(default_factory=dict)
     edges: list[EdgeState] = field(default_factory=list)
     messages: list[MessageRecord] = field(default_factory=list)
+    activity_events: list[ActivityRecord] = field(default_factory=list)
     message_count: int = 0
     budget: int = 200
     budget_remaining: int = 200
@@ -63,6 +71,7 @@ class DashboardState:
         self.agents = {}
         self.edges = []
         self.messages = []
+        self.activity_events = []
         self.message_count = 0
         self.budget_remaining = self.budget
         self.start_time = time.time()
@@ -122,6 +131,14 @@ class DashboardState:
                     "context_slice": m.context_slice,
                 }
                 for m in self.messages
+            ],
+            "activity_events": [
+                {
+                    "agent": a.agent,
+                    "activity": a.activity,
+                    "elapsed": a.elapsed,
+                }
+                for a in self.activity_events
             ],
             "stats": {
                 "message_count": self.message_count,

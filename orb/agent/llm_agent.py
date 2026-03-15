@@ -12,7 +12,7 @@ from ..llm.types import CompletionRequest, ModelConfig, DEFAULT_MODELS, ModelTie
 from ..memory.memory_graph import MemoryGraph
 from ..memory.memory_node import MemoryNode, MemoryEdge
 from ..messaging.bus import MessageBus
-from ..messaging.channel import AgentChannel
+from ..messaging.channel import AgentChannel, ChannelClosed
 from ..messaging.message import Message, MessageType
 from .base import AgentNode
 from .conversation import ConversationHistory
@@ -432,8 +432,8 @@ class LLMAgent(AgentNode):
         try:
             await self.send(outgoing)
             self._conversation.add_tool_result(tool_id, f"Message sent to {to}")
-        except Exception as e:
-            self._conversation.add_tool_result(tool_id, f"Failed to send: {e}")
+        except ChannelClosed as exc:
+            self._conversation.add_tool_result(tool_id, f"Failed to send: {exc}")
 
     async def _handle_complete(self, tool_id: str, input_data: dict) -> None:
         result = input_data.get("result", "")
@@ -492,18 +492,18 @@ class LLMAgent(AgentNode):
             self._conversation.add_tool_result(tool_id, "Error: path is required")
             return
         try:
-            # Capture old content before overwriting for diff display
-            try:
-                old_content = self._sandbox().read_file(path)
-            except Exception:
-                old_content = ""
+            old_content = self._sandbox().read_file(path)
+        except FileNotFoundError:
+            old_content = ""
+        try:
             result = self._sandbox().write_file(path, content)
-            self._conversation.add_tool_result(tool_id, result)
-            self._invalidate_fs_cache_for_path(path)
-            if self._on_file_write:
-                self._on_file_write(self.node_id, path, content, old_content)
-        except Exception as e:
-            self._conversation.add_tool_result(tool_id, f"Error writing {path}: {e}")
+        except (PermissionError, OSError, ValueError) as exc:
+            self._conversation.add_tool_result(tool_id, f"Error writing {path}: {exc}")
+            return
+        self._conversation.add_tool_result(tool_id, result)
+        self._invalidate_fs_cache_for_path(path)
+        if self._on_file_write:
+            self._on_file_write(self.node_id, path, content, old_content)
 
     async def _handle_read_file(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", "").strip()
@@ -517,10 +517,11 @@ class LLMAgent(AgentNode):
             return
         try:
             content = self._sandbox().read_file(path)
-            self._fs_cache[("read", norm_path)] = content
-            self._conversation.add_tool_result(tool_id, content)
-        except Exception as e:
-            self._conversation.add_tool_result(tool_id, f"Error reading {path}: {e}")
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            self._conversation.add_tool_result(tool_id, f"Error reading {path}: {exc}")
+            return
+        self._fs_cache[("read", norm_path)] = content
+        self._conversation.add_tool_result(tool_id, content)
 
     async def _handle_list_directory(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", ".").strip() or "."
@@ -531,10 +532,11 @@ class LLMAgent(AgentNode):
             return
         try:
             listing = self._sandbox().list_directory(path)
-            self._fs_cache[("list", norm_path)] = listing
-            self._conversation.add_tool_result(tool_id, listing)
-        except Exception as e:
-            self._conversation.add_tool_result(tool_id, f"Error listing {path}: {e}")
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
+            self._conversation.add_tool_result(tool_id, f"Error listing {path}: {exc}")
+            return
+        self._fs_cache[("list", norm_path)] = listing
+        self._conversation.add_tool_result(tool_id, listing)
 
     async def _handle_run_command(self, tool_id: str, input_data: dict) -> None:
         command = input_data.get("command", "").strip()

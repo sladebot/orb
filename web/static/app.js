@@ -221,7 +221,16 @@ class Dashboard {
         if (this._plan?.topology?.id) {
             this._addPredictionCard(this._plan);
         }
-        if ((data.messages || []).length === 0 && !this.messageLog.children.length) {
+        for (const activityEvent of data.activity_events || []) {
+            this._handleAgentActivity({
+                type: 'agent_activity',
+                agent: activityEvent.agent,
+                activity: activityEvent.activity,
+                elapsed: activityEvent.elapsed,
+                hydrated: true,
+            });
+        }
+        if ((data.messages || []).length === 0 && (data.activity_events || []).length === 0 && !this.messageLog.children.length) {
             this._setMessageEmptyState();
         }
         for (const msg of data.messages) {
@@ -1398,8 +1407,11 @@ class Dashboard {
 
         // Store per-agent activity lines for node detail panel
         if (!this._agentActivityLines[agent]) this._agentActivityLines[agent] = [];
-        this._agentActivityLines[agent].push(activity);
-        if (this._agentActivityLines[agent].length > 10) this._agentActivityLines[agent].shift();
+        const lines = this._agentActivityLines[agent];
+        if (!data.hydrated || lines[lines.length - 1] !== activity) {
+            lines.push(activity);
+            if (lines.length > 10) lines.shift();
+        }
 
         // If this agent isn't currently showing the thinking indicator, show it
         if (this._thinkingAgent !== agent) {

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from aiohttp import web
+from json import JSONDecodeError
 
 from orb.runtime import GraphRuntime
 from .state import DashboardState
@@ -85,7 +86,7 @@ class DashboardServer:
         for ws in self._clients:
             try:
                 await ws.send_str(data)
-            except (ConnectionResetError, Exception):
+            except (ConnectionResetError, RuntimeError):
                 closed.append(ws)
         for ws in closed:
             self._clients.discard(ws)
@@ -105,7 +106,7 @@ class DashboardServer:
             return web.json_response({"ok": False, "error": "Request too large"}, status=413)
         try:
             body = await request.json()
-        except Exception:
+        except (JSONDecodeError, UnicodeDecodeError, ValueError):
             return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
 
         target_id = body.get("to", "").strip()
@@ -123,7 +124,7 @@ class DashboardServer:
             return web.json_response({"ok": False, "error": "Request too large"}, status=413)
         try:
             body = await request.json()
-        except Exception:
+        except (JSONDecodeError, UnicodeDecodeError, ValueError):
             return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
 
         query = (body.get("query") or "").strip()
@@ -131,7 +132,8 @@ class DashboardServer:
         model_pin = (body.get("model") or "auto").strip()
         if not query:
             return web.json_response({"ok": False, "error": "Query must not be empty"}, status=400)
-        from orb.topologies import get_loader
+        from orb.topologies import get_loader, normalize_topology_id
+        topology = normalize_topology_id(topology)
         valid_topologies = ["auto"] + get_loader().list_ids()
         if topology not in valid_topologies:
             return web.json_response(
@@ -186,7 +188,7 @@ class DashboardServer:
             logger.info("Dashboard client connected (%s total)", len(self._clients))
             try:
                 await ws.send_str(json.dumps(self.runtime.current_init_event()))
-            except Exception:
+            except (ConnectionResetError, RuntimeError):
                 pass
             async for _msg in ws:
                 pass

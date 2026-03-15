@@ -585,6 +585,7 @@ class GraphRuntime:
     ) -> None:
         from orb.agent.compaction import COMPACT_THRESHOLD, compact_history
         from web.bridge import DashboardBridge
+        from web.state import ActivityRecord
 
         self._turn_count += 1
         bridge = DashboardBridge(self.state, self._broadcast)
@@ -645,6 +646,13 @@ class GraphRuntime:
         orchestrator._on_agent_complete = wrapped_on_complete
 
         async def on_agent_activity(agent_id: str, activity: str) -> None:
+            self.state.activity_events.append(ActivityRecord(
+                agent=agent_id,
+                activity=activity,
+                elapsed=round(time.time() - self.state.start_time, 2),
+            ))
+            if len(self.state.activity_events) > 100:
+                self.state.activity_events = self.state.activity_events[-100:]
             await self._broadcast(json.dumps({"type": "agent_activity", "agent": agent_id, "activity": activity}))
 
         async def on_agent_heartbeat(agent_id: str, payload: dict) -> None:

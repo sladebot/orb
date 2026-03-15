@@ -6,6 +6,7 @@ import logging
 from ..agent.llm_agent import LLMAgent
 from ..agent.types import AgentStatus
 from ..messaging.bus import MessageBus
+from ..messaging.channel import ChannelClosed
 from ..messaging.message import Message, MessageType
 from ..tracing.logger import EventLogger
 from .types import OrchestratorConfig, RunResult
@@ -72,7 +73,7 @@ class Orchestrator:
                         await other_agent.channel.send(shutdown_msg)
                         if transcript is not None:
                             transcript.add_message(shutdown_msg)
-                    except Exception:
+                    except ChannelClosed:
                         logger.warning(f"Could not send shutdown COMPLETE to {other_id}")
             self._completion_event.set()
             return
@@ -93,7 +94,7 @@ class Orchestrator:
                             await other_agent.channel.send(consensus_msg)
                             if transcript is not None:
                                 transcript.add_message(consensus_msg)
-                        except Exception:
+                        except ChannelClosed:
                             logger.warning(f"Could not send consensus COMPLETE to {other_id}")
 
         # When all workers are done, forward a summary to the synthesis agent.
@@ -115,7 +116,7 @@ class Orchestrator:
                         await synth_agent.channel.send(notify_msg)
                         if transcript is not None:
                             transcript.add_message(notify_msg)
-                    except Exception:
+                    except ChannelClosed:
                         logger.warning("Could not notify synthesis agent")
 
     async def run(self, query: str) -> RunResult:
@@ -178,7 +179,7 @@ class Orchestrator:
                 t.cancel()
                 try:
                     await t
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
 
         sandbox_dir = str(self._sandbox.root) if self._sandbox else None

@@ -170,9 +170,15 @@ class TestDashboardBridge:
         bridge, _ = _make_bridge()
         bridge.setup_agents({"a": "A"})
         bridge.state.message_count = 5
+        bridge.state.activity_events.append(
+            __import__("web.state", fromlist=["ActivityRecord"]).ActivityRecord(
+                agent="a", activity="Calling model", elapsed=0.1
+            )
+        )
         bridge.state.reset()
         assert bridge.state.agents == {}
         assert bridge.state.message_count == 0
+        assert bridge.state.activity_events == []
         assert bridge.state.completed is False
 
     def test_to_init_event_structure(self):
@@ -191,6 +197,7 @@ class TestDashboardBridge:
         assert "agents" in event
         assert "edges" in event
         assert "messages" in event
+        assert "activity_events" in event
         assert "stats" in event
         assert event["plan"]["topology"]["id"] == "triad"
         assert event["plan"]["neighbors"]["coder"] == ["reviewer", "tester"]
@@ -199,6 +206,22 @@ class TestDashboardBridge:
         assert agent["id"] == "coder"
         assert agent["role"] == "Coder"
         assert "last_heartbeat" in agent
+
+    def test_to_init_event_includes_activity_events(self):
+        state = DashboardState()
+        state.activity_events.append(
+            __import__("web.state", fromlist=["ActivityRecord"]).ActivityRecord(
+                agent="coder", activity="Calling claude-sonnet…", elapsed=1.2
+            )
+        )
+
+        event = state.to_init_event()
+
+        assert event["activity_events"] == [{
+            "agent": "coder",
+            "activity": "Calling claude-sonnet…",
+            "elapsed": 1.2,
+        }]
 
     async def test_budget_decrements_with_messages(self):
         bridge, _ = _make_bridge()
