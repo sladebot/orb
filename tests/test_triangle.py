@@ -1,5 +1,5 @@
 from orb.llm.types import ModelTier, ModelConfig
-from orb.topologies.triangle import create_triangle
+from orb.topologies import create_orchestrator
 
 # Reuse mock from test_claude_agent
 from tests.test_claude_agent import MockLLMClient
@@ -11,7 +11,8 @@ class TestTriangle:
         mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
         overrides = {t: mock_model for t in ModelTier}
 
-        orchestrator = create_triangle(
+        orchestrator = create_orchestrator(
+            "triangle",
             providers={"mock": mock},
             model_overrides=overrides,
             trace=False,
@@ -35,7 +36,8 @@ class TestTriangle:
         mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
         overrides = {t: mock_model for t in ModelTier}
 
-        orchestrator = create_triangle(
+        orchestrator = create_orchestrator(
+            "triangle",
             providers={"mock": mock},
             model_overrides=overrides,
             trace=False,

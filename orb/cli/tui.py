@@ -462,6 +462,7 @@ class HelpScreen(Screen):
         self.app.pop_screen()
 
 
+
 class CommandScreen(Screen):
     """Compact command launcher for the TUI."""
 
@@ -643,11 +644,13 @@ class GraphPanel(Static):
         if not s._agents:
             t.append("\n  Waiting for task…\n", style="dim italic")
             t.append("  Type below and press Enter to start.\n\n", style="dim")
+            from orb.topologies import get_loader
+            loader = get_loader()
             t.append("  Topologies available:\n", style="dim")
-            t.append("  --topology triangle    ", style="dim")
-            t.append("Coordinator → Coder ↔ Reviewer ↔ Tester\n", style="dim cyan")
-            t.append("  --topology dual-review ", style="dim")
-            t.append("Coder → Reviewer A + Reviewer B\n", style="dim cyan")
+            for topo in loader.list_all().values():
+                t.append(f"  {topo.label}\n", style="bold dim")
+                t.append(f"    --topology {topo.id}\n", style="dim")
+                t.append(f"    {len(topo.agents)} agents\n\n", style="dim cyan")
             return t
 
         # ── Topology graph ─────────────────────────────────────────────
@@ -2153,6 +2156,7 @@ class OrbTUI(App[None]):
             msg_count=self._routed,
             diff=self._last_diff,
         ))
+
 
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen())

@@ -135,6 +135,12 @@ orb -i
 
 Opens a prompt loop. Submit tasks one at a time; agents are rebuilt fresh each run.
 
+```
+/list-topologies          # show all available topologies
+/topology dual-review     # switch topology for the next run
+/reload-topologies        # hot-reload ~/.orb/topologies.yaml
+```
+
 ### Terminal TUI
 
 ```bash
@@ -209,7 +215,7 @@ orb [OPTIONS] [QUERY]
 |------|---------|-------------|
 | `query` | — | Task to run (omit for interactive mode) |
 | `-i`, `--interactive` | off | Interactive REPL mode |
-| `--topology` | `triangle` | Agent topology: `triangle` or `dual-review` |
+| `--topology` | `triangle` | Agent topology id — any builtin or custom id (e.g. `triangle`, `dual-review`). Run `orb --list-topologies` to see all available. |
 | `--budget N` | 200 | Global message budget (hard ceiling) |
 | `--timeout N` | 600.0 | Timeout in seconds |
 | `--max-depth N` | 10 | Max message hop depth per chain |
@@ -370,6 +376,8 @@ If a run is active (status = Running), new input is forwarded directly to the co
 
 ## Topologies
 
+Topologies are defined in YAML and loaded at startup. Orb ships two builtins; you can add your own at `~/.orb/topologies.yaml`.
+
 ### Triangle (default)
 
 ```
@@ -380,18 +388,11 @@ Coordinator
    Tester ────────╯
 ```
 
-Four agents: Coordinator routes and synthesizes; Coder writes and iterates; Reviewer checks for correctness, style, and edge cases; Tester writes and runs test cases. All three worker agents can communicate with each other directly.
+Four agents: Coordinator routes and synthesizes; Coder writes and iterates; Reviewer checks for correctness, style, and edge cases; Tester writes and runs test cases.
 
 ```bash
 orb --topology triangle "write a binary search tree"
 ```
-
-| Agent | Base complexity | Filesystem access |
-|-------|----------------|-------------------|
-| Coordinator | 20 | no |
-| Coder | 50 | yes |
-| Reviewer | 65 | yes |
-| Tester | 25 | yes |
 
 ### Dual Review
 
@@ -405,13 +406,57 @@ Rev A   Rev B
    Tester
 ```
 
-Five agents. Two reviewers — Reviewer A and Reviewer B — are assigned to **different providers** when possible, so they evaluate code from independent perspectives. They must reach explicit consensus before approving. Tester reports to both reviewers.
+Five agents. Two reviewers are assigned to **different providers** when possible so they evaluate code from independent perspectives. They must reach explicit consensus before approving.
 
 ```bash
 orb --topology dual-review "write a concurrent queue"
 ```
 
-Reviewer provider priority: Anthropic → OpenAI Codex → OpenAI → Ollama. Reviewer B is assigned the next available provider after Reviewer A.
+### Custom topologies
+
+Define your own topology in YAML and place it at `~/.orb/topologies.yaml`. See `sample-topology.yaml` in the project root for a fully commented 6-agent example (Coordinator → Researcher → Coder → Security Reviewer + Code Reviewer → Tester).
+
+```yaml
+# ~/.orb/topologies.yaml
+version: "1.0"
+
+topologies:
+  my-topology:
+    id: "my-topology"
+    label: "My Topology"
+    description: "..."
+    entry_agent: "coordinator"
+
+    agents:
+      coordinator:
+        role: "Coordinator"
+        description: "..."
+        base_complexity: 20
+
+      coder:
+        role: "Coder"
+        description: "..."
+        base_complexity: 55
+        enable_filesystem: true
+
+    edges:
+      - [coordinator, coder]
+
+    workflow_steps:
+      - "Coordinator routes the task to the Coder."
+
+    completion_rules:
+      coordinator:
+        - "Route the task without solving it yourself."
+      coder:
+        - "Complete after implementing the solution."
+```
+
+```bash
+orb --topology my-topology "build a URL shortener"
+```
+
+The file is watched while the web dashboard is running — edits are hot-reloaded and the topology dropdown updates automatically without a restart. In the REPL, run `/reload-topologies` to pick up changes manually.
 
 ---
 
@@ -504,8 +549,9 @@ orb --dashboard --dashboard-port 3000
 Opens a WebSocket-backed web UI at `http://localhost:8080` (or the specified port). The dashboard provides:
 
 - **Live graph canvas** — agent nodes with animated edges as messages route between them
+- **Topology dropdown** — anchored top-right of the graph; switch topologies between runs; updates automatically on hot-reload
 - **Scrollable message log** — real-time feed of all inter-agent messages
-- **Stats bar** — message count, budget usage, run status
+- **Stats bar** — message count, budget usage, elapsed time, active topology, run status
 - **Agent detail panel** — click any node to see that agent's messages and results
 - **Files changed section** — after completion, shows a collapsible syntax-highlighted diff of all files written during the run
 
@@ -605,7 +651,7 @@ orb/
 ├── messaging/      # Message types, async AgentChannel, MessageBus, middleware
 ├── orchestrator/   # Orchestrator lifecycle, OrchestratorConfig, result types
 ├── sandbox/        # Sandboxed filesystem and command execution
-├── topologies/     # Topology factories: triad.py (triangle), dual_review.py
+├── topologies/     # YAML loader, Pydantic schema, factory, hot-reload watcher, bundled defaults
 └── tracing/        # EventLogger for terminal tracing
 web/
 ├── server.py       # aiohttp WebSocket + HTTP server
@@ -620,7 +666,6 @@ tests/              # Unit and integration tests (pytest-asyncio)
 ## Testing
 
 ```bash
-conda activate orb
 pytest tests/ -v
 
 # Integration tests (require a live API key)

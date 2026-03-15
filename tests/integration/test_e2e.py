@@ -4,7 +4,7 @@ import pytest
 
 from orb.llm.providers import AnthropicProvider
 from orb.orchestrator.types import OrchestratorConfig
-from orb.topologies.triangle import create_triangle
+from orb.topologies import create_orchestrator
 
 
 @pytest.mark.skipif(
@@ -16,7 +16,8 @@ class TestE2E:
         provider = AnthropicProvider()
         try:
             config = OrchestratorConfig(timeout=120.0, budget=30, max_depth=5)
-            orchestrator = create_triangle(
+            orchestrator = create_orchestrator(
+                "triangle",
                 providers={"anthropic": provider},
                 config=config,
                 trace=True,
