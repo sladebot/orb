@@ -52,48 +52,16 @@ class RunTranscript:
         self,
         agent_id: str,
         *,
-        neighbor_ids: list[str] | None = None,
-        focus_chain_id: str = "",
-        max_turns: int = 40,
-        max_chars: int = 6000,
+        max_chars: int | None = None,
     ) -> str:
-        neighbors = set(neighbor_ids or [])
-        selected: list[ConversationTurn] = []
-        for turn in self.turns:
-            if turn.chain_id and focus_chain_id and turn.chain_id == focus_chain_id:
-                selected.append(turn)
-                continue
-            if turn.speaker == "user" or turn.audience == "user":
-                selected.append(turn)
-                continue
-            if turn.speaker == agent_id or turn.audience == agent_id:
-                selected.append(turn)
-                continue
-            if (
-                (turn.speaker == agent_id and turn.audience in neighbors)
-                or (turn.audience == agent_id and turn.speaker in neighbors)
-            ):
-                selected.append(turn)
-                continue
-            if turn.kind == "completion" and turn.speaker in neighbors:
-                selected.append(turn)
-
-        if not selected:
-            selected = list(self.turns)
-
-        recent = selected[-max_turns:]
-        omitted = selected[:-max_turns]
         lines = [
             "Shared session transcript.",
             f"Current target agent: {agent_id}",
             "Use this transcript as the collaborative conversation context across user and agent turns.",
             "",
         ]
-        if omitted:
-            lines.extend(self._compact_turns(omitted))
-            lines.append("")
 
-        for turn in recent:
+        for turn in self.turns:
             speaker = turn.speaker
             audience = turn.audience
             kind = turn.kind
@@ -103,7 +71,7 @@ class RunTranscript:
             lines.append(f"[{kind}] {speaker} -> {audience}: {content}")
 
         rendered = "\n".join(lines).strip()
-        if len(rendered) <= max_chars:
+        if max_chars is None or len(rendered) <= max_chars:
             return rendered
 
         clipped = rendered[-max_chars:]
@@ -116,18 +84,3 @@ class RunTranscript:
         self.turns.append(turn)
         if len(self.turns) > self.max_turns:
             self.turns = self.turns[-self.max_turns:]
-
-    def _compact_turns(self, turns: list[ConversationTurn]) -> list[str]:
-        counts: dict[str, int] = {}
-        highlights: list[str] = []
-        for turn in turns[-8:]:
-            counts[turn.kind] = counts.get(turn.kind, 0) + 1
-            content = turn.content.replace("\n", " ").strip()
-            if len(content) > 140:
-                content = content[:140] + "…"
-            highlights.append(f"[{turn.kind}] {turn.speaker} -> {turn.audience}: {content}")
-
-        count_str = ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
-        lines = [f"Compacted earlier transcript turns ({len(turns)} omitted; {count_str})."]
-        lines.extend(highlights)
-        return lines

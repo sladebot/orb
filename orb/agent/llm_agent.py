@@ -150,51 +150,39 @@ class LLMAgent(AgentNode):
         # Store in memory
         self._store_memory(msg)
 
-        # Build ordered candidate list: preferred tier first, then all cloud tiers as fallback.
-        # This ensures local-unavailable tiers are skipped transparently.
         from ..llm.types import OPENAI_MODELS, CODEX_MODELS
 
-        def _candidate_configs() -> list:
-            seen: set[str] = set()
-            candidates = []
-            if self.config.pinned_model:
-                tiers = [self.config.pinned_model.tier]
-            else:
-                preferred = self._tier_override or self._selector.select_with_available(
-                    msg, set(self._providers.keys())
-                )
-                self._last_complexity_score = self._selector.last_score
-                tiers = [preferred,
-                         ModelTier.CLOUD_LITE, ModelTier.CLOUD_FAST, ModelTier.CLOUD_STRONG]
-            for t in tiers:
-                for cfg in [
-                    self._model_overrides.get(t),
-                    DEFAULT_MODELS.get(t),
-                    OPENAI_MODELS.get(t),
-                    CODEX_MODELS.get(t),
-                ]:
-                    if cfg and cfg.provider in self._providers:
-                        key = f"{cfg.provider}:{cfg.model_id}"
-                        if key not in seen:
-                            seen.add(key)
-                            candidates.append(cfg)
-            return candidates
+        def _resolve_model_config() -> ModelConfig | None:
+            if self.config.pinned_model is not None:
+                cfg = self.config.pinned_model
+                return cfg if cfg.provider in self._providers else None
 
-        candidates = _candidate_configs()
-        if not candidates:
+            preferred = self._tier_override or self._selector.select_with_available(
+                msg, set(self._providers.keys())
+            )
+            self._last_complexity_score = self._selector.last_score
+            for cfg in (
+                self._model_overrides.get(preferred),
+                DEFAULT_MODELS.get(preferred),
+                OPENAI_MODELS.get(preferred),
+                CODEX_MODELS.get(preferred),
+            ):
+                if cfg and cfg.provider in self._providers:
+                    return cfg
+            return None
+
+        model_config = _resolve_model_config()
+        if model_config is None:
             err = "No LLM provider available. Check your API keys (orb auth status)."
             logger.error(f"[{self.node_id}] {err}")
             await self._handle_complete("no_provider", {"result": f"[ERROR] {err}"})
             return
 
-        model_config = candidates[0]
         provider = self._providers[model_config.provider]
         shared_transcript = ""
         if self._shared_transcript is not None:
             shared_transcript = self._shared_transcript.render_for_model(
                 self.node_id,
-                neighbor_ids=sorted(self.neighbors),
-                focus_chain_id=msg.chain_id,
             )
         request_messages = build_request_messages(
             self._conversation.get_messages(),
@@ -226,8 +214,6 @@ class LLMAgent(AgentNode):
 
         MAX_TOOL_NUDGES = 3
         nudge_count = 0
-        # Track which candidate index we're on for mid-call fallback
-        candidate_idx = 0
 
         while True:
             await self._emit(f"Calling {model_config.model_id}…")
@@ -238,36 +224,16 @@ class LLMAgent(AgentNode):
                     f"[{self.node_id}] LLM call failed "
                     f"({model_config.provider}/{model_config.model_id}): {exc}"
                 )
-                # Walk through remaining candidates in order
-                candidate_idx += 1
-                response = None
-                while candidate_idx < len(candidates):
-                    fallback_config = candidates[candidate_idx]
-                    logger.warning(
-                        f"[{self.node_id}] Retrying with "
-                        f"{fallback_config.provider}/{fallback_config.model_id}"
-                    )
-                    await self._emit(f"Retrying with {fallback_config.model_id}…")
-                    try:
-                        fb_request = CompletionRequest(
-                            messages=request.messages,
-                            tools=request.tools,
-                            system=request.system,
-                            model_config=fallback_config,
-                        )
-                        response = await self._providers[fallback_config.provider].complete(fb_request)
-                        model_config = fallback_config
-                        provider = self._providers[model_config.provider]
-                        request = fb_request
-                        break
-                    except Exception as exc2:
-                        logger.warning(f"[{self.node_id}] Fallback failed: {exc2}")
-                        candidate_idx += 1
-                if response is None:
-                    err = "All LLM providers failed. Check API keys and network access."
-                    logger.error(f"[{self.node_id}] {err}")
-                    await self._handle_complete("all_providers_failed", {"result": f"[ERROR] {err}"})
-                    return
+                err = (
+                    "Assigned model call failed. "
+                    "Each node is pinned to a single provider/model for the run."
+                )
+                logger.error(f"[{self.node_id}] {err}")
+                await self._handle_complete(
+                    "assigned_model_failed",
+                    {"result": f"[ERROR] {err} ({model_config.provider}/{model_config.model_id})"},
+                )
+                return
 
             # _last_model is read by web/server.py and tui.py at completion time
             self._last_model = response.model
