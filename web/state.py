@@ -44,6 +44,14 @@ class ActivityRecord:
 
 
 @dataclass
+class PlanStepRecord:
+    stage: str
+    title: str
+    detail: str
+    elapsed: float
+
+
+@dataclass
 class DashboardState:
     """Snapshot of the full system state for dashboard rendering."""
 
@@ -51,6 +59,7 @@ class DashboardState:
     edges: list[EdgeState] = field(default_factory=list)
     messages: list[MessageRecord] = field(default_factory=list)
     activity_events: list[ActivityRecord] = field(default_factory=list)
+    plan_steps: list[PlanStepRecord] = field(default_factory=list)
     message_count: int = 0
     budget: int = 200
     budget_remaining: int = 200
@@ -65,6 +74,11 @@ class DashboardState:
     agent_neighbors: dict[str, list[str]] = field(default_factory=dict)
     agent_positions: dict[str, str] = field(default_factory=dict)
     graph_view: dict = field(default_factory=dict)
+    final_result: str = ""
+    final_agent: str = ""
+    final_diff: str = ""
+    session_turn: int = 0
+    workdir: str = ""
 
     def reset(self) -> None:
         """Reset all state back to defaults (called before starting a new run)."""
@@ -72,6 +86,7 @@ class DashboardState:
         self.edges = []
         self.messages = []
         self.activity_events = []
+        self.plan_steps = []
         self.message_count = 0
         self.budget_remaining = self.budget
         self.start_time = time.time()
@@ -85,6 +100,11 @@ class DashboardState:
         self.agent_neighbors = {}
         self.agent_positions = {}
         self.graph_view = {}
+        self.final_result = ""
+        self.final_agent = ""
+        self.final_diff = ""
+        self.session_turn = 0
+        self.workdir = ""
 
     def to_init_event(self) -> dict:
         return {
@@ -102,6 +122,7 @@ class DashboardState:
                 "neighbors": self.agent_neighbors,
                 "positions": self.agent_positions,
                 "graph_view": self.graph_view,
+                "workdir": self.workdir,
             },
             "agents": [
                 {
@@ -140,9 +161,23 @@ class DashboardState:
                 }
                 for a in self.activity_events
             ],
+            "plan_steps": [
+                {
+                    "stage": s.stage,
+                    "title": s.title,
+                    "detail": s.detail,
+                    "elapsed": s.elapsed,
+                }
+                for s in self.plan_steps
+            ],
             "stats": {
                 "message_count": self.message_count,
                 "budget_remaining": self.budget_remaining,
                 "elapsed": time.time() - self.start_time,
             },
+            "final_result": self.final_result,
+            "final_agent": self.final_agent,
+            "final_diff": self.final_diff,
+            "session_turn": self.session_turn,
+            "workdir": self.workdir,
         }

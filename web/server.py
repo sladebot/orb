@@ -14,7 +14,16 @@ from .state import DashboardState
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-_BUILD_TS = str(int(time.time()))
+
+
+@web.middleware
+async def _no_cache_middleware(request: web.Request, handler):
+    response = await handler(request)
+    if request.path == "/" or request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 class DashboardServer:
@@ -31,7 +40,7 @@ class DashboardServer:
         self.host = host
         self.port = port
         self.runtime = runtime or GraphRuntime(state)
-        self._app = web.Application()
+        self._app = web.Application(middlewares=[_no_cache_middleware])
         self._clients: set[web.WebSocketResponse] = set()
         self._runner: web.AppRunner | None = None
 
@@ -92,11 +101,21 @@ class DashboardServer:
             self._clients.discard(ws)
 
     async def _index_handler(self, request: web.Request) -> web.Response:
+        build_ts = str(max(
+            int((STATIC_DIR / "style.css").stat().st_mtime),
+            int((STATIC_DIR / "graph.js").stat().st_mtime),
+            int((STATIC_DIR / "app.js").stat().st_mtime),
+            int((STATIC_DIR / "index.html").stat().st_mtime),
+        ))
         html = (STATIC_DIR / "index.html").read_text()
-        html = html.replace("/static/style.css", f"/static/style.css?v={_BUILD_TS}")
-        html = html.replace("/static/graph.js", f"/static/graph.js?v={_BUILD_TS}")
-        html = html.replace("/static/app.js", f"/static/app.js?v={_BUILD_TS}")
-        return web.Response(text=html, content_type="text/html")
+        html = html.replace("/static/style.css", f"/static/style.css?v={build_ts}")
+        html = html.replace("/static/graph.js", f"/static/graph.js?v={build_ts}")
+        html = html.replace("/static/app.js", f"/static/app.js?v={build_ts}")
+        response = web.Response(text=html, content_type="text/html")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     async def _state_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.current_init_event())

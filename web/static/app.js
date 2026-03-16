@@ -34,6 +34,7 @@ class Dashboard {
         this.canvas      = document.getElementById('graph-canvas');
         this.graph       = new GraphRenderer(this.canvas);
         this.messageLog  = document.getElementById('message-log');
+        this.changesLog  = document.getElementById('changes-log');
         this.agentCards  = document.getElementById('agent-cards');
         this.ws          = null;
         this.agents      = {};       // id -> agent data object
@@ -45,20 +46,8 @@ class Dashboard {
         this._agentActivityLines = {};  // agentId -> string[] (last 10 lines)
         this._plan = null;
 
-        // Tab switching
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.addEventListener('click', () => this._switchTab(btn.dataset.tab));
-        });
-
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
-
-        // Chat panel controls
-        document.getElementById('chat-close').addEventListener('click', () => this._selectAgent(null));
-        document.getElementById('chat-send').addEventListener('click', () => this._sendChatMessage());
-        document.getElementById('chat-input').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') this._sendChatMessage();
-        });
 
         // Query bar
         document.getElementById('query-send').addEventListener('click', () => this._submitQuery());
@@ -113,8 +102,8 @@ class Dashboard {
         this._isRunActive = false;
         this._loadModelOptions();
         this._loadTopologyOptions();
+        this._setChangesEmptyState();
         this._setMessageEmptyState();
-        this._setAgentEmptyState();
 
         // Topology dropdown toggle
         document.getElementById('topology-trigger').addEventListener('click', () => this._toggleTopologyMenu());
@@ -171,6 +160,7 @@ class Dashboard {
     _handleEvent(data) {
         switch (data.type) {
             case 'init':           this._handleInit(data);           break;
+            case 'plan_step':      this._handlePlanStep(data);       break;
             case 'message':        this._handleMessage(data);        break;
             case 'agent_status':   this._handleAgentStatus(data);    break;
             case 'agent_stats':    this._handleAgentStats(data);     break;
@@ -189,6 +179,11 @@ class Dashboard {
         this._rawMessages = [];
         this._agentActivityLines = {};
         this._plan = data.plan || null;
+        this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
+        if (this.changesLog) this.changesLog.innerHTML = '';
+        this._setChangesEmptyState();
+        this._renderPlanningState();
+        this._updateWorkdir(data.workdir || this._plan?.workdir || '');
 
         // Update topology stat from server plan
         if (this._plan?.topology?.label) {
@@ -197,6 +192,8 @@ class Dashboard {
 
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        const emptyInspector = document.getElementById('node-detail-empty');
+        if (emptyInspector) emptyInspector.classList.remove('hidden');
         this.selectedAgent = null;
         this.graph.selectedNode = null;
         this.agents = {};
@@ -216,11 +213,8 @@ class Dashboard {
         this.graph.setTopology(data.agents, data.edges);
         this._hideLoader();
 
-        // Render existing messages (runtime plan first if available)
+        // Render existing communications
         this.messageLog.innerHTML = '';
-        if (this._plan?.topology?.id) {
-            this._addPredictionCard(this._plan);
-        }
         for (const activityEvent of data.activity_events || []) {
             this._handleAgentActivity({
                 type: 'agent_activity',
@@ -236,9 +230,6 @@ class Dashboard {
         for (const msg of data.messages) {
             this._addMessageEntry(msg);
         }
-
-        // Render agent cards
-        this._rebuildAgentCards();
         this._updateStatusIndicator();
 
         if (data.stats) this._handleStats(data.stats);
@@ -258,6 +249,12 @@ class Dashboard {
                 document.getElementById('result-elapsed').textContent = '';
                 document.getElementById('result-body').innerHTML = this._renderResult(completedAgent.completed_result);
                 document.getElementById('result-panel').classList.remove('hidden');
+                this._renderInitialCodeChanges(
+                    data.final_result || completedAgent.completed_result,
+                    data.final_diff || '',
+                    '',
+                    data.session_turn || 0,
+                );
                 const bodyEl = document.getElementById('result-body');
                 const wrap = document.getElementById('result-body-wrap');
                 requestAnimationFrame(() => {
@@ -267,6 +264,31 @@ class Dashboard {
         } else {
             // Fresh open or no active run
             this._setRunActive(false);
+        }
+    }
+
+    _handlePlanStep(data) {
+        if (!this._planSteps) this._planSteps = [];
+        this._planSteps.push({
+            stage: data.stage || 'planning',
+            title: data.title || 'Planning update',
+            detail: data.detail || '',
+            elapsed: data.elapsed || 0,
+        });
+        if (this._planSteps.length > 20) this._planSteps = this._planSteps.slice(-20);
+        this._renderPlanningState();
+
+        const statusEl = document.getElementById('stat-status');
+        if (statusEl && !this._isRunActive) {
+            statusEl.textContent = 'Planning';
+            statusEl.className = 'stat-value status-running';
+        }
+
+        if (typeof data.detail === 'string' && data.title === 'Selected topology') {
+            const match = data.detail.match(/^([^:]+):?/);
+            if (match?.[1]) {
+                document.getElementById('stat-topology').textContent = match[1].trim();
+            }
         }
     }
 
@@ -298,7 +320,6 @@ class Dashboard {
         }
         // Pass full model id — graph.js will shorten it for display
         this.graph.updateAgentStatus(data.agent, data.status, data.model || '');
-        this._updateAgentCard(data.agent);
         this._updateStatusIndicator();
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
         // Show the actual model being used in the stats bar (first agent to report one wins)
@@ -317,7 +338,6 @@ class Dashboard {
         }
         // Keep graph node model in sync (agent_stats fires for both sender and receiver)
         if (data.model) this.graph.updateAgentStatus(data.agent, data.status || '', data.model);
-        this._updateAgentCard(data.agent);
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
     }
 
@@ -328,7 +348,6 @@ class Dashboard {
                 this.agents[data.agent].status = data.status;
             }
         }
-        this._updateAgentCard(data.agent);
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
     }
 
@@ -339,7 +358,6 @@ class Dashboard {
             this.agents[data.agent].result = data.result;
         }
         this.graph.updateAgentStatus(data.agent, 'completed');
-        this._updateAgentCard(data.agent);
         this._updateStatusIndicator();
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
 
@@ -432,32 +450,54 @@ class Dashboard {
         return this._plan?.topology?.label || (Object.keys(this.agents).length ? 'Active Graph' : 'Uninitialized');
     }
 
-    // ── Tab switching ─────────────────────────────────────────
-
-    _switchTab(tabName) {
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.tab === tabName);
-        });
-        document.querySelectorAll('.tab-pane').forEach(pane => {
-            pane.classList.toggle('active', pane.id === `tab-${tabName}`);
-        });
-    }
-
-    _setMessageEmptyState(text = 'Runs, agent questions, and handoffs will appear here.') {
-        this.messageLog.innerHTML = `
-            <div class="empty-state empty-state-messages">
-                <div class="empty-state-kicker">Message Feed</div>
-                <div class="empty-state-title">No activity yet</div>
+    _setChangesEmptyState(text = 'Final run summaries and diffs will accumulate here.') {
+        if (!this.changesLog) return;
+        this.changesLog.innerHTML = `
+            <div class="empty-state empty-state-changes">
+                <div class="empty-state-kicker">Code Changes</div>
+                <div class="empty-state-title">No run output yet</div>
                 <div class="empty-state-copy">${this._escapeHtml(text)}</div>
             </div>
         `;
     }
 
-    _setAgentEmptyState(text = 'Agents will appear after the runtime constructs the graph.') {
-        this.agentCards.innerHTML = `
-            <div class="empty-state empty-state-agents">
-                <div class="empty-state-kicker">Agents</div>
-                <div class="empty-state-title">Graph is idle</div>
+    _renderPlanningState() {
+        const list = document.getElementById('planning-list');
+        const status = document.getElementById('planning-status');
+        if (!list || !status) return;
+
+        const steps = Array.isArray(this._planSteps) ? this._planSteps : [];
+        if (!steps.length) {
+            status.textContent = this._isRunActive ? 'starting' : 'idle';
+            list.innerHTML = `<div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>`;
+            return;
+        }
+
+        status.textContent = 'live';
+        list.innerHTML = steps.map((step) => `
+            <div class="planning-step">
+                <div class="planning-time">${(step.elapsed || 0).toFixed(1)}s</div>
+                <div class="planning-body">
+                    <div class="planning-title">${this._escapeHtml(step.title || step.stage || 'Planning step')}</div>
+                    <div class="planning-detail">${this._escapeHtml(step.detail || '')}</div>
+                </div>
+            </div>
+        `).join('');
+        list.scrollTop = list.scrollHeight;
+    }
+
+    _updateWorkdir(workdir) {
+        const banner = document.getElementById('workdir-banner');
+        if (!banner) return;
+        banner.textContent = `workdir: ${workdir || '—'}`;
+        banner.title = workdir || '';
+    }
+
+    _setMessageEmptyState(text = 'Runs, agent questions, and handoffs will appear here.') {
+        this.messageLog.innerHTML = `
+            <div class="empty-state empty-state-messages">
+                <div class="empty-state-kicker">Node Communications</div>
+                <div class="empty-state-title">No graph traffic yet</div>
                 <div class="empty-state-copy">${this._escapeHtml(text)}</div>
             </div>
         `;
@@ -518,108 +558,11 @@ class Dashboard {
         this.messageLog.scrollTop = this.messageLog.scrollHeight;
     }
 
-    // ── Agent cards ───────────────────────────────────────────
-
-    _rebuildAgentCards() {
-        this.agentCards.innerHTML = '';
-        if (Object.keys(this.agents).length === 0) {
-            this._setAgentEmptyState();
-            return;
-        }
-        for (const agent of Object.values(this.agents)) {
-            this._createAgentCard(agent);
-        }
-    }
-
-    _createAgentCard(agent) {
-        const card = document.createElement('div');
-        card.id = `agent-card-${agent.id}`;
-        this._renderAgentCard(card, agent);
-        card.addEventListener('click', () => this._selectAgent(agent.id));
-        this.agentCards.appendChild(card);
-    }
-
-    _renderAgentCard(card, agent) {
-        const agentClass = AGENT_CSS_CLASS[agent.id]   || 'agent-user';
-        const borderCls  = AGENT_CARD_CLASS[agent.id]  || '';
-        const statusCls  = `status-badge-${agent.status}`;
-        const isSelected = this.selectedAgent === agent.id;
-
-        card.className = `agent-card ${borderCls}${isSelected ? ' selected' : ''}`;
-
-        // Result expand toggle
-        const hasResult = agent.status === 'completed' && agent.result;
-        const resultHtml = hasResult ? `
-            <div class="agent-result-section">
-                <div class="msg-section-label">Result</div>
-                <div class="agent-result-content">${this._escapeHtml(agent.result)}</div>
-            </div>
-        ` : '';
-
-        const complexity = agent.complexity || 0;
-        const complexityHtml = complexity > 0
-            ? `<span class="complexity-badge complexity-${this._complexityLevel(complexity)}" title="Complexity score: ${complexity}">${complexity}</span>`
-            : '';
-        const heartbeat = this._heartbeatState(agent);
-        const heartbeatHtml = heartbeat.age !== null
-            ? `<span class="agent-heartbeat ${heartbeat.live ? 'live' : 'stale'}" title="Last heartbeat ${heartbeat.age.toFixed(1)}s ago">hb ${heartbeat.age.toFixed(1)}s</span>`
-            : `<span class="agent-heartbeat stale" title="No heartbeat received">hb —</span>`;
-        const recentActivity = (this._agentActivityLines[agent.id] || []).slice(-1)[0]
-            || this._rawMessages.filter(m => m.from === agent.id || m.to === agent.id).slice(-1)[0]?.content
-            || '';
-        const activityHtml = recentActivity
-            ? `<div class="agent-card-activity">${this._escapeHtml(recentActivity.replace(/\s+/g, ' ').trim().slice(0, 120))}</div>`
-            : `<div class="agent-card-activity empty">No recent activity yet</div>`;
-
-        card.innerHTML = `
-            <div class="agent-card-header">
-                <span class="agent-card-name ${agentClass}">${agent.id}</span>
-                <span class="agent-card-role">${agent.role}</span>
-                <span class="agent-status-badge ${statusCls}">${agent.status}</span>
-            </div>
-            <div class="agent-card-meta">
-                <span>model: ${this._shortModel(agent.model) || '—'}</span>
-                <span>msgs: ${agent.msg_count}</span>
-                ${heartbeatHtml}
-                ${complexityHtml}
-            </div>
-            ${activityHtml}
-            ${resultHtml}
-        `;
-
-        if (hasResult) {
-            card.classList.add('result-expanded');
-        }
-    }
-
-    _updateAgentCard(agentId) {
-        const agent = this.agents[agentId];
-        if (!agent) return;
-
-        let card = document.getElementById(`agent-card-${agentId}`);
-        if (!card) {
-            this._createAgentCard(agent);
-        } else {
-            this._renderAgentCard(card, agent);
-            // Re-attach click listener (innerHTML wipe removed it)
-            card.addEventListener('click', () => this._selectAgent(agentId));
-        }
-    }
-
-    // ── Agent selection & chat panel ─────────────────────────
-
     _selectAgent(agentId) {
         this.selectedAgent = agentId;
 
         // Update graph selection
         this.graph.selectedNode = agentId;
-
-        // Update card selection styling
-        document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('selected'));
-        if (agentId) {
-            const card = document.getElementById(`agent-card-${agentId}`);
-            if (card) card.classList.add('selected');
-        }
 
         // Show node detail panel (replaces old chat panel for graph clicks)
         if (agentId) {
@@ -632,6 +575,8 @@ class Dashboard {
     // ── Node detail panel ─────────────────────────────────
 
     _showNodePanel(agentId) {
+        const emptyInspector = document.getElementById('node-detail-empty');
+        if (emptyInspector) emptyInspector.classList.add('hidden');
         document.getElementById('node-detail-panel').classList.remove('ndp-closed');
         this._refreshNodePanel();
         const inp = document.getElementById('ndp-chat-input');
@@ -640,10 +585,11 @@ class Dashboard {
 
     _hideNodePanel() {
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        const emptyInspector = document.getElementById('node-detail-empty');
+        if (emptyInspector) emptyInspector.classList.remove('hidden');
         if (this.selectedAgent) {
             this.selectedAgent = null;
             this.graph.selectedNode = null;
-            document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('selected'));
         }
     }
 
@@ -863,63 +809,6 @@ class Dashboard {
         document.getElementById('ndp-chat-input').focus();
     }
 
-    async _sendChatMessage() {
-        if (!this.selectedAgent) return;
-
-        const input = document.getElementById('chat-input');
-        const text  = input.value.trim();
-        if (!text) return;
-
-        const btn = document.getElementById('chat-send');
-        btn.disabled = true;
-        input.value  = '';
-
-        // Show sent message locally
-        const chatMessages = document.getElementById('chat-messages');
-        const sentEl = document.createElement('div');
-        sentEl.className = 'chat-msg-sent';
-        sentEl.textContent = text;
-        chatMessages.appendChild(sentEl);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-
-        // Also add to the message log immediately
-        this._addMessageEntry({
-            from:     'user',
-            to:       this.selectedAgent,
-            content:  text,
-            elapsed:  0,
-            model:    '',
-            depth:    0,
-            msg_type: 'task',
-            context_slice: [],
-        });
-
-        try {
-            const res = await fetch('/api/inject', {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ to: this.selectedAgent, message: text }),
-            });
-            const json = await res.json();
-            if (!json.ok) {
-                const errEl = document.createElement('div');
-                errEl.style.cssText = 'color:#f85149;font-size:10px;margin-bottom:3px';
-                errEl.textContent = `Error: ${json.error}`;
-                chatMessages.appendChild(errEl);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-            }
-        } catch (err) {
-            const errEl = document.createElement('div');
-            errEl.style.cssText = 'color:#f85149;font-size:10px;margin-bottom:3px';
-            errEl.textContent = `Network error: ${err.message}`;
-            chatMessages.appendChild(errEl);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        } finally {
-            btn.disabled = false;
-            input.focus();
-        }
-    }
-
     // ── Query bar ─────────────────────────────────────────────
 
     async _loadModelOptions() {
@@ -1112,13 +1001,17 @@ class Dashboard {
         this._rawMessages = [];
         this._agentActivityLines = {};
         this._plan = null;
+        this._planSteps = [];
         this.messageLog.innerHTML = '';
+        if (this.changesLog) this.changesLog.innerHTML = '';
+        this._setChangesEmptyState('Waiting for the run to finish so Orb can summarize the overall code changes.');
         this._setMessageEmptyState('Waiting for the runtime to build the graph and emit activity.');
-        this.agentCards.innerHTML = '';
-        this._setAgentEmptyState('Waiting for the runtime to construct the graph.');
+        this._renderPlanningState();
         this.agents = {};
         this.graph.setTopology([], []);
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        const emptyInspector = document.getElementById('node-detail-empty');
+        if (emptyInspector) emptyInspector.classList.remove('hidden');
         this.selectedAgent = null;
         this.graph.selectedNode = null;
         document.getElementById('result-panel').classList.add('hidden');
@@ -1183,8 +1076,21 @@ class Dashboard {
         const elapsed = data.elapsed !== undefined ? data.elapsed.toFixed(1) + 's' : '';
         const sessionTurn = data.session_turn || 0;
 
-        // Render final result card in the message log
         const diff = data.diff || '';
+        this._renderInitialCodeChanges(result, diff, elapsed, sessionTurn);
+
+        // Also update the result panel
+        document.getElementById('result-agent').textContent = 'Final Result';
+        document.getElementById('result-elapsed').textContent = elapsed;
+        document.getElementById('result-body').innerHTML = this._renderResult(result);
+        document.getElementById('result-panel').classList.remove('hidden');
+    }
+
+    _renderInitialCodeChanges(result, diff, elapsed = '', sessionTurn = 0) {
+        if (!this.changesLog) return;
+        const empty = this.changesLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
         const followUpHint = sessionTurn > 0
             ? `<span class="followup-hint">↩ type a follow-up to continue this session</span>`
             : '';
@@ -1228,14 +1134,8 @@ class Dashboard {
                 }
             });
         }
-        this.messageLog.appendChild(el);
-        this.messageLog.scrollTop = this.messageLog.scrollHeight;
-
-        // Also update the result panel
-        document.getElementById('result-agent').textContent = 'Final Result';
-        document.getElementById('result-elapsed').textContent = elapsed;
-        document.getElementById('result-body').innerHTML = this._renderResult(result);
-        document.getElementById('result-panel').classList.remove('hidden');
+        this.changesLog.appendChild(el);
+        this.changesLog.scrollTop = this.changesLog.scrollHeight;
     }
 
     _renderDiffStat(diff) {

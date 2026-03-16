@@ -56,15 +56,13 @@
 
     <!-- Main layout -->
     <div id="main-layout">
-        <!-- Left: sidebar -->
-        <div id="sidebar">
-            <!-- Tab bar -->
-            <div id="tab-bar">
-                <button class="tab-btn active" data-tab="messages">Messages</button>
-                <button class="tab-btn" data-tab="agents">Agents</button>
+        <div id="changes-panel" class="side-column">
+            <div class="side-column-header">
+                <span class="side-column-kicker">Output</span>
+                <h2 class="side-column-title">Code Changes</h2>
+                <div id="workdir-banner">workdir: —</div>
             </div>
 
-            <!-- Question panel (shown when agent asks for clarification) -->
             <div id="question-panel" class="hidden">
                 <div id="question-header">
                     <span id="question-from">agent is asking</span>
@@ -77,7 +75,6 @@
                 </div>
             </div>
 
-            <!-- Result banner (hidden until run completes) -->
             <div id="result-panel" class="hidden">
                 <div id="result-header">
                     <span id="result-badge">✓ Complete</span>
@@ -91,45 +88,18 @@
                 </div>
             </div>
 
-            <!-- Tab content -->
-            <div id="tab-content">
-                <!-- Messages tab -->
-                <div id="tab-messages" class="tab-pane active">
-                    <div id="message-log"></div>
+            <div id="planning-panel" class="planning-panel">
+                <div class="planning-header">
+                    <span>Daemon Plan</span>
+                    <span id="planning-status">idle</span>
                 </div>
-
-                <!-- Agents tab -->
-                <div id="tab-agents" class="tab-pane">
-                    <div id="agent-cards"></div>
+                <div id="planning-list" class="planning-list">
+                    <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
                 </div>
             </div>
 
-            <!-- Agent chat panel (hidden until agent selected) -->
-            <div id="chat-panel" class="hidden">
-                <div id="chat-header">
-                    <span id="chat-title">Chat with …</span>
-                    <button id="chat-close" title="Close">×</button>
-                </div>
-                <div id="chat-messages"></div>
-                <div id="chat-input-row">
-                    <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off">
-                    <button id="chat-send">Send</button>
-                </div>
-            </div>
+            <div id="changes-log"></div>
 
-            <!-- Graph toggle (mobile only) -->
-            <button id="graph-toggle-btn">
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                    <circle cx="3" cy="7" r="2" stroke="currentColor" stroke-width="1.5"/>
-                    <circle cx="11" cy="3" r="2" stroke="currentColor" stroke-width="1.5"/>
-                    <circle cx="11" cy="11" r="2" stroke="currentColor" stroke-width="1.5"/>
-                    <line x1="5" y1="6.3" x2="9" y2="3.7" stroke="currentColor" stroke-width="1.2"/>
-                    <line x1="5" y1="7.7" x2="9" y2="10.3" stroke="currentColor" stroke-width="1.2"/>
-                </svg>
-                <span id="graph-toggle-label">Show Agent Graph</span>
-            </button>
-
-            <!-- Query bar (bottom of sidebar) -->
             <div id="query-bar">
                 <div id="query-container">
                     <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
@@ -150,9 +120,7 @@
             </div>
         </div>
 
-        <!-- Right: graph canvas -->
         <div id="graph-panel">
-            <!-- Topology dropdown anchored top-right -->
             <div id="topology-dropdown">
                 <button id="topology-trigger" title="Switch topology">
                     <svg class="topo-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -177,8 +145,20 @@
                 <div class="loader-ring"></div>
                 <div id="loader-text">Starting agents…</div>
             </div>
+        </div>
 
-            <!-- Node detail panel — slides in from right on node click -->
+        <div id="communications-panel" class="side-column">
+            <div class="side-column-header">
+                <span class="side-column-kicker">Runtime</span>
+                <h2 class="side-column-title">Node Communications</h2>
+            </div>
+
+            <div id="node-detail-empty" class="empty-state">
+                <div class="empty-state-kicker">Node Inspector</div>
+                <div class="empty-state-title">Select a node</div>
+                <div class="empty-state-copy">Click a node in the graph to inspect its status, activity, recent messages, and send it direct input.</div>
+            </div>
+
             <div id="node-detail-panel" class="ndp-closed">
                 <div id="ndp-header">
                     <div id="ndp-accent"></div>
@@ -208,7 +188,6 @@
                         <div id="ndp-topology-map"></div>
                     </div>
 
-                    <!-- Live activity -->
                     <div id="ndp-activity-section" class="ndp-section hidden">
                         <div class="ndp-section-label">
                             <span class="ndp-section-icon">⚙</span> Activity Timeline
@@ -223,7 +202,6 @@
                         <div id="ndp-comm-grid"></div>
                     </div>
 
-                    <!-- Recent messages -->
                     <div id="ndp-messages-section" class="ndp-section">
                         <div class="ndp-section-label">
                             <span class="ndp-section-icon">✉</span> Recent Messages
@@ -231,7 +209,6 @@
                         <div id="ndp-message-list"></div>
                     </div>
 
-                    <!-- Result -->
                     <div id="ndp-result-section" class="ndp-section hidden">
                         <div class="ndp-section-label">
                             <span class="ndp-section-icon">✓</span> Result
@@ -240,13 +217,14 @@
                     </div>
                 </div>
 
-                <!-- Chat input -->
                 <div id="ndp-chat-row">
                     <div id="ndp-chat-label">Send input directly to this node</div>
                     <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
                     <button id="ndp-chat-send">Send</button>
                 </div>
             </div>
+
+            <div id="message-log"></div>
         </div>
     </div>
 

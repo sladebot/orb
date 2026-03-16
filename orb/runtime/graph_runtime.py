@@ -6,6 +6,8 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from json import JSONDecodeError
+from dataclasses import dataclass
+from pathlib import Path
 
 from web.state import DashboardState
 from orb.messaging.channel import ChannelClosed
@@ -14,6 +16,12 @@ from .transcript import RunTranscript
 logger = logging.getLogger(__name__)
 
 BroadcastFn = Callable[[str], Awaitable[None]]
+
+
+@dataclass
+class AgentModelAssignment:
+    config: object
+    reason: str = ""
 
 
 class GraphRuntime:
@@ -157,9 +165,25 @@ class GraphRuntime:
         self._tier_override = tier_override
 
     def current_init_event(self) -> dict:
+        self.state.workdir = str(Path.cwd())
         event = self.state.to_init_event()
         event["run_active"] = self.running
         return event
+
+    async def _record_plan_step(self, stage: str, title: str, detail: str) -> None:
+        from web.state import PlanStepRecord
+
+        elapsed = round(time.time() - self.state.start_time, 2)
+        self.state.plan_steps.append(PlanStepRecord(stage=stage, title=title, detail=detail, elapsed=elapsed))
+        if len(self.state.plan_steps) > 20:
+            self.state.plan_steps = self.state.plan_steps[-20:]
+        await self._broadcast(json.dumps({
+            "type": "plan_step",
+            "stage": stage,
+            "title": title,
+            "detail": detail,
+            "elapsed": elapsed,
+        }))
 
     async def stop(self) -> None:
         if self._run_task and not self._run_task.done():
@@ -226,24 +250,47 @@ class GraphRuntime:
         if self.running:
             return 200, {"ok": False, "error": "Run already in progress"}
 
+        self.state.reset()
+        self._last_result = None
+        self._run_transcript = RunTranscript()
+        self.state.run_query = query
+        self.state.workdir = str(Path.cwd())
+        await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
         predicted = await self.predict_topology(query, model_pin=model_pin)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
+        await self._record_plan_step(
+            "topology",
+            "Selected topology",
+            f"{predicted.get('label') or selected_topology}: {predicted.get('reason') or predicted.get('description') or ''}".strip(),
+        )
         topology_label, topology_description, agent_positions = self._topology_meta(selected_topology)
         graph_view = self._topology_graph_view(selected_topology)
         agent_complexity = dict(predicted.get("agent_complexity") or {})
         overall_complexity = int(predicted.get("complexity", 50))
-        agent_model_map = self._build_agent_model_map(
+        heuristic_model_map = self._build_agent_model_map(
             overall_complexity,
             model_pin=model_pin,
             agent_complexity=agent_complexity,
             topology_id=selected_topology,
         )
+        await self._record_plan_step(
+            "allocator",
+            "Built baseline model map",
+            ", ".join(f"{aid}={cfg.model_id}" for aid, cfg in heuristic_model_map.items()),
+        )
+        agent_model_map, _agent_model_reasons = await self._llm_assign_agent_models(
+            query,
+            selected_topology,
+            overall_complexity,
+            agent_complexity,
+            heuristic_model_map,
+        )
+        await self._record_plan_step(
+            "allocator",
+            "Pinned per-node models",
+            ", ".join(f"{aid}={cfg.model_id}" for aid, cfg in agent_model_map.items()),
+        )
         agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
-
-        self.state.reset()
-        self._last_result = None
-        self._run_transcript = RunTranscript()
-        self.state.run_query = query
         self.state.topology_id = selected_topology
         self.state.topology_label = topology_label
         self.state.topology_description = topology_description
@@ -258,6 +305,7 @@ class GraphRuntime:
                 model_pin=model_pin,
                 complexity=overall_complexity,
                 agent_complexity=agent_complexity,
+                agent_model_map=agent_model_map,
             )
         )
         self._run_task.add_done_callback(
@@ -277,9 +325,9 @@ class GraphRuntime:
         models = [{"id": "auto", "label": "Auto-select", "provider": "auto", "local": False}]
         if "anthropic" in self._providers:
             models += [
-                {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "provider": "anthropic", "local": False},
-                {"id": "claude-sonnet-4-5-20251001", "label": "Claude Sonnet 4.5", "provider": "anthropic", "local": False},
-                {"id": "claude-opus-4-20250514", "label": "Claude Opus 4", "provider": "anthropic", "local": False},
+                {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "provider": "anthropic", "local": False},
+                {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5", "provider": "anthropic", "local": False},
+                {"id": "claude-opus-4-6", "label": "Claude Opus 4", "provider": "anthropic", "local": False},
             ]
         if "openai-codex" in self._providers:
             models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
@@ -371,13 +419,13 @@ class GraphRuntime:
         use_oai = has_openai and force_provider in (None, "openai")
         use_codex = has_codex and force_provider in (None, "openai-codex")
 
-        haiku = (ant(ModelTier.CLOUD_LITE, "claude-haiku-4-5-20251001") if use_ant else
+        haiku = (ant(ModelTier.CLOUD_LITE, "claude-haiku-4-5") if use_ant else
                  codex(ModelTier.CLOUD_LITE) if use_codex else
                  oai(ModelTier.CLOUD_LITE, "gpt-4o-mini") if use_oai else None)
-        sonnet = (ant(ModelTier.CLOUD_FAST, "claude-sonnet-4-5-20251001") if use_ant else
+        sonnet = (ant(ModelTier.CLOUD_FAST, "claude-sonnet-4-5") if use_ant else
                   codex(ModelTier.CLOUD_FAST) if use_codex else
                   oai(ModelTier.CLOUD_FAST, "gpt-4o") if use_oai else None)
-        opus = (ant(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514") if use_ant else
+        opus = (ant(ModelTier.CLOUD_STRONG, "claude-opus-4-6") if use_ant else
                 codex(ModelTier.CLOUD_STRONG) if use_codex else
                 oai(ModelTier.CLOUD_STRONG, "o3") if use_oai else None)
 
@@ -388,12 +436,39 @@ class GraphRuntime:
             if score <= 25:
                 return best(q9, q27, haiku, sonnet, opus)
             if score <= 45:
-                return best(q27, haiku, q9, sonnet, opus)
+                return best(q27, sonnet, haiku, q9, opus)
             if score <= 60:
-                return best(haiku, q27, sonnet, opus)
+                return best(sonnet, haiku, q27, opus)
             if score <= 75:
                 return best(sonnet, haiku, opus)
             return best(opus, sonnet)
+
+        def pick_for_role(category: str, score: int):
+            if category == "entry":
+                return best(q9, q27, haiku, sonnet, opus)
+            if category == "implementation":
+                if score <= 55:
+                    return best(sonnet, haiku, q27, opus)
+                if score <= 80:
+                    return best(sonnet, opus, haiku)
+                return best(opus, sonnet)
+            if category == "review":
+                if score <= 50:
+                    return best(sonnet, haiku, q27, opus)
+                if score <= 80:
+                    return best(sonnet, opus, haiku)
+                return best(opus, sonnet)
+            if category == "validation":
+                if score <= 35:
+                    return best(haiku, q27, q9, sonnet, opus)
+                return best(sonnet, haiku, q27, opus)
+            if category == "discovery":
+                if score <= 45:
+                    return best(sonnet, haiku, q27, opus)
+                if score <= 80:
+                    return best(sonnet, opus, haiku)
+                return best(opus, sonnet)
+            return pick(score)
 
         topo = self._available_topologies().get(topology_id)
         if topo is None:
@@ -425,7 +500,7 @@ class GraphRuntime:
         result: dict[str, ModelConfig] = {}
         reviewer_ids = [aid for aid, agent in topo.agents.items() if agent.category == "review"]
         if reviewer_ids:
-            reviewer_cfg = pick(max(scores[rid] for rid in reviewer_ids))
+            reviewer_cfg = pick_for_role("review", max(scores[rid] for rid in reviewer_ids))
             if reviewer_cfg is None:
                 logger.warning("Failed to build reviewer model config, proceeding without model hints")
                 return {}
@@ -442,11 +517,168 @@ class GraphRuntime:
         for agent_id, score in scores.items():
             if agent_id in result:
                 continue
-            cfg = pick(score)
+            category = topo.agents[agent_id].category
+            cfg = pick_for_role(category, score)
             if cfg is not None:
                 result[agent_id] = cfg
 
         return result
+
+    def _allocator_model_config(self):
+        from orb.llm.types import ModelTier, ModelConfig, OPENAI_MODELS, CODEX_MODELS
+
+        if "anthropic" in self._providers:
+            return ModelConfig(ModelTier.CLOUD_FAST, "claude-sonnet-4-5", "anthropic")
+        if "openai-codex" in self._providers:
+            return CODEX_MODELS.get(ModelTier.CLOUD_FAST) or CODEX_MODELS.get(ModelTier.CLOUD_STRONG)
+        if "openai" in self._providers:
+            return OPENAI_MODELS.get(ModelTier.CLOUD_FAST) or OPENAI_MODELS.get(ModelTier.CLOUD_STRONG)
+        return None
+
+    def _available_model_choices(self) -> list[dict]:
+        choices: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for provider_name, configs in (
+            ("anthropic", [
+                ("claude-haiku-4-5", "fastest / lowest cost"),
+                ("claude-sonnet-4-5", "strong balanced reasoning"),
+                ("claude-opus-4-6", "strongest reasoning"),
+            ]),
+            ("openai-codex", [
+                ("gpt-5.4", "strong coding and reasoning"),
+            ]),
+            ("openai", [
+                ("gpt-4o-mini", "fastest / lowest cost"),
+                ("gpt-4o", "balanced reasoning"),
+                ("o3", "strongest reasoning"),
+            ]),
+            ("ollama", [
+                ("qwen3.5:9b", "local small"),
+                ("qwen3.5:27b", "local larger"),
+            ]),
+        ):
+            if provider_name not in self._providers:
+                continue
+            for model_id, description in configs:
+                key = (provider_name, model_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                choices.append({
+                    "provider": provider_name,
+                    "model": model_id,
+                    "description": description,
+                })
+        return choices
+
+    def _validate_agent_model_assignments(
+        self,
+        topology_id: str,
+        raw_assignments: dict | None,
+        heuristic_map: dict,
+    ) -> tuple[dict, dict[str, str]]:
+        topo = self._available_topologies().get(topology_id)
+        if topo is None:
+            return heuristic_map, {}
+
+        validated: dict = {}
+        reasons: dict[str, str] = {}
+        choice_lookup = {(c["provider"], c["model"]) for c in self._available_model_choices()}
+        for agent_id, agent in topo.agents.items():
+            item = (raw_assignments or {}).get(agent_id)
+            provider = item.get("provider") if isinstance(item, dict) else None
+            model_id = item.get("model") if isinstance(item, dict) else None
+            reason = item.get("reason", "") if isinstance(item, dict) else ""
+            if provider and model_id and (provider, model_id) in choice_lookup:
+                from orb.llm.types import ModelConfig, ModelTier
+                tier = heuristic_map.get(agent_id).tier if agent_id in heuristic_map else (
+                    ModelTier.CLOUD_FAST if provider in {"anthropic", "openai", "openai-codex"} else ModelTier.LOCAL_LARGE
+                )
+                validated[agent_id] = ModelConfig(tier=tier, model_id=model_id, provider=provider)
+                if reason:
+                    reasons[agent_id] = str(reason)
+            elif agent_id in heuristic_map:
+                validated[agent_id] = heuristic_map[agent_id]
+        return validated, reasons
+
+    async def _llm_assign_agent_models(
+        self,
+        query: str,
+        topology_id: str,
+        complexity: int,
+        agent_complexity: dict | None,
+        heuristic_map: dict,
+    ) -> tuple[dict, dict[str, str]]:
+        from orb.llm.types import CompletionRequest
+
+        allocator_model = self._allocator_model_config()
+        if allocator_model is None:
+            return heuristic_map, {}
+
+        provider = self._providers.get(allocator_model.provider)
+        if provider is None:
+            return heuristic_map, {}
+
+        topo = self._available_topologies().get(topology_id)
+        if topo is None:
+            return heuristic_map, {}
+
+        available_choices = self._available_model_choices()
+        heuristic_preview = {
+            agent_id: {
+                "provider": cfg.provider,
+                "model": cfg.model_id,
+            }
+            for agent_id, cfg in heuristic_map.items()
+        }
+        prompt = (
+            "Assign the best provider/model for each agent in this run.\n"
+            "Prefer strong models for implementation/review when justified, but do not overspend.\n"
+            "Use only the listed available choices.\n"
+            "Return JSON only with this shape:\n"
+            '{"assignments":{"agent_id":{"provider":"...","model":"...","reason":"..."}}}\n\n'
+            f"Task: {query}\n"
+            f"Topology: {topo.label} ({topology_id})\n"
+            f"Overall complexity: {complexity}\n"
+            f"Agents: {json.dumps({aid: {'role': a.role, 'category': a.category, 'description': a.description} for aid, a in topo.agents.items()})}\n"
+            f"Agent complexity: {json.dumps(agent_complexity or {})}\n"
+            f"Available model choices: {json.dumps(available_choices)}\n"
+            f"Heuristic baseline: {json.dumps(heuristic_preview)}\n"
+        )
+        req = CompletionRequest(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            system=(
+                "You are a runtime model allocator. "
+                "Assign one provider/model per agent for the full run. "
+                "Be cost-aware but prefer stronger models for coder/reviewer/research roles when needed. "
+                "Return valid JSON only."
+            ),
+            model_config=allocator_model,
+        )
+        try:
+            response = await provider.complete(req)
+        except Exception as exc:
+            logger.warning("Agent model allocation LLM call failed: %s", exc)
+            return heuristic_map, {}
+
+        raw = (response.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        try:
+            parsed = json.loads(raw.strip())
+        except JSONDecodeError:
+            logger.warning("Failed to parse agent model assignment response: %r", raw)
+            return heuristic_map, {}
+
+        validated, reasons = self._validate_agent_model_assignments(
+            topology_id,
+            parsed.get("assignments") if isinstance(parsed, dict) else None,
+            heuristic_map,
+        )
+        return (validated or heuristic_map), reasons
 
     async def _llm_predict_topology(self, query: str, model_pin: str = "auto") -> dict:
         from orb.llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, OPENAI_MODELS, CODEX_MODELS
@@ -555,11 +787,18 @@ class GraphRuntime:
             for k, v in (parsed.get("agent_complexity") or {}).items()
             if k in topo.agents
         }
-        agent_model_map = self._build_agent_model_map(
+        heuristic_model_map = self._build_agent_model_map(
             overall_complexity,
             model_pin,
             agent_complexity,
             topology_id=topology,
+        )
+        agent_model_map, _agent_model_reasons = await self._llm_assign_agent_models(
+            query,
+            topology,
+            overall_complexity,
+            agent_complexity,
+            heuristic_model_map,
         )
         agent_models = {
             role: cfg.model_id for role, cfg in agent_model_map.items()
@@ -582,6 +821,7 @@ class GraphRuntime:
         model_pin: str = "auto",
         complexity: int = 50,
         agent_complexity: dict | None = None,
+        agent_model_map: dict | None = None,
     ) -> None:
         from orb.agent.compaction import COMPACT_THRESHOLD, compact_history
         from web.bridge import DashboardBridge
@@ -590,7 +830,9 @@ class GraphRuntime:
         self._turn_count += 1
         bridge = DashboardBridge(self.state, self._broadcast)
         effective_overrides = dict(self._model_overrides or {})
-        agent_model_map = self._build_agent_model_map(complexity, model_pin, agent_complexity, topology_id=topology)
+        agent_model_map = agent_model_map or self._build_agent_model_map(
+            complexity, model_pin, agent_complexity, topology_id=topology
+        )
         topology_label, topology_description, agent_positions = self._topology_meta(topology)
         graph_view = self._topology_graph_view(topology)
 
@@ -751,6 +993,10 @@ class GraphRuntime:
             final_agent_id, final_result = self._pick_primary_result(result.completions)
             from orb.cli.diff_capture import capture_diff
             diff = capture_diff()
+            self.state.final_agent = final_agent_id or ""
+            self.state.final_result = final_result or ""
+            self.state.final_diff = diff or ""
+            self.state.session_turn = len(self._session_history)
             if final_result:
                 await self._broadcast(json.dumps({
                     "type": "run_complete",

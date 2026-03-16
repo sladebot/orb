@@ -16,10 +16,12 @@ An LLM agent collaboration network. Agents are **graph nodes** that communicate 
 - [Model Tiers and Providers](#model-tiers-and-providers)
 - [Log Streaming](#log-streaming)
 - [Web Dashboard](#web-dashboard)
+- [Demo Video](#demo-video)
 - [Architecture](#architecture)
 - [Loop Prevention](#loop-prevention)
 - [Project Structure](#project-structure)
 - [Testing](#testing)
+- [License](#license)
 
 ---
 
@@ -158,6 +160,9 @@ orb tui
 
 # Attach the TUI to a specific Orb daemon
 orb tui --connect http://127.0.0.1:8080
+
+# Start a run on the connected daemon with explicit topology/budget
+orb tui --topology hierarchy --budget 300 "audit this repository"
 ```
 
 Launches a full-screen Textual TUI. Type tasks directly in the input bar. You can submit multiple tasks in sequence without restarting.
@@ -200,6 +205,9 @@ orb dashboard
 # Start a run on the daemon, then open the dashboard
 orb dashboard "build a REST API"
 
+# Connect to a specific daemon without opening a browser
+orb dashboard --connect http://127.0.0.1:8080 --no-open
+
 # Start dashboard and wait for a task from the browser (embedded backend)
 orb --dashboard
 
@@ -239,18 +247,20 @@ orb [OPTIONS] [QUERY]
 |------|---------|-------------|
 | `query` | — | Task to run (omit for interactive mode) |
 | `-i`, `--interactive` | off | Interactive REPL mode |
-| `--topology` | `triad` | Agent topology id — any builtin or custom id (e.g. `triad`, `dual-review`). Run `orb --list-topologies` to see all available. |
+| `--topology` | `auto` | Agent topology id — `auto` or any builtin/custom id such as `triad`, `dual-review`, or `hierarchy` |
 | `--budget N` | 200 | Global message budget (hard ceiling) |
 | `--timeout N` | 600.0 | Timeout in seconds |
 | `--max-depth N` | 10 | Max message hop depth per chain |
-| `--model MODEL` | — | Override cloud model for all tiers (e.g. `claude-sonnet-4-6`) |
+| `--model MODEL` | — | Override cloud model for all tiers (e.g. `claude-sonnet-4-5`) |
 | `--local-only` | off | Force all agents to `LOCAL_MEDIUM` tier |
 | `--cloud-only` | off | Force all agents to `CLOUD_FAST` tier |
 | `--ollama-model MODEL` | `$OLLAMA_MODEL` | Ollama model to use for all local tiers (e.g. `qwen3.5:9b`) |
-| `--dashboard` | off | Launch live web dashboard |
+| `--dashboard` | off | Launch embedded live web dashboard for the current run |
 | `--dashboard-port PORT` | 8080 | Dashboard server port |
-| `--tui` | off | Launch interactive terminal TUI |
+| `--connect URL` | — | Attach `--tui` or `--dashboard` to an existing Orb daemon |
+| `--tui` | off | Launch embedded interactive terminal TUI |
 | `--logs` | off | Show live log panel in TUI (requires `--tui`); also streams to `~/.orb/run.log` |
+| `--exit-after-run` | off | Exit automatically after a non-interactive TUI/dashboard run completes |
 | `--trace` / `--no-trace` | on | Show or hide real-time message routing in terminal |
 | `-v`, `--verbose` | on | Enable debug logging |
 | `-q`, `--quiet` | off | Suppress verbose logging |
@@ -260,7 +270,7 @@ orb [OPTIONS] [QUERY]
 
 ```bash
 # Specific cloud model
-orb --model claude-sonnet-4-6 "write a sort function"
+orb --model claude-sonnet-4-5 "write a sort function"
 
 # Local models only with a tighter budget
 orb --local-only --budget 50 "hello world"
@@ -404,7 +414,7 @@ If a run is active (status = Running), new input is forwarded directly to the co
 
 ## Topologies
 
-Topologies are defined in YAML and loaded at startup. Orb ships two builtins; you can add your own at `~/.orb/topologies.yaml`.
+Topologies are defined in YAML and loaded at startup. Orb ships three builtins; you can add your own at `~/.orb/topologies.yaml`.
 
 Initialize a starter file with:
 
@@ -412,7 +422,7 @@ Initialize a starter file with:
 orb topologies init
 ```
 
-### Triangle (default)
+### Triad
 
 ```
 Coordinator
@@ -444,6 +454,24 @@ Five agents. Two reviewers are assigned to **different providers** when possible
 
 ```bash
 orb --topology dual-review "write a concurrent queue"
+```
+
+### Hierarchy
+
+```
+Coordinator
+     │
+Researcher
+     │
+   Coder
+  ╱     ╲
+Reviewer Tester
+```
+
+Five agents. A dedicated researcher/planner gathers repository context and constraints before implementation starts, then hands a concrete brief to the coder for implementation, review, and testing.
+
+```bash
+orb --topology hierarchy "plan and implement a larger refactor"
 ```
 
 ### Custom topologies
@@ -502,7 +530,7 @@ The file is watched while the web dashboard is running — edits are hot-reloade
 |----------|-------|-------|
 | **Anthropic** | `orb auth anthropic` or `ANTHROPIC_API_KEY` | Claude Haiku, Sonnet, Opus |
 | **OpenAI** | `orb auth openai` or `OPENAI_API_KEY` | GPT-4o-mini, GPT-4o, o3 |
-| **OpenAI Codex** | `orb auth openai` (OAuth) | gpt-5.4 via ChatGPT Plus/Pro subscription |
+| **OpenAI Codex** | `orb auth openai` (OAuth) | `gpt-5.4` via ChatGPT Plus/Pro subscription |
 | **Ollama** | Run Ollama locally on port 11434 | Llama, Qwen, DeepSeek, etc. |
 
 At least one provider must be available. The system detects configured providers automatically on startup. Ollama can also be reached via `OLLAMA_HOST` or a non-openai.com `OPENAI_BASE_URL`.
@@ -516,8 +544,8 @@ Agents select a model tier based on their `base_complexity` score. If the prefer
 | `LOCAL_SMALL` | ~9B params | `qwen3.5:9b` (Ollama) |
 | `LOCAL_MEDIUM` | ~14–27B params | `qwen3.5:27b` (Ollama) |
 | `LOCAL_LARGE` | ~27–30B params | `qwen3.5:27b` (Ollama) |
-| `CLOUD_LITE` | Fast and cheap | `claude-haiku-4-5-20251001` / `gpt-4o-mini` |
-| `CLOUD_FAST` | Balanced | `claude-sonnet-4-6` / `gpt-4o` |
+| `CLOUD_LITE` | Fast and cheap | `claude-haiku-4-5` / `gpt-4o-mini` / `gpt-5.4` |
+| `CLOUD_FAST` | Balanced | `claude-sonnet-4-5` / `gpt-4o` / `gpt-5.4` |
 | `CLOUD_STRONG` | Most capable | `claude-opus-4-6` / `o3` |
 
 ### Model selection flags
@@ -530,7 +558,7 @@ orb --local-only "hello world"
 orb --cloud-only "refactor this codebase"
 
 # Override the cloud model for all agents
-orb --model claude-sonnet-4-6 "write unit tests"
+orb --model claude-sonnet-4-5 "write unit tests"
 
 # Override the Ollama model for all local tiers
 orb --ollama-model qwen3.5:9b "explain quicksort"
