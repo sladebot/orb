@@ -11,7 +11,13 @@ from .client import LLMClient
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-4-5"
+ANTHROPIC_MODEL_ALIASES = {
+    "claude-haiku-4-5": "claude-haiku-4-5",
+    "claude-sonnet-4-5": "claude-sonnet-4-5",
+    "claude-opus-4": "claude-opus-4-6",
+    "claude-opus-4-6": "claude-opus-4-6",
+}
 
 
 def is_oauth_token(token: str) -> bool:
@@ -47,8 +53,10 @@ class AnthropicProvider(LLMClient):
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
+        model_id = config.model_id if config else DEFAULT_MODEL
+        resolved_model = ANTHROPIC_MODEL_ALIASES.get(model_id, model_id)
         kwargs: dict = {
-            "model":      config.model_id  if config else DEFAULT_MODEL,
+            "model":      resolved_model,
             "max_tokens": config.max_tokens if config else 4096,
             "messages":   request.messages,
         }
