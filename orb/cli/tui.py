@@ -606,6 +606,16 @@ class HeaderBar(Static):
         t.append(f"{len(s._timeline_entries)} timeline", style="dim")
         t.append("  ·  ", style="dim")
         t.append(f"{len(s._file_changes)} files", style="dim")
+        if s._turn_count:
+            t.append("  ·  ", style="dim")
+            t.append(f"turn {s._turn_count}", style="dim")
+        if getattr(s, "_session_generation", 1) > 1:
+            t.append("  ·  ", style="dim")
+            t.append(f"gen {s._session_generation}", style="dim")
+        workdir = str((s._plan or {}).get("workdir") or "")
+        if workdir:
+            t.append("  ·  ", style="dim")
+            t.append(workdir.rstrip("/").split("/")[-1], style="dim")
         if waiting:
             t.append("  ·  ", style="dim")
             t.append("waiting ", style="dim")
@@ -1133,6 +1143,8 @@ class OrbTUI(App[None]):
         self._last_elapsed: float = 0.0
         self._last_diff: str = ""
         self._turn_count: int = 0
+        self._session_id: str = ""
+        self._session_generation: int = 1
         self._timeline_entries: deque[TimelineEntry] = deque(maxlen=600)
         self._file_changes: dict[str, FileChangeEntry] = {}
         self._selected_file: str | None = None
@@ -1642,6 +1654,9 @@ class OrbTUI(App[None]):
 
         self._plan = dict(data.get("plan") or {})
         self._topology_name = _plan_topology_id(self._plan, self._topology_name)
+        self._session_id = data.get("session_id", self._session_id)
+        self._session_generation = int(data.get("session_generation", self._session_generation) or 1)
+        self._turn_count = data.get("session_turn", self._turn_count)
 
         stats = data.get("stats", {})
         self._routed       = stats.get("message_count", 0)
@@ -1837,6 +1852,8 @@ class OrbTUI(App[None]):
     def _on_server_run_complete(self, data: dict) -> None:
         self._last_elapsed = data.get("elapsed", 0.0)
         self._turn_count   = data.get("session_turn", self._turn_count)
+        self._session_id = data.get("session_id", self._session_id)
+        self._session_generation = int(data.get("session_generation", self._session_generation) or 1)
         self._last_diff    = data.get("diff", "")
         self._routed       = data.get("routed", self._routed)
         self._run_status   = "Idle"

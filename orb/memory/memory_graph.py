@@ -17,6 +17,32 @@ class MemoryGraph:
         self._nodes[node.id] = node
         self._adj.setdefault(node.id, set())
 
+    def upsert_node(
+        self,
+        *,
+        node_id: str,
+        content: str,
+        node_type: str,
+        metadata: dict | None = None,
+    ) -> MemoryNode:
+        existing = self._nodes.get(node_id)
+        if existing is None:
+            node = MemoryNode(
+                id=node_id,
+                content=content,
+                node_type=node_type,
+                metadata=dict(metadata or {}),
+            )
+            self.add_node(node)
+            return node
+
+        existing.content = content
+        existing.node_type = node_type
+        if metadata is not None:
+            existing.metadata = dict(metadata)
+        existing.updated_at = time()
+        return existing
+
     def add_edge(self, edge: MemoryEdge) -> None:
         if edge.from_id not in self._nodes:
             raise KeyError(f"Memory node {edge.from_id!r} not found")

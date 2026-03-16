@@ -11,10 +11,12 @@ from .client import LLMClient
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
-DEFAULT_MODEL = "claude-sonnet-4-5"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 ANTHROPIC_MODEL_ALIASES = {
-    "claude-haiku-4-5": "claude-haiku-4-5",
-    "claude-sonnet-4-5": "claude-sonnet-4-5",
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5": "claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-opus-4": "claude-opus-4-6",
     "claude-opus-4-6": "claude-opus-4-6",
 }

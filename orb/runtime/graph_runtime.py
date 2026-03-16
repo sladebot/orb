@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from json import JSONDecodeError
@@ -10,12 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from web.state import DashboardState
+from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
 from orb.messaging.channel import ChannelClosed
-from .transcript import RunTranscript
+from .transcript import ConversationSession, RunTranscript
 
 logger = logging.getLogger(__name__)
 
 BroadcastFn = Callable[[str], Awaitable[None]]
+SESSION_TURN_COMPACT_THRESHOLD = 60
 
 
 @dataclass
@@ -27,7 +30,13 @@ class AgentModelAssignment:
 class GraphRuntime:
     """Owns orchestration and exposes a subscriber-oriented runtime interface."""
 
-    def __init__(self, state: DashboardState | None = None) -> None:
+    def __init__(
+        self,
+        state: DashboardState | None = None,
+        *,
+        session_path: Path | None = None,
+        compactor: CompactionStrategy | None = None,
+    ) -> None:
         self.state = state or DashboardState()
         self._subscribers: set[BroadcastFn] = set()
         self._agents: dict = {}
@@ -36,11 +45,12 @@ class GraphRuntime:
         self._config = None
         self._model_overrides = None
         self._tier_override = None
-        self._session_history: list[dict] = []
-        self._conv_carryover: dict[str, list] = {}
+        self._session_path = session_path
+        self._compactor = compactor or DEFAULT_COMPACTOR
+        self._conversation_session = self._load_session()
         self._turn_count: int = 0
         self._last_result = None
-        self._run_transcript = RunTranscript()
+        self._run_transcript = RunTranscript(session=self._conversation_session)
 
     @staticmethod
     def _available_topologies() -> dict:
@@ -164,8 +174,81 @@ class GraphRuntime:
         self._model_overrides = model_overrides
         self._tier_override = tier_override
 
-    def current_init_event(self) -> dict:
+    def _resolved_session_path(self) -> Path:
+        return self._session_path or (Path.cwd() / ".orb" / "session.json")
+
+    def _load_session(self) -> ConversationSession:
+        path = self._resolved_session_path()
+        if not path.exists():
+            return ConversationSession()
+        try:
+            return ConversationSession.load(path)
+        except (OSError, JSONDecodeError, ValueError, TypeError) as exc:
+            logger.warning("Failed to load conversation session %s: %s", path, exc)
+            return ConversationSession()
+
+    def _persist_session(self) -> None:
+        try:
+            self._conversation_session.save(self._resolved_session_path())
+        except OSError as exc:
+            logger.warning("Failed to persist conversation session: %s", exc)
+
+    def _sync_session_state(self) -> None:
         self.state.workdir = str(Path.cwd())
+        self.state.session_turn = self._conversation_session.user_turn_count()
+        self.state.session_id = self._conversation_session.session_id
+        self.state.session_generation = self._conversation_session.generation
+
+    @staticmethod
+    def _sanitize_carryover(messages: list[dict]) -> list[dict]:
+        msgs = list(messages)
+        while msgs:
+            last = msgs[-1]
+            role = last.get("role")
+            content = last.get("content", "")
+            if role == "user":
+                msgs.pop()
+                continue
+            if role == "assistant" and isinstance(content, list) and any(
+                block.get("type") == "tool_use" for block in content
+            ):
+                msgs.pop()
+                continue
+            break
+        return msgs
+
+    def _resolve_conversation_target(
+        self,
+        text: str,
+        *,
+        default_target: str,
+        known_targets: set[str] | None = None,
+    ) -> tuple[str, str]:
+        match = re.match(r"^@(\w+)\s*", text.strip())
+        if not match:
+            return default_target, text.strip()
+
+        target_id = match.group(1).lower()
+        remainder = text[match.end():].strip()
+        if not remainder:
+            return default_target, text.strip()
+        if known_targets and target_id not in known_targets:
+            return default_target, text.strip()
+        return target_id, remainder
+
+    async def _compact_conversation_session_if_needed(self) -> None:
+        if self._conversation_session.turn_count() < SESSION_TURN_COMPACT_THRESHOLD:
+            return
+        transcript = self._conversation_session.render_prior_context(
+            recent_turns=self._conversation_session.turn_count()
+        )
+        summary = await self._compactor.compact_transcript(transcript, self._providers)
+        if not summary:
+            return
+        self._conversation_session.apply_compaction(summary, preserve_recent_turns=8)
+
+    def current_init_event(self) -> dict:
+        self._sync_session_state()
         event = self.state.to_init_event()
         event["run_active"] = self.running
         return event
@@ -206,15 +289,22 @@ class GraphRuntime:
         if not self.running:
             return 400, {"ok": False, "error": "No run in progress"}
 
-        agent = self._agents.get(target_id)
+        known_targets = {aid.lower() for aid in self._agents}
+        resolved_target, resolved_text = self._resolve_conversation_target(
+            text,
+            default_target=target_id,
+            known_targets=known_targets,
+        )
+
+        agent = self._agents.get(resolved_target)
         if agent is None:
-            return 404, {"ok": False, "error": f"Unknown agent: {target_id}"}
+            return 404, {"ok": False, "error": f"Unknown agent: {resolved_target}"}
 
         msg = Message(
             from_="user",
-            to=target_id,
+            to=resolved_target,
             type=MessageType.RESPONSE,
-            payload=text,
+            payload=resolved_text,
         )
         try:
             await agent.channel.send(msg)
@@ -222,12 +312,14 @@ class GraphRuntime:
             logger.exception("Failed to inject message")
             return 500, {"ok": False, "error": str(exc)}
         self._run_transcript.add_message(msg)
+        self._persist_session()
+        self._sync_session_state()
 
         await self._broadcast(json.dumps({
             "type": "message",
             "from": "user",
-            "to": target_id,
-            "content": text,
+            "to": resolved_target,
+            "content": resolved_text,
             "model": "",
             "depth": 0,
             "elapsed": 0,
@@ -252,9 +344,13 @@ class GraphRuntime:
 
         self.state.reset()
         self._last_result = None
-        self._run_transcript = RunTranscript()
+        self._run_transcript = RunTranscript(session=self._conversation_session)
+        requested_target, query = self._resolve_conversation_target(
+            query,
+            default_target="coordinator",
+        )
         self.state.run_query = query
-        self.state.workdir = str(Path.cwd())
+        self._sync_session_state()
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
         predicted = await self.predict_topology(query, model_pin=model_pin)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
@@ -302,6 +398,7 @@ class GraphRuntime:
             self._run_orchestrator(
                 query,
                 selected_topology,
+                initial_target=requested_target,
                 model_pin=model_pin,
                 complexity=overall_complexity,
                 agent_complexity=agent_complexity,
@@ -325,18 +422,12 @@ class GraphRuntime:
         models = [{"id": "auto", "label": "Auto-select", "provider": "auto", "local": False}]
         if "anthropic" in self._providers:
             models += [
-                {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "provider": "anthropic", "local": False},
-                {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5", "provider": "anthropic", "local": False},
-                {"id": "claude-opus-4-6", "label": "Claude Opus 4", "provider": "anthropic", "local": False},
+                {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "provider": "anthropic", "local": False},
+                {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "anthropic", "local": False},
+                {"id": "claude-opus-4-6", "label": "Claude Opus 4.6", "provider": "anthropic", "local": False},
             ]
         if "openai-codex" in self._providers:
             models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
-        elif "openai" in self._providers:
-            models += [
-                {"id": "gpt-4o-mini", "label": "GPT-4o mini", "provider": "openai", "local": False},
-                {"id": "gpt-4o", "label": "GPT-4o", "provider": "openai", "local": False},
-                {"id": "o3", "label": "o3", "provider": "openai", "local": False},
-            ]
         if "ollama" in self._providers:
             models += [
                 {"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True},
@@ -377,7 +468,6 @@ class GraphRuntime:
 
         has_ollama = "ollama" in self._providers
         has_anthropic = "anthropic" in self._providers
-        has_openai = "openai" in self._providers
         has_codex = "openai-codex" in self._providers
 
         def ollama(model_id: str) -> ModelConfig:
@@ -385,9 +475,6 @@ class GraphRuntime:
 
         def ant(tier: ModelTier, model_id: str) -> ModelConfig:
             return ModelConfig(tier=tier, model_id=model_id, provider="anthropic")
-
-        def oai(tier: ModelTier, model_id: str) -> ModelConfig:
-            return ModelConfig(tier=tier, model_id=model_id, provider="openai")
 
         def codex(tier: ModelTier) -> ModelConfig:
             return ModelConfig(tier=tier, model_id="gpt-5.4", provider="openai-codex")
@@ -398,14 +485,11 @@ class GraphRuntime:
                 force_provider = "anthropic"
             elif model_pin == "gpt-5.4":
                 force_provider = "openai-codex"
-            elif "gpt" in model_pin or model_pin in ("o1", "o3", "o3-mini", "o4-mini"):
-                force_provider = "openai"
             elif "qwen" in model_pin or "llama" in model_pin:
                 force_provider = "ollama"
 
         provider_available = {
             "anthropic": has_anthropic,
-            "openai": has_openai,
             "openai-codex": has_codex,
             "ollama": has_ollama,
         }
@@ -416,18 +500,14 @@ class GraphRuntime:
         q9 = ollama("qwen3.5:9b") if has_ollama and force_provider in (None, "ollama") else None
         q27 = ollama("qwen3.5:27b") if has_ollama and force_provider in (None, "ollama") else None
         use_ant = has_anthropic and force_provider in (None, "anthropic")
-        use_oai = has_openai and force_provider in (None, "openai")
         use_codex = has_codex and force_provider in (None, "openai-codex")
 
-        haiku = (ant(ModelTier.CLOUD_LITE, "claude-haiku-4-5") if use_ant else
-                 codex(ModelTier.CLOUD_LITE) if use_codex else
-                 oai(ModelTier.CLOUD_LITE, "gpt-4o-mini") if use_oai else None)
-        sonnet = (ant(ModelTier.CLOUD_FAST, "claude-sonnet-4-5") if use_ant else
-                  codex(ModelTier.CLOUD_FAST) if use_codex else
-                  oai(ModelTier.CLOUD_FAST, "gpt-4o") if use_oai else None)
+        haiku = (ant(ModelTier.CLOUD_LITE, "claude-haiku-4-5-20251001") if use_ant else
+                 codex(ModelTier.CLOUD_LITE) if use_codex else None)
+        sonnet = (ant(ModelTier.CLOUD_FAST, "claude-sonnet-4-6") if use_ant else
+                  codex(ModelTier.CLOUD_FAST) if use_codex else None)
         opus = (ant(ModelTier.CLOUD_STRONG, "claude-opus-4-6") if use_ant else
-                codex(ModelTier.CLOUD_STRONG) if use_codex else
-                oai(ModelTier.CLOUD_STRONG, "o3") if use_oai else None)
+                codex(ModelTier.CLOUD_STRONG) if use_codex else None)
 
         def best(*choices):
             return next((c for c in choices if c is not None), None)
@@ -525,14 +605,12 @@ class GraphRuntime:
         return result
 
     def _allocator_model_config(self):
-        from orb.llm.types import ModelTier, ModelConfig, OPENAI_MODELS, CODEX_MODELS
+        from orb.llm.types import ModelTier, ModelConfig, ANTHROPIC_MODELS, CODEX_MODELS
 
-        if "anthropic" in self._providers:
-            return ModelConfig(ModelTier.CLOUD_FAST, "claude-sonnet-4-5", "anthropic")
         if "openai-codex" in self._providers:
             return CODEX_MODELS.get(ModelTier.CLOUD_FAST) or CODEX_MODELS.get(ModelTier.CLOUD_STRONG)
-        if "openai" in self._providers:
-            return OPENAI_MODELS.get(ModelTier.CLOUD_FAST) or OPENAI_MODELS.get(ModelTier.CLOUD_STRONG)
+        if "anthropic" in self._providers:
+            return ANTHROPIC_MODELS.get(ModelTier.CLOUD_FAST) or ANTHROPIC_MODELS.get(ModelTier.CLOUD_STRONG)
         return None
 
     def _available_model_choices(self) -> list[dict]:
@@ -540,17 +618,12 @@ class GraphRuntime:
         seen: set[tuple[str, str]] = set()
         for provider_name, configs in (
             ("anthropic", [
-                ("claude-haiku-4-5", "fastest / lowest cost"),
-                ("claude-sonnet-4-5", "strong balanced reasoning"),
+                ("claude-haiku-4-5-20251001", "fastest / lowest cost"),
+                ("claude-sonnet-4-6", "strong balanced reasoning"),
                 ("claude-opus-4-6", "strongest reasoning"),
             ]),
             ("openai-codex", [
                 ("gpt-5.4", "strong coding and reasoning"),
-            ]),
-            ("openai", [
-                ("gpt-4o-mini", "fastest / lowest cost"),
-                ("gpt-4o", "balanced reasoning"),
-                ("o3", "strongest reasoning"),
             ]),
             ("ollama", [
                 ("qwen3.5:9b", "local small"),
@@ -592,7 +665,7 @@ class GraphRuntime:
             if provider and model_id and (provider, model_id) in choice_lookup:
                 from orb.llm.types import ModelConfig, ModelTier
                 tier = heuristic_map.get(agent_id).tier if agent_id in heuristic_map else (
-                    ModelTier.CLOUD_FAST if provider in {"anthropic", "openai", "openai-codex"} else ModelTier.LOCAL_LARGE
+                    ModelTier.CLOUD_FAST if provider in {"anthropic", "openai-codex"} else ModelTier.LOCAL_LARGE
                 )
                 validated[agent_id] = ModelConfig(tier=tier, model_id=model_id, provider=provider)
                 if reason:
@@ -681,7 +754,7 @@ class GraphRuntime:
         return (validated or heuristic_map), reasons
 
     async def _llm_predict_topology(self, query: str, model_pin: str = "auto") -> dict:
-        from orb.llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, OPENAI_MODELS, CODEX_MODELS
+        from orb.llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, ANTHROPIC_MODELS, CODEX_MODELS
 
         def _default_result(complexity: int = 50, reason: str = "No cloud LLM provider available") -> dict:
             available_topologies = self._available_topologies()
@@ -704,16 +777,14 @@ class GraphRuntime:
 
         predict_provider = (
             self._providers.get("anthropic")
-            or self._providers.get("openai")
             or self._providers.get("openai-codex")
             or self._providers.get("ollama")
         )
         if not predict_provider:
             return _default_result()
 
-        using_openai = "anthropic" not in self._providers and "openai" in self._providers
-        using_codex = "anthropic" not in self._providers and "openai" not in self._providers and "openai-codex" in self._providers
-        using_ollama = "anthropic" not in self._providers and "openai" not in self._providers and "openai-codex" not in self._providers
+        using_codex = "anthropic" not in self._providers and "openai-codex" in self._providers
+        using_ollama = "anthropic" not in self._providers and "openai-codex" not in self._providers
 
         available_topologies = self._available_topologies()
         prompt = (
@@ -732,9 +803,7 @@ class GraphRuntime:
             "agent_complexity: per-agent difficulty scores for the selected topology\n"
         )
 
-        if using_openai:
-            model_config = OPENAI_MODELS.get(ModelTier.CLOUD_LITE) or OPENAI_MODELS[ModelTier.CLOUD_FAST]
-        elif using_codex:
+        if using_codex:
             model_config = CODEX_MODELS.get(ModelTier.CLOUD_LITE) or CODEX_MODELS[ModelTier.CLOUD_FAST]
         elif using_ollama:
             model_config = DEFAULT_MODELS.get(ModelTier.LOCAL_SMALL) or DEFAULT_MODELS[ModelTier.LOCAL_MEDIUM]
@@ -746,8 +815,8 @@ class GraphRuntime:
             model_config = (
                 cloud_overrides.get(ModelTier.CLOUD_FAST)
                 or cloud_overrides.get(ModelTier.CLOUD_LITE)
-                or DEFAULT_MODELS.get(ModelTier.CLOUD_LITE)
-                or DEFAULT_MODELS[ModelTier.CLOUD_FAST]
+                or ANTHROPIC_MODELS.get(ModelTier.CLOUD_LITE)
+                or ANTHROPIC_MODELS[ModelTier.CLOUD_FAST]
             )
 
         req = CompletionRequest(
@@ -818,12 +887,12 @@ class GraphRuntime:
         self,
         query: str,
         topology: str,
+        initial_target: str = "coordinator",
         model_pin: str = "auto",
         complexity: int = 50,
         agent_complexity: dict | None = None,
         agent_model_map: dict | None = None,
     ) -> None:
-        from orb.agent.compaction import COMPACT_THRESHOLD, compact_history
         from web.bridge import DashboardBridge
         from web.state import ActivityRecord
 
@@ -919,40 +988,19 @@ class GraphRuntime:
         for aid, agent in orchestrator.agents.items():
             agent._on_file_write = _make_file_write_cb(aid)
 
-        if self._session_history:
-            lines = ["=== Prior session context ==="]
-            for i, h in enumerate(self._session_history[-5:], 1):
-                lines.append(f"[{i}] User: {h['query']}")
-                if h["result"]:
-                    lines.append(f"     Result: {h['result'][:200]}")
-            lines.append("=== End of prior context ===\n")
-            query = "\n".join(lines) + query
-
-        if self._conv_carryover:
+        if self._conversation_session.agent_carryover:
             for aid, agent in orchestrator.agents.items():
-                if aid not in self._conv_carryover or not self._conv_carryover[aid]:
+                if aid not in self._conversation_session.agent_carryover:
                     continue
-                msgs = list(self._conv_carryover[aid])
-                while msgs:
-                    last = msgs[-1]
-                    role = last.get("role")
-                    content = last.get("content", "")
-                    if role == "user":
-                        msgs.pop()
-                        continue
-                    if role == "assistant" and isinstance(content, list) and any(
-                        b.get("type") == "tool_use" for b in content
-                    ):
-                        msgs.pop()
-                        continue
-                    break
+                msgs = self._sanitize_carryover(self._conversation_session.agent_carryover[aid])
                 if msgs:
                     agent._conversation.messages = msgs
 
         self._agents = orchestrator.agents
 
         try:
-            result = await orchestrator.run(query)
+            run_target = initial_target if initial_target in orchestrator.agents else orchestrator.config.entry_agent
+            result = await orchestrator.run(query, entry_agent=run_target)
         except Exception:
             logger.exception("Orchestrator run failed")
             result = None
@@ -963,18 +1011,19 @@ class GraphRuntime:
         for aid, agent in orchestrator.agents.items():
             msgs = list(agent._conversation.messages)
             if len(msgs) >= COMPACT_THRESHOLD:
-                msgs = await compact_history(msgs, self._providers)
+                msgs = await self._compactor.compact_messages(msgs, self._providers)
             new_carryover[aid] = msgs
-        self._conv_carryover = new_carryover
+        self._conversation_session.agent_carryover = new_carryover
 
-        synthesis_id = orchestrator.config.synthesis_agent
         if result:
             _, summary = self._pick_primary_result(result.completions)
             if not summary:
                 summary = next(iter(result.completions.values()), "")
         else:
             summary = ""
-        self._session_history.append({"query": query.split("=== End of prior context ===\n")[-1], "result": summary[:300]})
+        await self._compact_conversation_session_if_needed()
+        self._persist_session()
+        self._sync_session_state()
 
         elapsed = time.time() - self.state.start_time
         await self._broadcast(json.dumps({
@@ -996,7 +1045,7 @@ class GraphRuntime:
             self.state.final_agent = final_agent_id or ""
             self.state.final_result = final_result or ""
             self.state.final_diff = diff or ""
-            self.state.session_turn = len(self._session_history)
+            self.state.session_turn = self._conversation_session.user_turn_count()
             if final_result:
                 await self._broadcast(json.dumps({
                     "type": "run_complete",
@@ -1004,7 +1053,9 @@ class GraphRuntime:
                     "agent": final_agent_id,
                     "diff": diff,
                     "elapsed": round(elapsed, 2),
-                    "session_turn": len(self._session_history),
+                    "session_turn": self._conversation_session.user_turn_count(),
+                    "session_id": self._conversation_session.session_id,
+                    "session_generation": self._conversation_session.generation,
                     "routed": self.state.message_count,
                 }))
 

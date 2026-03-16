@@ -295,3 +295,36 @@ class TestLLMAgent:
         # One initial read, one old-content read during write_file for diff capture,
         # and one fresh read after cache invalidation.
         assert sandbox.read_file.call_count == 3
+
+    async def test_write_file_creates_artifact_memory_node(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc1", name="write_file", input={"path": "app.py", "content": "print('hi')"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="tc2", name="complete_task", input={"result": "Done"})],
+            ),
+        ])
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock)
+        sandbox = MagicMock()
+        sandbox.list_directory = MagicMock(return_value="")
+        sandbox.read_file = MagicMock(side_effect=FileNotFoundError("missing"))
+        sandbox.write_file = MagicMock(return_value="wrote app.py")
+        agent_a.config.sandbox = sandbox
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Create app.py")
+        await agent_a.process(msg)
+
+        artifact = agent_a._memory.get_node("file:app.py")
+        assert artifact.node_type == "artifact"
+        assert artifact.metadata["path"] == "app.py"
+        assert artifact.metadata["action"] == "write"
+        assert artifact.content == "print('hi')"
+        assert any(
+            edge.to_id == "file:app.py" and edge.relation == "writes_to"
+            for edge in agent_a._memory.edges
+        )

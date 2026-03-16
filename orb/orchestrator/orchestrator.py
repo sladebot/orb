@@ -119,7 +119,7 @@ class Orchestrator:
                     except ChannelClosed:
                         logger.warning("Could not notify synthesis agent")
 
-    async def run(self, query: str) -> RunResult:
+    async def run(self, query: str, entry_agent: str | None = None) -> RunResult:
         """Run the agent graph with the given query."""
         self._completions.clear()
         self._completion_event.clear()
@@ -138,7 +138,7 @@ class Orchestrator:
             tasks.append(agent.start())
 
         # Inject the initial task to the entry agent
-        entry = self.config.entry_agent
+        entry = entry_agent or self.config.entry_agent
         if entry not in self.agents:
             return RunResult(success=False, error=f"Entry agent {entry!r} not found")
 

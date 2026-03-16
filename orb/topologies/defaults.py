@@ -139,7 +139,7 @@ topologies:
         enable_filesystem: true
         model_selection:
           prefer_provider: "anthropic"
-          fallback_providers: ["openai-codex", "openai", "ollama"]
+          fallback_providers: ["openai-codex", "ollama"]
 
       reviewer_b:
         role: "Reviewer B"
@@ -153,7 +153,7 @@ topologies:
         enable_filesystem: true
         model_selection:
           prefer_different_provider_than: "reviewer_a"
-          fallback_providers: ["openai-codex", "openai", "ollama"]
+          fallback_providers: ["openai-codex", "ollama"]
 
       tester:
         role: "Tester"

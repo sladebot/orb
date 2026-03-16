@@ -67,3 +67,22 @@ class TestMemoryGraph:
         mg.add_node(MemoryNode(id="n3", content="more code", node_type="code"))
         results = mg.query_by_type("code")
         assert len(results) == 2
+
+    def test_upsert_node_updates_content_and_metadata(self):
+        mg = MemoryGraph()
+        created = mg.upsert_node(
+            node_id="file:app.py",
+            content="print('a')",
+            node_type="artifact",
+            metadata={"path": "app.py", "action": "write"},
+        )
+        updated = mg.upsert_node(
+            node_id="file:app.py",
+            content="print('b')",
+            node_type="artifact",
+            metadata={"path": "app.py", "action": "read"},
+        )
+
+        assert created.id == updated.id
+        assert mg.get_node("file:app.py").content == "print('b')"
+        assert mg.get_node("file:app.py").metadata["action"] == "read"

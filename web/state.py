@@ -78,6 +78,8 @@ class DashboardState:
     final_agent: str = ""
     final_diff: str = ""
     session_turn: int = 0
+    session_id: str = ""
+    session_generation: int = 1
     workdir: str = ""
 
     def reset(self) -> None:
@@ -104,6 +106,8 @@ class DashboardState:
         self.final_agent = ""
         self.final_diff = ""
         self.session_turn = 0
+        self.session_id = ""
+        self.session_generation = 1
         self.workdir = ""
 
     def to_init_event(self) -> dict:
@@ -179,5 +183,7 @@ class DashboardState:
             "final_agent": self.final_agent,
             "final_diff": self.final_diff,
             "session_turn": self.session_turn,
+            "session_id": self.session_id,
+            "session_generation": self.session_generation,
             "workdir": self.workdir,
         }

@@ -45,6 +45,7 @@ class Dashboard {
         this._rawMessages = [];         // all messages, capped at 200
         this._agentActivityLines = {};  // agentId -> string[] (last 10 lines)
         this._plan = null;
+        this._fileChanges = new Map();
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -170,6 +171,7 @@ class Dashboard {
             case 'stopped':        this._handleStopped();            break;
             case 'run_complete':   this._handleRunComplete(data);    break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
+            case 'file_write':     this._handleFileWrite(data);      break;
             case 'topologies_reloaded': this._loadTopologyOptions();   break;
         }
     }
@@ -180,10 +182,16 @@ class Dashboard {
         this._agentActivityLines = {};
         this._plan = data.plan || null;
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
+        this._fileChanges = new Map();
         if (this.changesLog) this.changesLog.innerHTML = '';
         this._setChangesEmptyState();
         this._renderPlanningState();
-        this._updateWorkdir(data.workdir || this._plan?.workdir || '');
+        this._updateWorkdir(
+            data.workdir || this._plan?.workdir || '',
+            data.session_id || '',
+            data.session_generation || 1,
+            data.session_turn || 0,
+        );
 
         // Update topology stat from server plan
         if (this._plan?.topology?.label) {
@@ -405,6 +413,18 @@ class Dashboard {
         this._lastElapsed = data.elapsed;
     }
 
+    _handleFileWrite(data) {
+        const path = data.path || '';
+        if (!path) return;
+        this._fileChanges.set(path, {
+            path,
+            agent: data.agent || '',
+            content: data.content || '',
+            oldContent: data.old_content || '',
+        });
+        this._renderLiveCodeChanges();
+    }
+
     _updateStatusIndicator() {
         const el       = document.getElementById('stat-status');
         const statuses = Object.values(this.agents).map(a => a.status);
@@ -468,16 +488,19 @@ class Dashboard {
 
         const steps = Array.isArray(this._planSteps) ? this._planSteps : [];
         if (!steps.length) {
-            status.textContent = this._isRunActive ? 'starting' : 'idle';
+            status.textContent = this._isRunActive ? 'Starting' : 'Idle';
+            status.className = this._isRunActive ? 'planning-status-live' : 'planning-status-idle';
             list.innerHTML = `<div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>`;
             return;
         }
 
-        status.textContent = 'live';
+        status.textContent = 'Live';
+        status.className = 'planning-status-live';
         list.innerHTML = steps.map((step) => `
             <div class="planning-step">
                 <div class="planning-time">${(step.elapsed || 0).toFixed(1)}s</div>
                 <div class="planning-body">
+                    <div class="planning-stage">${this._escapeHtml(step.stage || 'stage')}</div>
                     <div class="planning-title">${this._escapeHtml(step.title || step.stage || 'Planning step')}</div>
                     <div class="planning-detail">${this._escapeHtml(step.detail || '')}</div>
                 </div>
@@ -486,11 +509,35 @@ class Dashboard {
         list.scrollTop = list.scrollHeight;
     }
 
-    _updateWorkdir(workdir) {
-        const banner = document.getElementById('workdir-banner');
-        if (!banner) return;
-        banner.textContent = `workdir: ${workdir || '—'}`;
-        banner.title = workdir || '';
+    _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
+        const workdirEl = document.getElementById('workdir-banner');
+        const sessionEl = document.getElementById('session-id-banner');
+        const generationEl = document.getElementById('session-generation-banner');
+        const turnEl = document.getElementById('session-turn-banner');
+        const pillEl = document.getElementById('session-pill');
+        if (!workdirEl || !sessionEl || !generationEl || !turnEl || !pillEl) return;
+
+        const workspaceName = workdir ? workdir.split('/').filter(Boolean).pop() || workdir : '—';
+        const shortSession = sessionId ? sessionId.slice(0, 8) : '—';
+
+        workdirEl.textContent = workspaceName;
+        workdirEl.title = workdir || '';
+
+        sessionEl.textContent = shortSession;
+        sessionEl.title = sessionId || '';
+
+        generationEl.textContent = String(generation || 1);
+        turnEl.textContent = String(sessionTurn || 0);
+
+        if (sessionId) {
+            pillEl.textContent = sessionTurn > 0 ? 'Session Active' : 'Session Ready';
+            pillEl.className = sessionTurn > 0 ? 'session-pill session-pill-active' : 'session-pill session-pill-ready';
+            pillEl.title = `session ${sessionId}`;
+        } else {
+            pillEl.textContent = 'Session Idle';
+            pillEl.className = 'session-pill session-pill-idle';
+            pillEl.title = '';
+        }
     }
 
     _setMessageEmptyState(text = 'Runs, agent questions, and handoffs will appear here.') {
@@ -964,9 +1011,12 @@ class Dashboard {
         const send = document.getElementById('query-send');
         const stop = document.getElementById('query-stop');
         const input = document.getElementById('query-input');
-        send.classList.toggle('hidden', active);
+        send.classList.remove('hidden');
         stop.classList.toggle('hidden', !active);
-        input.disabled = active;
+        input.disabled = false;
+        input.placeholder = active
+            ? 'Send a follow-up or use @node to direct a message…'
+            : 'Describe a task for the agents…';
         if (!active) this._hideLoader();
 
         // Close and disable/enable topology dropdown
@@ -991,6 +1041,17 @@ class Dashboard {
         const input = document.getElementById('query-input');
         const query = input.value.trim();
         if (!query) return;
+
+        if (this._isRunActive) {
+            input.value = '';
+            input.style.height = 'auto';
+            await fetch('/api/inject', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ to: 'coordinator', message: query }),
+            });
+            return;
+        }
 
         this._setRunActive(true);
 
@@ -1023,6 +1084,9 @@ class Dashboard {
         statusEl.className = 'stat-value status-running';
         this._showLoader('Starting runtime…');
         this._lastQuery = query;
+        this._fileChanges = new Map();
+        input.value = '';
+        input.style.height = 'auto';
         const res = await fetch('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1075,6 +1139,12 @@ class Dashboard {
         const result = data.result || '';
         const elapsed = data.elapsed !== undefined ? data.elapsed.toFixed(1) + 's' : '';
         const sessionTurn = data.session_turn || 0;
+        this._updateWorkdir(
+            this._plan?.workdir || '',
+            data.session_id || '',
+            data.session_generation || 1,
+            sessionTurn,
+        );
 
         const diff = data.diff || '';
         this._renderInitialCodeChanges(result, diff, elapsed, sessionTurn);
@@ -1136,6 +1206,94 @@ class Dashboard {
         }
         this.changesLog.appendChild(el);
         this.changesLog.scrollTop = this.changesLog.scrollHeight;
+    }
+
+    _renderLiveCodeChanges() {
+        if (!this.changesLog) return;
+        const empty = this.changesLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        let card = document.getElementById('live-diff-card');
+        if (!card) {
+            card = document.createElement('div');
+            card.id = 'live-diff-card';
+            card.className = 'final-result-card live-diff-card';
+            this.changesLog.prepend(card);
+        }
+
+        const files = Array.from(this._fileChanges.values());
+        const total = files.length;
+        card.innerHTML = `
+            <div class="final-result-header">
+                <span class="final-result-title">Live Workspace Diff</span>
+                <span class="final-result-elapsed">${total} file${total === 1 ? '' : 's'}</span>
+            </div>
+            <div class="live-diff-summary">Captured from runtime file writes. This is the current overall code delta for the run.</div>
+            <div class="live-diff-files">
+                ${files.map((file) => `
+                    <details class="live-diff-file" open>
+                        <summary>
+                            <span class="diff-file">${this._escapeHtml(file.path)}</span>
+                            ${file.agent ? `<span class="live-diff-agent">${this._escapeHtml(file.agent)}</span>` : ''}
+                        </summary>
+                        <pre class="diff-body">${this._renderDiff(this._buildUnifiedDiff(file.path, file.oldContent, file.content))}</pre>
+                    </details>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    _buildUnifiedDiff(path, oldContent, newContent) {
+        const oldLines = (oldContent || '').split('\n');
+        const newLines = (newContent || '').split('\n');
+        const ops = this._diffLineOps(oldLines, newLines);
+        const body = ops.map((op) => {
+            const line = op.line;
+            if (op.type === 'equal') return ` ${line}`;
+            if (op.type === 'add') return `+${line}`;
+            return `-${line}`;
+        }).join('\n');
+        return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@\n${body}`.trim();
+    }
+
+    _diffLineOps(oldLines, newLines) {
+        const m = oldLines.length;
+        const n = newLines.length;
+        const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+        for (let i = m - 1; i >= 0; i--) {
+            for (let j = n - 1; j >= 0; j--) {
+                dp[i][j] = oldLines[i] === newLines[j]
+                    ? dp[i + 1][j + 1] + 1
+                    : Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+
+        const ops = [];
+        let i = 0;
+        let j = 0;
+        while (i < m && j < n) {
+            if (oldLines[i] === newLines[j]) {
+                ops.push({ type: 'equal', line: oldLines[i] });
+                i += 1;
+                j += 1;
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                ops.push({ type: 'remove', line: oldLines[i] });
+                i += 1;
+            } else {
+                ops.push({ type: 'add', line: newLines[j] });
+                j += 1;
+            }
+        }
+        while (i < m) {
+            ops.push({ type: 'remove', line: oldLines[i] });
+            i += 1;
+        }
+        while (j < n) {
+            ops.push({ type: 'add', line: newLines[j] });
+            j += 1;
+        }
+        return ops;
     }
 
     _renderDiffStat(diff) {

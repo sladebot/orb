@@ -17,26 +17,26 @@ class ModelTier(Enum):
 class ModelConfig:
     tier: ModelTier
     model_id: str
-    provider: str  # "anthropic", "openai", "ollama"
+    provider: str  # "anthropic", "openai-codex", "ollama"
     max_tokens: int = 8192
     temperature: float = 0.7
 
 
-# Default model configs per tier (Anthropic-first; OpenAI alternatives listed separately)
+# Default model configs per tier (Codex-first cloud defaults; local tiers remain Ollama)
 DEFAULT_MODELS: dict[ModelTier, ModelConfig] = {
     ModelTier.LOCAL_SMALL:  ModelConfig(ModelTier.LOCAL_SMALL,  "qwen3.5:9b",   "ollama"),
     ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen3.5:27b",  "ollama"),
     ModelTier.LOCAL_LARGE:  ModelConfig(ModelTier.LOCAL_LARGE,  "qwen3.5:27b",  "ollama"),
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001", "anthropic"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-6",         "anthropic"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6",           "anthropic"),
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4",  "openai-codex"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4",  "openai-codex"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4",  "openai-codex"),
 }
 
-# OpenAI API key models per tier
-OPENAI_MODELS: dict[ModelTier, ModelConfig] = {
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-4o-mini",  "openai"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-4o",       "openai"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "o3",           "openai"),
+# Anthropic cloud alternatives per tier
+ANTHROPIC_MODELS: dict[ModelTier, ModelConfig] = {
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001", "anthropic"),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-6", "anthropic"),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6", "anthropic"),
 }
 
 # OpenAI Codex (ChatGPT subscription) — all tiers use gpt-5.4

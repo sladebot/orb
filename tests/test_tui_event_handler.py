@@ -31,6 +31,8 @@ def _make_tui() -> OrbTUI:
     tui._last_elapsed  = 0.0
     tui._last_diff     = ""
     tui._turn_count    = 0
+    tui._session_id    = ""
+    tui._session_generation = 1
     tui._timeline_entries = []
     tui._file_changes = {}
     tui._selected_file = None
@@ -495,6 +497,16 @@ class TestTuiEventHandler:
         rendered = HeaderBar(tui).render().plain
         assert "Triad" in rendered
         assert "triad" not in rendered
+
+    def test_header_bar_shows_turn_generation_and_workdir_name(self):
+        tui = _make_tui()
+        tui._turn_count = 3
+        tui._session_generation = 2
+        tui._plan = {"workdir": "/tmp/orb-session-123"}
+        rendered = HeaderBar(tui).render().plain
+        assert "turn 3" in rendered
+        assert "gen 2" in rendered
+        assert "orb-session-123" in rendered
 
     def test_detail_pane_prefers_server_plan_neighbors_and_position(self):
         tui = _make_tui()

@@ -58,49 +58,84 @@
     <div id="main-layout">
         <div id="changes-panel" class="side-column">
             <div class="side-column-header">
-                <span class="side-column-kicker">Output</span>
-                <h2 class="side-column-title">Code Changes</h2>
-                <div id="workdir-banner">workdir: —</div>
-            </div>
-
-            <div id="question-panel" class="hidden">
-                <div id="question-header">
-                    <span id="question-from">agent is asking</span>
-                    <button id="question-dismiss" title="Dismiss">×</button>
+                <div class="side-column-heading">
+                    <div class="side-column-copy">
+                        <span class="side-column-kicker">Output</span>
+                        <h2 class="side-column-title">Code Changes</h2>
+                        <p class="side-column-subtitle">Run summaries, diffs, and planning state for the current workspace session.</p>
+                    </div>
+                    <div id="session-pill">Session idle</div>
                 </div>
-                <div id="question-body"></div>
-                <div id="question-reply-row">
-                    <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
-                    <button id="question-send">Reply</button>
-                </div>
-            </div>
-
-            <div id="result-panel" class="hidden">
-                <div id="result-header">
-                    <span id="result-badge">✓ Complete</span>
-                    <span id="result-agent"></span>
-                    <span id="result-elapsed"></span>
-                    <button id="result-copy" title="Copy to clipboard">Copy</button>
-                    <button id="result-close" title="Dismiss">×</button>
-                </div>
-                <div id="result-body-wrap">
-                    <div id="result-body"></div>
-                </div>
-            </div>
-
-            <div id="planning-panel" class="planning-panel">
-                <div class="planning-header">
-                    <span>Daemon Plan</span>
-                    <span id="planning-status">idle</span>
-                </div>
-                <div id="planning-list" class="planning-list">
-                    <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
+                <div id="workspace-meta" aria-label="Workspace metadata">
+                    <div class="meta-card meta-card-workdir">
+                        <span class="meta-label">Workspace</span>
+                        <span id="workdir-banner" class="meta-value">—</span>
+                    </div>
+                    <div class="meta-card-row">
+                        <div class="meta-card">
+                            <span class="meta-label">Session</span>
+                            <span id="session-id-banner" class="meta-value">—</span>
+                        </div>
+                        <div class="meta-card meta-card-compact">
+                            <span class="meta-label">Generation</span>
+                            <span id="session-generation-banner" class="meta-value">1</span>
+                        </div>
+                        <div class="meta-card meta-card-compact">
+                            <span class="meta-label">Turn</span>
+                            <span id="session-turn-banner" class="meta-value">0</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div id="changes-log"></div>
+            <div id="changes-panel-body">
+                <div id="changes-log"></div>
+
+                <div id="changes-secondary">
+                    <div id="question-panel" class="hidden">
+                        <div id="question-header">
+                            <span id="question-from">agent is asking</span>
+                            <button id="question-dismiss" title="Dismiss">×</button>
+                        </div>
+                        <div id="question-body"></div>
+                        <div id="question-reply-row">
+                            <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                            <button id="question-send">Reply</button>
+                        </div>
+                    </div>
+
+                    <div id="result-panel" class="hidden">
+                        <div id="result-header">
+                            <span id="result-badge">✓ Complete</span>
+                            <span id="result-agent"></span>
+                            <span id="result-elapsed"></span>
+                            <button id="result-copy" title="Copy to clipboard">Copy</button>
+                            <button id="result-close" title="Dismiss">×</button>
+                        </div>
+                        <div id="result-body-wrap">
+                            <div id="result-body"></div>
+                        </div>
+                    </div>
+
+                    <div id="planning-panel" class="planning-panel">
+                        <div class="planning-header">
+                            <span>Daemon Plan</span>
+                            <span id="planning-status">idle</span>
+                        </div>
+                        <div id="planning-list" class="planning-list">
+                            <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <div id="query-bar">
+                <div id="query-bar-header">
+                    <div>
+                        <span class="query-bar-kicker">Composer</span>
+                        <div class="query-bar-title">Send the next task</div>
+                    </div>
+                </div>
                 <div id="query-container">
                     <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
                     <div id="query-actions">

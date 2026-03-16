@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from dataclasses import dataclass, field
 from time import time
 
@@ -11,6 +12,7 @@ class MemoryNode:
     node_type: str  # e.g. "code", "requirement", "review", "test_result", "constraint"
     created_at: float = field(default_factory=time)
     updated_at: float = field(default_factory=time)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

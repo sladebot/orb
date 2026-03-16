@@ -10,6 +10,7 @@ from aiohttp import web
 
 from web.server import DashboardServer
 from web.state import DashboardState
+from orb.runtime import GraphRuntime
 from orb.llm.types import CompletionResponse, ModelTier, ModelConfig
 from tests.test_claude_agent import MockLLMClient
 from orb.orchestrator.types import OrchestratorConfig
@@ -64,6 +65,8 @@ class TestServerAPI:
         assert data["type"] == "init"
         assert "agents" in data
         assert "stats" in data
+        assert "session_id" in data
+        assert "session_generation" in data
 
     async def test_api_run_status_not_running_initially(self, client):
         resp = await client.get("/api/run-status")
@@ -118,3 +121,137 @@ class TestServerAPI:
         })
         data = await resp.json()
         assert data["ok"] is False
+
+
+class TestModelAllocation:
+    def test_triad_prefers_stronger_models_for_coder_and_reviewer(self):
+        runtime = GraphRuntime()
+        runtime._providers = {"anthropic": object()}  # noqa: SLF001
+
+        model_map = runtime._build_agent_model_map(  # noqa: SLF001
+            complexity=40,
+            topology_id="triad",
+            agent_complexity={
+                "coordinator": 30,
+                "coder": 40,
+                "reviewer": 30,
+                "tester": 35,
+            },
+        )
+
+        assert model_map["coordinator"].model_id == "claude-haiku-4-5-20251001"
+        assert model_map["coder"].model_id == "claude-sonnet-4-6"
+        assert model_map["reviewer"].model_id == "claude-sonnet-4-6"
+        assert model_map["tester"].model_id == "claude-haiku-4-5-20251001"
+
+    def test_hierarchy_prefers_stronger_models_for_research_and_code_roles(self):
+        runtime = GraphRuntime()
+        runtime._providers = {"anthropic": object()}  # noqa: SLF001
+
+        model_map = runtime._build_agent_model_map(  # noqa: SLF001
+            complexity=45,
+            topology_id="hierarchy",
+            agent_complexity={
+                "coordinator": 25,
+                "researcher": 45,
+                "coder": 45,
+                "reviewer": 40,
+                "tester": 30,
+            },
+        )
+
+        assert model_map["coordinator"].model_id == "claude-haiku-4-5-20251001"
+        assert model_map["researcher"].model_id == "claude-sonnet-4-6"
+        assert model_map["coder"].model_id == "claude-sonnet-4-6"
+        assert model_map["reviewer"].model_id == "claude-sonnet-4-6"
+
+    @pytest.mark.asyncio
+    async def test_llm_model_allocator_can_override_heuristic_assignments(self):
+        runtime = GraphRuntime()
+        allocator = MockLLMClient([
+            CompletionResponse(
+                content=json.dumps({
+                    "assignments": {
+                        "coordinator": {
+                            "provider": "anthropic",
+                            "model": "claude-haiku-4-5-20251001",
+                            "reason": "routing only",
+                        },
+                        "coder": {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-6",
+                            "reason": "hard implementation",
+                        },
+                        "reviewer": {
+                            "provider": "anthropic",
+                            "model": "claude-sonnet-4-6",
+                            "reason": "strong review",
+                        },
+                        "tester": {
+                            "provider": "anthropic",
+                            "model": "claude-haiku-4-5-20251001",
+                            "reason": "light validation",
+                        },
+                    }
+                }),
+                model="claude-sonnet-4-6",
+            )
+        ])
+        runtime._providers = {"anthropic": allocator}  # noqa: SLF001
+        heuristic = runtime._build_agent_model_map(  # noqa: SLF001
+            complexity=40,
+            topology_id="triad",
+            agent_complexity={
+                "coordinator": 30,
+                "coder": 40,
+                "reviewer": 30,
+                "tester": 35,
+            },
+        )
+
+        assigned, reasons = await runtime._llm_assign_agent_models(  # noqa: SLF001
+            "build a production ios app",
+            "triad",
+            40,
+            {"coordinator": 30, "coder": 40, "reviewer": 30, "tester": 35},
+            heuristic,
+        )
+
+        assert assigned["coder"].model_id == "claude-opus-4-6"
+        assert reasons["coder"] == "hard implementation"
+
+    @pytest.mark.asyncio
+    async def test_predict_topology_uses_llm_allocator_for_agent_models(self):
+        runtime = GraphRuntime()
+        predictor = MockLLMClient([
+            CompletionResponse(
+                content=json.dumps({
+                    "complexity": 40,
+                    "reason": "Compact implementation task",
+                    "topology": "triad",
+                    "agent_complexity": {
+                        "coordinator": 30,
+                        "coder": 40,
+                        "reviewer": 30,
+                        "tester": 35,
+                    },
+                }),
+                model="claude-sonnet-4-6",
+            ),
+            CompletionResponse(
+                content=json.dumps({
+                    "assignments": {
+                        "coordinator": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "reason": "routing"},
+                        "coder": {"provider": "anthropic", "model": "claude-opus-4-6", "reason": "implementation"},
+                        "reviewer": {"provider": "anthropic", "model": "claude-sonnet-4-6", "reason": "review"},
+                        "tester": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "reason": "validation"},
+                    }
+                }),
+                model="claude-sonnet-4-6",
+            ),
+        ])
+        runtime._providers = {"anthropic": predictor}  # noqa: SLF001
+
+        predicted = await runtime.predict_topology("build a mobile app")
+
+        assert predicted["agent_models"]["coder"] == "claude-opus-4-6"

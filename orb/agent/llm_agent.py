@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import PurePosixPath
 from typing import Callable, Awaitable, Optional
@@ -10,7 +11,7 @@ from ..llm.client import LLMClient
 from ..llm.model_selector import ModelSelector
 from ..llm.types import CompletionRequest, ModelConfig, DEFAULT_MODELS, ModelTier
 from ..memory.memory_graph import MemoryGraph
-from ..memory.memory_node import MemoryNode, MemoryEdge
+from ..memory.memory_node import MemoryEdge
 from ..messaging.bus import MessageBus
 from ..messaging.channel import AgentChannel, ChannelClosed
 from ..messaging.message import Message, MessageType
@@ -28,6 +29,15 @@ CompletionCallback = Callable[[str, str], Awaitable[None] | None]
 # Callback for agent activity updates (agent_id, activity_text)
 ActivityCallback = Callable[[str, str], Awaitable[None] | None]
 HeartbeatCallback = Callable[[str, dict], Awaitable[None] | None]
+
+
+def _display_model_name(model_id: str) -> str:
+    if not model_id:
+        return ""
+    m = re.match(r"^claude-([a-z]+-[\d]+(?:-[\d]+)?)", model_id, re.I)
+    if m:
+        return m.group(1).lower()
+    return model_id
 
 
 class LLMAgent(AgentNode):
@@ -60,6 +70,7 @@ class LLMAgent(AgentNode):
         self._system_prompt: str = ""
         self._tools: list[dict] = []
         self._memory_counter = 0
+        self._last_message_memory_id: str | None = None
         self._last_complexity_score: int = config.base_complexity
         self._heartbeat_task: asyncio.Task | None = None
         self._fs_cache: dict[tuple[str, str], str] = {}
@@ -150,7 +161,7 @@ class LLMAgent(AgentNode):
         # Store in memory
         self._store_memory(msg)
 
-        from ..llm.types import OPENAI_MODELS, CODEX_MODELS
+        from ..llm.types import ANTHROPIC_MODELS, CODEX_MODELS
 
         def _resolve_model_config() -> ModelConfig | None:
             if self.config.pinned_model is not None:
@@ -164,7 +175,7 @@ class LLMAgent(AgentNode):
             for cfg in (
                 self._model_overrides.get(preferred),
                 DEFAULT_MODELS.get(preferred),
-                OPENAI_MODELS.get(preferred),
+                ANTHROPIC_MODELS.get(preferred),
                 CODEX_MODELS.get(preferred),
             ):
                 if cfg and cfg.provider in self._providers:
@@ -215,23 +226,43 @@ class LLMAgent(AgentNode):
         MAX_TOOL_NUDGES = 3
         nudge_count = 0
 
+        MAX_SAME_MODEL_RETRIES = 3
+
         while True:
-            await self._emit(f"Calling {model_config.model_id}…")
-            try:
-                response = await provider.complete(request)
-            except Exception as exc:
-                logger.warning(
-                    f"[{self.node_id}] LLM call failed "
-                    f"({model_config.provider}/{model_config.model_id}): {exc}"
-                )
+            await self._emit(f"Calling {_display_model_name(model_config.model_id)}…")
+            response = None
+            last_exc: Exception | None = None
+            for attempt in range(1, MAX_SAME_MODEL_RETRIES + 1):
+                try:
+                    response = await provider.complete(request)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        f"[{self.node_id}] LLM call failed "
+                        f"({model_config.provider}/{model_config.model_id}) attempt {attempt}/{MAX_SAME_MODEL_RETRIES}: {exc}"
+                    )
+                    if attempt < MAX_SAME_MODEL_RETRIES:
+                        await self._emit(
+                            f"Retrying {_display_model_name(model_config.model_id)} "
+                            f"({attempt + 1}/{MAX_SAME_MODEL_RETRIES})…"
+                        )
+                        await asyncio.sleep(0.5 * attempt)
+
+            if response is None:
                 err = (
-                    "Assigned model call failed. "
+                    "Assigned model call failed after retries. "
                     "Each node is pinned to a single provider/model for the run."
                 )
-                logger.error(f"[{self.node_id}] {err}")
+                logger.error(f"[{self.node_id}] {err}: {last_exc}")
                 await self._handle_complete(
                     "assigned_model_failed",
-                    {"result": f"[ERROR] {err} ({model_config.provider}/{model_config.model_id})"},
+                    {
+                        "result": (
+                            f"[ERROR] {err} "
+                            f"({model_config.provider}/{_display_model_name(model_config.model_id)})"
+                        )
+                    },
                 )
                 return
 
@@ -468,6 +499,12 @@ class LLMAgent(AgentNode):
             return
         self._conversation.add_tool_result(tool_id, result)
         self._invalidate_fs_cache_for_path(path)
+        self._remember_file_artifact(
+            path=path,
+            content=content,
+            relation="writes_to",
+            action="write",
+        )
         if self._on_file_write:
             self._on_file_write(self.node_id, path, content, old_content)
 
@@ -488,6 +525,12 @@ class LLMAgent(AgentNode):
             return
         self._fs_cache[("read", norm_path)] = content
         self._conversation.add_tool_result(tool_id, content)
+        self._remember_file_artifact(
+            path=path,
+            content=content,
+            relation="reads_from",
+            action="read",
+        )
 
     async def _handle_list_directory(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", ".").strip() or "."
@@ -516,11 +559,18 @@ class LLMAgent(AgentNode):
         self._memory_counter += 1
         node_id = f"msg_{self._memory_counter}"
         node_type = "incoming" if msg.from_ != self.node_id else "outgoing"
-        self._memory.add_node(MemoryNode(
-            id=node_id,
+        self._memory.upsert_node(
+            node_id=node_id,
             content=msg.payload[:500],
             node_type=node_type,
-        ))
+            metadata={
+                "speaker": msg.from_,
+                "audience": msg.to,
+                "message_type": msg.type.value,
+                "depth": msg.depth,
+            },
+        )
+        self._last_message_memory_id = node_id
         # Link to previous memory node
         if self._memory_counter > 1:
             prev_id = f"msg_{self._memory_counter - 1}"
@@ -539,3 +589,39 @@ class LLMAgent(AgentNode):
                 self._memory.remove_node(oldest_id)
             except (KeyError, AttributeError):
                 pass
+
+    def _remember_file_artifact(
+        self,
+        *,
+        path: str,
+        content: str,
+        relation: str,
+        action: str,
+    ) -> None:
+        norm_path = self._normalize_relpath(path)
+        node_id = f"file:{norm_path}"
+        artifact = self._memory.upsert_node(
+            node_id=node_id,
+            content=content[:4000],
+            node_type="artifact",
+            metadata={
+                "path": norm_path,
+                "agent_id": self.node_id,
+                "action": action,
+                "lines": content.count("\n") + (1 if content else 0),
+                "chars": len(content),
+            },
+        )
+        if not self._last_message_memory_id:
+            return
+        try:
+            self._memory.add_edge(MemoryEdge(
+                from_id=self._last_message_memory_id,
+                to_id=artifact.id,
+                relation=relation,
+            ))
+        except KeyError:
+            logger.debug(
+                "Skipping artifact memory link for %s; current message node missing",
+                norm_path,
+            )

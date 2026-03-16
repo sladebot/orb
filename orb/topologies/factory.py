@@ -175,9 +175,8 @@ def _resolve_model_selection(
     from ..llm.types import ModelConfig, ModelTier
 
     provider_models: dict[str, ModelConfig] = {
-        "anthropic": ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514", "anthropic"),
+        "anthropic": ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6", "anthropic"),
         "openai-codex": ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4", "openai-codex"),
-        "openai": ModelConfig(ModelTier.CLOUD_STRONG, "o3", "openai"),
         "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
     }
 

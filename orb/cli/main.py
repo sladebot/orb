@@ -683,7 +683,7 @@ async def async_main() -> None:
         if "claude" in args.model:
             provider = "anthropic"
         elif "gpt" in args.model:
-            provider = "openai"
+            provider = "openai-codex"
         else:
             provider = "ollama"
         override_config = ModelConfig(
