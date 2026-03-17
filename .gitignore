@@ -7,3 +7,4 @@ build/
 .python-version
 .venv/
 .orb/
+docs/superpowers/
