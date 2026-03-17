@@ -177,3 +177,16 @@ async def test_set_subgraph_store_passes_providers():
     assert agent._fact_extractor._providers is providers
     assert agent._subgraph_store is store
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_non_list_json_raises():
+    """LLM returns a JSON object (not array); RuntimeError is raised."""
+    store = ChromaDBNetworkXStore()
+    providers = _make_providers(codex_response='{"subject": "x", "predicate": "y", "object": "z"}')
+    extractor = FactExtractor(store, "agent-h", providers)
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        await extractor.extract_and_store("turn-8", "some content")
+
+    await store.close()
