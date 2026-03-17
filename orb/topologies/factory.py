@@ -172,11 +172,11 @@ def _resolve_model_selection(
     existing_agents: dict[str, AgentConfig],
 ) -> "ModelConfig | None":
     """Resolve model_selection hints to a concrete ModelConfig."""
-    from ..llm.types import ModelConfig, ModelTier
+    from ..llm.types import ANTHROPIC_MODELS, CODEX_MODELS, ModelConfig, ModelTier
 
     provider_models: dict[str, ModelConfig] = {
-        "anthropic": ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6", "anthropic"),
-        "openai-codex": ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4", "openai-codex"),
+        "anthropic": ANTHROPIC_MODELS[ModelTier.CLOUD_STRONG],
+        "openai-codex": CODEX_MODELS[ModelTier.CLOUD_STRONG],
         "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
     }
 

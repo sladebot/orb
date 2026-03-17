@@ -254,13 +254,15 @@ class LLMAgent(AgentNode):
                     "Assigned model call failed after retries. "
                     "Each node is pinned to a single provider/model for the run."
                 )
+                detail = f" Last provider error: {last_exc}" if last_exc else ""
                 logger.error(f"[{self.node_id}] {err}: {last_exc}")
                 await self._handle_complete(
                     "assigned_model_failed",
                     {
                         "result": (
                             f"[ERROR] {err} "
-                            f"({model_config.provider}/{_display_model_name(model_config.model_id)})"
+                            f"({model_config.provider}/{_display_model_name(model_config.model_id)})."
+                            f"{detail}"
                         )
                     },
                 )

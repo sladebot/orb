@@ -419,13 +419,17 @@ class GraphRuntime:
         return {"ok": False, "error": "No run in progress"}
 
     def models_payload(self) -> dict:
+        from orb.llm.types import ANTHROPIC_MODEL_LABELS, ANTHROPIC_PROVIDER, ANTHROPIC_MODELS
+
         models = [{"id": "auto", "label": "Auto-select", "provider": "auto", "local": False}]
         if "anthropic" in self._providers:
-            models += [
-                {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "provider": "anthropic", "local": False},
-                {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "anthropic", "local": False},
-                {"id": "claude-opus-4-6", "label": "Claude Opus 4.6", "provider": "anthropic", "local": False},
-            ]
+            for config in ANTHROPIC_MODELS.values():
+                models.append({
+                    "id": config.model_id,
+                    "label": ANTHROPIC_MODEL_LABELS[config.model_id],
+                    "provider": ANTHROPIC_PROVIDER,
+                    "local": False,
+                })
         if "openai-codex" in self._providers:
             models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
         if "ollama" in self._providers:
@@ -464,20 +468,29 @@ class GraphRuntime:
         agent_complexity: dict | None = None,
         topology_id: str = "triad",
     ) -> dict:
-        from orb.llm.types import ModelTier, ModelConfig
+        from orb.llm.types import (
+            ANTHROPIC_HAIKU_MODEL,
+            ANTHROPIC_OPUS_MODEL,
+            ANTHROPIC_PROVIDER,
+            ANTHROPIC_SONNET_MODEL,
+            ModelConfig,
+            ModelTier,
+            OPENAI_CODEX_PROVIDER,
+            OLLAMA_PROVIDER,
+        )
 
         has_ollama = "ollama" in self._providers
         has_anthropic = "anthropic" in self._providers
         has_codex = "openai-codex" in self._providers
 
         def ollama(model_id: str) -> ModelConfig:
-            return ModelConfig(tier=ModelTier.LOCAL_LARGE, model_id=model_id, provider="ollama")
+            return ModelConfig(tier=ModelTier.LOCAL_LARGE, model_id=model_id, provider=OLLAMA_PROVIDER)
 
         def ant(tier: ModelTier, model_id: str) -> ModelConfig:
-            return ModelConfig(tier=tier, model_id=model_id, provider="anthropic")
+            return ModelConfig(tier=tier, model_id=model_id, provider=ANTHROPIC_PROVIDER)
 
         def codex(tier: ModelTier) -> ModelConfig:
-            return ModelConfig(tier=tier, model_id="gpt-5.4", provider="openai-codex")
+            return ModelConfig(tier=tier, model_id="gpt-5.4", provider=OPENAI_CODEX_PROVIDER)
 
         force_provider: str | None = None
         if model_pin and model_pin != "auto":
@@ -502,11 +515,11 @@ class GraphRuntime:
         use_ant = has_anthropic and force_provider in (None, "anthropic")
         use_codex = has_codex and force_provider in (None, "openai-codex")
 
-        haiku = (ant(ModelTier.CLOUD_LITE, "claude-haiku-4-5-20251001") if use_ant else
+        haiku = (ant(ModelTier.CLOUD_LITE, ANTHROPIC_HAIKU_MODEL) if use_ant else
                  codex(ModelTier.CLOUD_LITE) if use_codex else None)
-        sonnet = (ant(ModelTier.CLOUD_FAST, "claude-sonnet-4-6") if use_ant else
+        sonnet = (ant(ModelTier.CLOUD_FAST, ANTHROPIC_SONNET_MODEL) if use_ant else
                   codex(ModelTier.CLOUD_FAST) if use_codex else None)
-        opus = (ant(ModelTier.CLOUD_STRONG, "claude-opus-4-6") if use_ant else
+        opus = (ant(ModelTier.CLOUD_STRONG, ANTHROPIC_OPUS_MODEL) if use_ant else
                 codex(ModelTier.CLOUD_STRONG) if use_codex else None)
 
         def best(*choices):
@@ -614,13 +627,14 @@ class GraphRuntime:
         return None
 
     def _available_model_choices(self) -> list[dict]:
+        from orb.llm.types import ANTHROPIC_MODEL_DESCRIPTIONS, ANTHROPIC_MODELS
+
         choices: list[dict] = []
         seen: set[tuple[str, str]] = set()
         for provider_name, configs in (
             ("anthropic", [
-                ("claude-haiku-4-5-20251001", "fastest / lowest cost"),
-                ("claude-sonnet-4-6", "strong balanced reasoning"),
-                ("claude-opus-4-6", "strongest reasoning"),
+                (config.model_id, ANTHROPIC_MODEL_DESCRIPTIONS[config.model_id])
+                for config in ANTHROPIC_MODELS.values()
             ]),
             ("openai-codex", [
                 ("gpt-5.4", "strong coding and reasoning"),

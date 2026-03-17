@@ -16,7 +16,7 @@
         <div id="brand">
             <span id="brand-badge">ORB</span>
             <div id="brand-copy">
-                <span id="brand-subtitle">Agent Network</span>
+                <span id="brand-subtitle">Agent Runtime</span>
                 <span id="brand-caption">Live graph runtime with subscriber UIs</span>
             </div>
         </div>
@@ -60,80 +60,24 @@
             <div class="side-column-header">
                 <div class="side-column-heading">
                     <div class="side-column-copy">
-                        <span class="side-column-kicker">Output</span>
-                        <h2 class="side-column-title">Code Changes</h2>
-                        <p class="side-column-subtitle">Run summaries, diffs, and planning state for the current workspace session.</p>
+                        <span class="side-column-kicker">Trace</span>
+                        <h2 class="side-column-title">Run Output</h2>
                     </div>
-                    <div id="session-pill">Session idle</div>
-                </div>
-                <div id="workspace-meta" aria-label="Workspace metadata">
-                    <div class="meta-card meta-card-workdir">
-                        <span class="meta-label">Workspace</span>
-                        <span id="workdir-banner" class="meta-value">—</span>
-                    </div>
-                    <div class="meta-card-row">
-                        <div class="meta-card">
-                            <span class="meta-label">Session</span>
-                            <span id="session-id-banner" class="meta-value">—</span>
-                        </div>
-                        <div class="meta-card meta-card-compact">
-                            <span class="meta-label">Generation</span>
-                            <span id="session-generation-banner" class="meta-value">1</span>
-                        </div>
-                        <div class="meta-card meta-card-compact">
-                            <span class="meta-label">Turn</span>
-                            <span id="session-turn-banner" class="meta-value">0</span>
-                        </div>
-                    </div>
+                    <button id="changes-panel-toggle" class="panel-toggle" type="button" title="Collapse code changes panel" aria-expanded="true" aria-controls="changes-panel">
+                        <span class="panel-toggle-icon">−</span>
+                    </button>
                 </div>
             </div>
 
             <div id="changes-panel-body">
                 <div id="changes-log"></div>
-
-                <div id="changes-secondary">
-                    <div id="question-panel" class="hidden">
-                        <div id="question-header">
-                            <span id="question-from">agent is asking</span>
-                            <button id="question-dismiss" title="Dismiss">×</button>
-                        </div>
-                        <div id="question-body"></div>
-                        <div id="question-reply-row">
-                            <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
-                            <button id="question-send">Reply</button>
-                        </div>
-                    </div>
-
-                    <div id="result-panel" class="hidden">
-                        <div id="result-header">
-                            <span id="result-badge">✓ Complete</span>
-                            <span id="result-agent"></span>
-                            <span id="result-elapsed"></span>
-                            <button id="result-copy" title="Copy to clipboard">Copy</button>
-                            <button id="result-close" title="Dismiss">×</button>
-                        </div>
-                        <div id="result-body-wrap">
-                            <div id="result-body"></div>
-                        </div>
-                    </div>
-
-                    <div id="planning-panel" class="planning-panel">
-                        <div class="planning-header">
-                            <span>Daemon Plan</span>
-                            <span id="planning-status">idle</span>
-                        </div>
-                        <div id="planning-list" class="planning-list">
-                            <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
-                        </div>
-                    </div>
-                </div>
             </div>
 
             <div id="query-bar">
                 <div id="query-bar-header">
                     <div>
                         <span class="query-bar-kicker">Composer</span>
-                        <div class="query-bar-title">Send the next task</div>
+                        <div class="query-bar-title">Dispatch task</div>
                     </div>
                 </div>
                 <div id="query-container">
@@ -184,82 +128,149 @@
 
         <div id="communications-panel" class="side-column">
             <div class="side-column-header">
-                <span class="side-column-kicker">Runtime</span>
-                <h2 class="side-column-title">Node Communications</h2>
-            </div>
-
-            <div id="node-detail-empty" class="empty-state">
-                <div class="empty-state-kicker">Node Inspector</div>
-                <div class="empty-state-title">Select a node</div>
-                <div class="empty-state-copy">Click a node in the graph to inspect its status, activity, recent messages, and send it direct input.</div>
-            </div>
-
-            <div id="node-detail-panel" class="ndp-closed">
-                <div id="ndp-header">
-                    <div id="ndp-accent"></div>
-                    <div id="ndp-header-body">
-                        <div id="ndp-title-row">
-                            <span id="ndp-role"></span>
-                            <span id="ndp-status-badge"></span>
-                        </div>
-                        <div id="ndp-meta"></div>
-                        <div id="ndp-summary"></div>
+                <div class="side-column-heading">
+                    <div class="side-column-copy">
+                        <span class="side-column-kicker">Inspector</span>
+                        <h2 class="side-column-title">Runtime Context</h2>
                     </div>
-                    <button id="ndp-close" title="Close">×</button>
-                </div>
-
-                <div id="ndp-body">
-                    <div id="ndp-overview-section" class="ndp-section">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">◈</span> Overview
-                        </div>
-                        <div id="ndp-overview-grid"></div>
-                    </div>
-
-                    <div id="ndp-topology-section" class="ndp-section">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">⊚</span> Topology Position
-                        </div>
-                        <div id="ndp-topology-map"></div>
-                    </div>
-
-                    <div id="ndp-activity-section" class="ndp-section hidden">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">⚙</span> Activity Timeline
-                        </div>
-                        <div id="ndp-activity-log"></div>
-                    </div>
-
-                    <div id="ndp-comm-section" class="ndp-section">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">⇄</span> Communication
-                        </div>
-                        <div id="ndp-comm-grid"></div>
-                    </div>
-
-                    <div id="ndp-messages-section" class="ndp-section">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">✉</span> Recent Messages
-                        </div>
-                        <div id="ndp-message-list"></div>
-                    </div>
-
-                    <div id="ndp-result-section" class="ndp-section hidden">
-                        <div class="ndp-section-label">
-                            <span class="ndp-section-icon">✓</span> Result
-                        </div>
-                        <div id="ndp-result-body"></div>
+                    <div class="side-column-actions">
+                        <div id="session-pill">Session idle</div>
+                        <button id="communications-panel-toggle" class="panel-toggle" type="button" title="Collapse runtime panel" aria-expanded="true" aria-controls="communications-panel">
+                            <span class="panel-toggle-icon">−</span>
+                        </button>
                     </div>
                 </div>
-
-                <div id="ndp-chat-row">
-                    <div id="ndp-chat-label">Send input directly to this node</div>
-                    <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
-                    <button id="ndp-chat-send">Send</button>
+                <div id="workspace-meta" aria-label="Workspace metadata">
+                    <div class="meta-card meta-card-workdir">
+                        <span class="meta-label">Workspace</span>
+                        <span id="workdir-banner" class="meta-value">—</span>
+                    </div>
+                    <div class="meta-card-row">
+                        <div class="meta-card">
+                            <span class="meta-label">Session</span>
+                            <span id="session-id-banner" class="meta-value">—</span>
+                        </div>
+                        <div class="meta-card meta-card-compact">
+                            <span class="meta-label">Generation</span>
+                            <span id="session-generation-banner" class="meta-value">1</span>
+                        </div>
+                        <div class="meta-card meta-card-compact">
+                            <span class="meta-label">Turn</span>
+                            <span id="session-turn-banner" class="meta-value">0</span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div id="message-log"></div>
+            <div id="communications-panel-body">
+                <div id="node-detail-empty" class="empty-state">
+                    <div class="empty-state-kicker">Node Inspector</div>
+                    <div class="empty-state-title">Select a node</div>
+                    <div class="empty-state-copy">Click a node in the graph to inspect its status, activity, recent messages, and send it direct input.</div>
+                </div>
+
+                <div id="node-detail-panel" class="ndp-closed">
+                    <div id="ndp-header">
+                        <div id="ndp-accent"></div>
+                        <div id="ndp-header-body">
+                            <div id="ndp-title-row">
+                                <span id="ndp-role"></span>
+                                <span id="ndp-status-badge"></span>
+                            </div>
+                            <div id="ndp-meta"></div>
+                            <div id="ndp-summary"></div>
+                        </div>
+                        <button id="ndp-close" title="Close">×</button>
+                    </div>
+
+                    <div id="ndp-body">
+                        <div id="ndp-overview-section" class="ndp-section">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">◈</span> Overview
+                            </div>
+                            <div id="ndp-overview-grid"></div>
+                        </div>
+
+                        <div id="ndp-topology-section" class="ndp-section">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">⊚</span> Topology Position
+                            </div>
+                            <div id="ndp-topology-map"></div>
+                        </div>
+
+                        <div id="ndp-activity-section" class="ndp-section hidden">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">⚙</span> Activity Timeline
+                            </div>
+                            <div id="ndp-activity-log"></div>
+                        </div>
+
+                        <div id="ndp-comm-section" class="ndp-section">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">⇄</span> Communication
+                            </div>
+                            <div id="ndp-comm-grid"></div>
+                        </div>
+
+                        <div id="ndp-messages-section" class="ndp-section">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">✉</span> Recent Messages
+                            </div>
+                            <div id="ndp-message-list"></div>
+                        </div>
+
+                        <div id="ndp-result-section" class="ndp-section hidden">
+                            <div class="ndp-section-label">
+                                <span class="ndp-section-icon">✓</span> Result
+                            </div>
+                            <div id="ndp-result-body"></div>
+                        </div>
+                    </div>
+
+                    <div id="ndp-chat-row">
+                        <div id="ndp-chat-label">Send input directly to this node</div>
+                        <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
+                        <button id="ndp-chat-send">Send</button>
+                    </div>
+                </div>
+
+                <div id="question-panel" class="hidden">
+                    <div id="question-header">
+                        <span id="question-from">agent is asking</span>
+                        <button id="question-dismiss" title="Dismiss">×</button>
+                    </div>
+                    <div id="question-body"></div>
+                    <div id="question-reply-row">
+                        <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                        <button id="question-send">Reply</button>
+                    </div>
+                </div>
+
+                <div id="result-panel" class="hidden">
+                    <div id="result-header">
+                        <span id="result-badge">✓ Complete</span>
+                        <span id="result-agent"></span>
+                        <span id="result-elapsed"></span>
+                        <button id="result-copy" title="Copy to clipboard">Copy</button>
+                        <button id="result-close" title="Dismiss">×</button>
+                    </div>
+                    <div id="result-body-wrap">
+                        <div id="result-body"></div>
+                    </div>
+                </div>
+
+                <div id="planning-panel" class="planning-panel hidden">
+                    <div class="planning-header">
+                        <span>Daemon Plan</span>
+                        <span id="planning-status">idle</span>
+                    </div>
+                    <div id="planning-list" class="planning-list">
+                        <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
+                    </div>
+                </div>
+
+                <div id="message-log"></div>
+            </div>
         </div>
     </div>
 

@@ -10,6 +10,11 @@ from aiohttp import web
 
 from web.server import DashboardServer
 from web.state import DashboardState
+from orb.llm.types import (
+    ANTHROPIC_HAIKU_MODEL,
+    ANTHROPIC_OPUS_MODEL,
+    ANTHROPIC_SONNET_MODEL,
+)
 from orb.runtime import GraphRuntime
 from orb.llm.types import CompletionResponse, ModelTier, ModelConfig
 from tests.test_claude_agent import MockLLMClient
@@ -139,10 +144,10 @@ class TestModelAllocation:
             },
         )
 
-        assert model_map["coordinator"].model_id == "claude-haiku-4-5-20251001"
-        assert model_map["coder"].model_id == "claude-sonnet-4-6"
-        assert model_map["reviewer"].model_id == "claude-sonnet-4-6"
-        assert model_map["tester"].model_id == "claude-haiku-4-5-20251001"
+        assert model_map["coordinator"].model_id == ANTHROPIC_HAIKU_MODEL
+        assert model_map["coder"].model_id == ANTHROPIC_SONNET_MODEL
+        assert model_map["reviewer"].model_id == ANTHROPIC_SONNET_MODEL
+        assert model_map["tester"].model_id == ANTHROPIC_HAIKU_MODEL
 
     def test_hierarchy_prefers_stronger_models_for_research_and_code_roles(self):
         runtime = GraphRuntime()
@@ -160,10 +165,10 @@ class TestModelAllocation:
             },
         )
 
-        assert model_map["coordinator"].model_id == "claude-haiku-4-5-20251001"
-        assert model_map["researcher"].model_id == "claude-sonnet-4-6"
-        assert model_map["coder"].model_id == "claude-sonnet-4-6"
-        assert model_map["reviewer"].model_id == "claude-sonnet-4-6"
+        assert model_map["coordinator"].model_id == ANTHROPIC_HAIKU_MODEL
+        assert model_map["researcher"].model_id == ANTHROPIC_SONNET_MODEL
+        assert model_map["coder"].model_id == ANTHROPIC_SONNET_MODEL
+        assert model_map["reviewer"].model_id == ANTHROPIC_SONNET_MODEL
 
     @pytest.mark.asyncio
     async def test_llm_model_allocator_can_override_heuristic_assignments(self):
@@ -174,27 +179,27 @@ class TestModelAllocation:
                     "assignments": {
                         "coordinator": {
                             "provider": "anthropic",
-                            "model": "claude-haiku-4-5-20251001",
+                            "model": ANTHROPIC_HAIKU_MODEL,
                             "reason": "routing only",
                         },
                         "coder": {
                             "provider": "anthropic",
-                            "model": "claude-opus-4-6",
+                            "model": ANTHROPIC_OPUS_MODEL,
                             "reason": "hard implementation",
                         },
                         "reviewer": {
                             "provider": "anthropic",
-                            "model": "claude-sonnet-4-6",
+                            "model": ANTHROPIC_SONNET_MODEL,
                             "reason": "strong review",
                         },
                         "tester": {
                             "provider": "anthropic",
-                            "model": "claude-haiku-4-5-20251001",
+                            "model": ANTHROPIC_HAIKU_MODEL,
                             "reason": "light validation",
                         },
                     }
                 }),
-                model="claude-sonnet-4-6",
+                model=ANTHROPIC_SONNET_MODEL,
             )
         ])
         runtime._providers = {"anthropic": allocator}  # noqa: SLF001
@@ -217,7 +222,7 @@ class TestModelAllocation:
             heuristic,
         )
 
-        assert assigned["coder"].model_id == "claude-opus-4-6"
+        assert assigned["coder"].model_id == ANTHROPIC_OPUS_MODEL
         assert reasons["coder"] == "hard implementation"
 
     @pytest.mark.asyncio
@@ -236,22 +241,22 @@ class TestModelAllocation:
                         "tester": 35,
                     },
                 }),
-                model="claude-sonnet-4-6",
+                model=ANTHROPIC_SONNET_MODEL,
             ),
             CompletionResponse(
                 content=json.dumps({
                     "assignments": {
-                        "coordinator": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "reason": "routing"},
-                        "coder": {"provider": "anthropic", "model": "claude-opus-4-6", "reason": "implementation"},
-                        "reviewer": {"provider": "anthropic", "model": "claude-sonnet-4-6", "reason": "review"},
-                        "tester": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "reason": "validation"},
+                        "coordinator": {"provider": "anthropic", "model": ANTHROPIC_HAIKU_MODEL, "reason": "routing"},
+                        "coder": {"provider": "anthropic", "model": ANTHROPIC_OPUS_MODEL, "reason": "implementation"},
+                        "reviewer": {"provider": "anthropic", "model": ANTHROPIC_SONNET_MODEL, "reason": "review"},
+                        "tester": {"provider": "anthropic", "model": ANTHROPIC_HAIKU_MODEL, "reason": "validation"},
                     }
                 }),
-                model="claude-sonnet-4-6",
+                model=ANTHROPIC_SONNET_MODEL,
             ),
         ])
         runtime._providers = {"anthropic": predictor}  # noqa: SLF001
 
         predicted = await runtime.predict_topology("build a mobile app")
 
-        assert predicted["agent_models"]["coder"] == "claude-opus-4-6"
+        assert predicted["agent_models"]["coder"] == ANTHROPIC_OPUS_MODEL

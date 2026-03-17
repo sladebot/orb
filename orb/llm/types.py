@@ -22,28 +22,54 @@ class ModelConfig:
     temperature: float = 0.7
 
 
+ANTHROPIC_PROVIDER = "anthropic"
+OPENAI_CODEX_PROVIDER = "openai-codex"
+OLLAMA_PROVIDER = "ollama"
+
+ANTHROPIC_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+ANTHROPIC_SONNET_MODEL = "claude-sonnet-4-6"
+ANTHROPIC_OPUS_MODEL = "claude-opus-4-6"
+
+ANTHROPIC_MODEL_LABELS: dict[str, str] = {
+    ANTHROPIC_HAIKU_MODEL: "Claude Haiku 4.5",
+    ANTHROPIC_SONNET_MODEL: "Claude Sonnet 4.6",
+    ANTHROPIC_OPUS_MODEL: "Claude Opus 4.6",
+}
+
+ANTHROPIC_MODEL_DESCRIPTIONS: dict[str, str] = {
+    ANTHROPIC_HAIKU_MODEL: "fastest / lowest cost",
+    ANTHROPIC_SONNET_MODEL: "strong balanced reasoning",
+    ANTHROPIC_OPUS_MODEL: "strongest reasoning",
+}
+
+ANTHROPIC_MODEL_TIERS: dict[ModelTier, str] = {
+    ModelTier.CLOUD_LITE: ANTHROPIC_HAIKU_MODEL,
+    ModelTier.CLOUD_FAST: ANTHROPIC_SONNET_MODEL,
+    ModelTier.CLOUD_STRONG: ANTHROPIC_OPUS_MODEL,
+}
+
+
 # Default model configs per tier (Codex-first cloud defaults; local tiers remain Ollama)
 DEFAULT_MODELS: dict[ModelTier, ModelConfig] = {
-    ModelTier.LOCAL_SMALL:  ModelConfig(ModelTier.LOCAL_SMALL,  "qwen3.5:9b",   "ollama"),
-    ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen3.5:27b",  "ollama"),
-    ModelTier.LOCAL_LARGE:  ModelConfig(ModelTier.LOCAL_LARGE,  "qwen3.5:27b",  "ollama"),
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4",  "openai-codex"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4",  "openai-codex"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4",  "openai-codex"),
+    ModelTier.LOCAL_SMALL:  ModelConfig(ModelTier.LOCAL_SMALL,  "qwen3.5:9b", OLLAMA_PROVIDER),
+    ModelTier.LOCAL_MEDIUM: ModelConfig(ModelTier.LOCAL_MEDIUM, "qwen3.5:27b", OLLAMA_PROVIDER),
+    ModelTier.LOCAL_LARGE:  ModelConfig(ModelTier.LOCAL_LARGE,  "qwen3.5:27b", OLLAMA_PROVIDER),
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4", OPENAI_CODEX_PROVIDER),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4", OPENAI_CODEX_PROVIDER),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4", OPENAI_CODEX_PROVIDER),
 }
 
 # Anthropic cloud alternatives per tier
 ANTHROPIC_MODELS: dict[ModelTier, ModelConfig] = {
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "claude-haiku-4-5-20251001", "anthropic"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "claude-sonnet-4-6", "anthropic"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-6", "anthropic"),
+    tier: ModelConfig(tier, model_id, ANTHROPIC_PROVIDER)
+    for tier, model_id in ANTHROPIC_MODEL_TIERS.items()
 }
 
 # OpenAI Codex (ChatGPT subscription) — all tiers use gpt-5.4
 CODEX_MODELS: dict[ModelTier, ModelConfig] = {
-    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4",  "openai-codex"),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4",  "openai-codex"),
-    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4",  "openai-codex"),
+    ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   "gpt-5.4", OPENAI_CODEX_PROVIDER),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   "gpt-5.4", OPENAI_CODEX_PROVIDER),
+    ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4", OPENAI_CODEX_PROVIDER),
 }
 
 

@@ -8,17 +8,26 @@ from __future__ import annotations
 import os
 
 from .client import LLMClient
-from .types import CompletionRequest, CompletionResponse, ToolCall
+from .types import (
+    ANTHROPIC_HAIKU_MODEL,
+    ANTHROPIC_OPUS_MODEL,
+    ANTHROPIC_SONNET_MODEL,
+    CompletionRequest,
+    CompletionResponse,
+    ToolCall,
+)
 
 OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = ANTHROPIC_SONNET_MODEL
 ANTHROPIC_MODEL_ALIASES = {
-    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-5": "claude-sonnet-4-6",
-    "claude-sonnet-4-6": "claude-sonnet-4-6",
-    "claude-opus-4": "claude-opus-4-6",
-    "claude-opus-4-6": "claude-opus-4-6",
+    "claude-haiku-4-5": ANTHROPIC_HAIKU_MODEL,
+    ANTHROPIC_HAIKU_MODEL: ANTHROPIC_HAIKU_MODEL,
+    "claude-sonnet-4-5": ANTHROPIC_SONNET_MODEL,
+    ANTHROPIC_SONNET_MODEL: ANTHROPIC_SONNET_MODEL,
+    "claude-sonnet-4-20250514": ANTHROPIC_SONNET_MODEL,
+    "claude-opus-4": ANTHROPIC_OPUS_MODEL,
+    ANTHROPIC_OPUS_MODEL: ANTHROPIC_OPUS_MODEL,
+    "claude-opus-4-20250514": ANTHROPIC_OPUS_MODEL,
 }
 
 

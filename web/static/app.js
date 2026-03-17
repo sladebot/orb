@@ -56,6 +56,8 @@ class Dashboard {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submitQuery(); }
         });
         document.getElementById('query-stop').addEventListener('click', () => this._stopRun());
+        document.getElementById('changes-panel-toggle').addEventListener('click', () => this._togglePanel('changes-panel'));
+        document.getElementById('communications-panel-toggle').addEventListener('click', () => this._togglePanel('communications-panel'));
 
         const qi = document.getElementById('query-input');
         qi.addEventListener('input', () => {
@@ -105,6 +107,7 @@ class Dashboard {
         this._loadTopologyOptions();
         this._setChangesEmptyState();
         this._setMessageEmptyState();
+        this._restorePanelState();
 
         // Topology dropdown toggle
         document.getElementById('topology-trigger').addEventListener('click', () => this._toggleTopologyMenu());
@@ -154,6 +157,33 @@ class Dashboard {
         el.className = connected ? 'connected' : 'disconnected';
         el.title = connected ? 'Connected' : 'Disconnected';
         if (label) label.textContent = connected ? 'Live' : 'Offline';
+    }
+
+    _restorePanelState() {
+        for (const panelId of ['changes-panel', 'communications-panel']) {
+            const collapsed = window.localStorage.getItem(`orb:${panelId}:collapsed`) === 'true';
+            this._setPanelCollapsed(panelId, collapsed);
+        }
+    }
+
+    _togglePanel(panelId) {
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        const collapsed = !panel.classList.contains('is-collapsed');
+        this._setPanelCollapsed(panelId, collapsed);
+        window.localStorage.setItem(`orb:${panelId}:collapsed`, String(collapsed));
+        setTimeout(() => this.graph._resize(), 160);
+    }
+
+    _setPanelCollapsed(panelId, collapsed) {
+        const panel = document.getElementById(panelId);
+        const toggle = document.getElementById(`${panelId}-toggle`);
+        if (!panel || !toggle) return;
+        panel.classList.toggle('is-collapsed', collapsed);
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        toggle.title = `${collapsed ? 'Expand' : 'Collapse'} ${panelId === 'changes-panel' ? 'code changes' : 'runtime'} panel`;
+        const icon = toggle.querySelector('.panel-toggle-icon');
+        if (icon) icon.textContent = collapsed ? '+' : '−';
     }
 
     // ── Event dispatch ────────────────────────────────────────
@@ -482,18 +512,21 @@ class Dashboard {
     }
 
     _renderPlanningState() {
+        const panel = document.getElementById('planning-panel');
         const list = document.getElementById('planning-list');
         const status = document.getElementById('planning-status');
-        if (!list || !status) return;
+        if (!panel || !list || !status) return;
 
         const steps = Array.isArray(this._planSteps) ? this._planSteps : [];
         if (!steps.length) {
+            panel.classList.toggle('hidden', !this._isRunActive);
             status.textContent = this._isRunActive ? 'Starting' : 'Idle';
             status.className = this._isRunActive ? 'planning-status-live' : 'planning-status-idle';
             list.innerHTML = `<div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>`;
             return;
         }
 
+        panel.classList.remove('hidden');
         status.textContent = 'Live';
         status.className = 'planning-status-live';
         list.innerHTML = steps.map((step) => `
@@ -1539,8 +1572,8 @@ class Dashboard {
 
     _shortModel(modelId) {
         if (!modelId) return '';
-        // claude-sonnet-4-5-20251001 → sonnet-4-5
-        // claude-opus-4-20250514     → opus-4
+        // claude-sonnet-4-6 → sonnet-4-6
+        // claude-opus-4-6   → opus-4-6
         // gpt-5.4, gpt-4o, qwen3.5:9b pass through unchanged
         const m = modelId.match(/^claude-([a-z]+-[\d]+(?:-[\d]+)?)/i);
         if (m) return m[1].toLowerCase();
