@@ -18,7 +18,11 @@ from ..messaging.message import Message, MessageType
 from .base import AgentNode
 from .conversation import ConversationHistory
 from .prompt_builder import build_system_prompt
-from .request_context import build_request_messages
+from .request_context import (
+    build_request_messages,
+    build_graph_context_block,
+    build_request_messages_with_graph,
+)
 from .tools import send_message_tool, complete_task_tool, filesystem_tools
 from .types import AgentConfig, AgentStatus, TopologyContext
 
@@ -74,6 +78,8 @@ class LLMAgent(AgentNode):
         self._last_complexity_score: int = config.base_complexity
         self._heartbeat_task: asyncio.Task | None = None
         self._fs_cache: dict[tuple[str, str], str] = {}
+        self._subgraph_store = None
+        self._fact_extractor = None
 
     async def _emit(self, activity: str) -> None:
         """Fire the activity callback if set."""
@@ -117,6 +123,12 @@ class LLMAgent(AgentNode):
                 pass
             self._heartbeat_task = None
         await super().stop()
+
+    def set_subgraph_store(self, store) -> None:
+        """Attach a SubgraphStore and create a FactExtractor for this agent."""
+        self._subgraph_store = store
+        from .fact_extractor import FactExtractor
+        self._fact_extractor = FactExtractor(store, self.node_id, self._providers)
 
     def initialize(
         self,
@@ -192,11 +204,20 @@ class LLMAgent(AgentNode):
         provider = self._providers[model_config.provider]
         shared_transcript = ""
         if self._shared_transcript is not None:
-            shared_transcript = self._shared_transcript.render_for_model(
+            shared_transcript = self._shared_transcript.render_for_model(self.node_id)
+
+        graph_context = ""
+        if self._fact_extractor is not None and self._subgraph_store is not None:
+            graph_context = await build_graph_context_block(
+                self._subgraph_store,
                 self.node_id,
+                query=msg.payload[:200],
+                limit=10,
             )
-        request_messages = build_request_messages(
+
+        request_messages = build_request_messages_with_graph(
             self._conversation.get_messages(),
+            graph_context,
             shared_transcript,
         )
 
@@ -312,8 +333,9 @@ class LLMAgent(AgentNode):
                 )
                 self._conversation.add_user(nudge)
                 request = CompletionRequest(
-                    messages=build_request_messages(
+                    messages=build_request_messages_with_graph(
                         self._conversation.get_messages(),
+                        graph_context,
                         shared_transcript,
                     ),
                     tools=self._tools,
@@ -362,8 +384,9 @@ class LLMAgent(AgentNode):
                     )
                 # All calls were filesystem ops — add results and let the model continue
                 request = CompletionRequest(
-                    messages=build_request_messages(
+                    messages=build_request_messages_with_graph(
                         self._conversation.get_messages(),
+                        graph_context,
                         shared_transcript,
                     ),
                     tools=self._tools,
@@ -373,6 +396,29 @@ class LLMAgent(AgentNode):
                 continue
 
             break
+
+        if self._fact_extractor and assistant_content:
+            content_text = " ".join(
+                block.get("text", "") for block in assistant_content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if content_text.strip():
+                _task = asyncio.create_task(
+                    self._fact_extractor.extract_and_store(msg.id, content_text),
+                    name=f"fact-extract-{self.node_id}-{msg.id[:8]}",
+                )
+
+                def _on_extraction_done(t: asyncio.Task) -> None:
+                    if t.cancelled():
+                        return
+                    exc = t.exception()
+                    if exc:
+                        logger.warning(
+                            "Fact extraction failed for agent %s turn %s: %s",
+                            self.node_id, msg.id[:8], exc,
+                        )
+
+                _task.add_done_callback(_on_extraction_done)
 
         self._selector.reset_retries()
 
