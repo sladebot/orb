@@ -129,6 +129,22 @@ async def test_partial_triple_skipped():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_only_provider_no_codex():
+    """When only Anthropic provider is present (no Codex), Anthropic is used directly."""
+    store = ChromaDBNetworkXStore()
+    payload = json.dumps([{"subject": "Alice", "predicate": "wrote", "object": "tests"}])
+    providers = _make_providers(anthropic_response=payload)
+    extractor = FactExtractor(store, "agent-g", providers)
+
+    facts = await extractor.extract_and_store("turn-7", "Alice wrote tests.")
+
+    assert len(facts) == 1
+    assert facts[0].predicate == "wrote"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_set_subgraph_store_passes_providers():
     from orb.agent.llm_agent import LLMAgent
     from orb.agent.types import AgentConfig

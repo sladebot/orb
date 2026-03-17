@@ -122,7 +122,7 @@ class FactExtractor:
             subject = triple.get("subject")
             predicate = triple.get("predicate")
             obj = triple.get("object")
-            if not subject or not predicate or not obj:
+            if subject is None or predicate is None or obj is None:
                 logger.debug("Skipping partial triple (missing field): %r", triple)
                 continue
             facts.append(Fact(
