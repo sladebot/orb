@@ -46,6 +46,8 @@ class Dashboard {
         this._agentActivityLines = {};  // agentId -> string[] (last 10 lines)
         this._plan = null;
         this._fileChanges = new Map();
+        this._panelWidthKeys = ['changes-panel', 'communications-panel'];
+        this._activePanelDrag = null;
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -58,6 +60,7 @@ class Dashboard {
         document.getElementById('query-stop').addEventListener('click', () => this._stopRun());
         document.getElementById('changes-panel-toggle').addEventListener('click', () => this._togglePanel('changes-panel'));
         document.getElementById('communications-panel-toggle').addEventListener('click', () => this._togglePanel('communications-panel'));
+        this._setupPanelResize();
 
         const qi = document.getElementById('query-input');
         qi.addEventListener('input', () => {
@@ -108,6 +111,7 @@ class Dashboard {
         this._setChangesEmptyState();
         this._setMessageEmptyState();
         this._restorePanelState();
+        this._restorePanelWidths();
 
         // Topology dropdown toggle
         document.getElementById('topology-trigger').addEventListener('click', () => this._toggleTopologyMenu());
@@ -119,6 +123,7 @@ class Dashboard {
                 document.getElementById('topology-menu').classList.add('hidden');
             }
         });
+        window.addEventListener('resize', () => this._handleViewportResize());
 
         this._connect();
     }
@@ -166,6 +171,17 @@ class Dashboard {
         }
     }
 
+    _restorePanelWidths() {
+        for (const panelId of this._panelWidthKeys) {
+            const stored = Number(window.localStorage.getItem(`orb:${panelId}:width`));
+            if (Number.isFinite(stored) && stored > 0) {
+                this._setPanelWidth(panelId, stored);
+            } else {
+                this._setPanelWidth(panelId, null);
+            }
+        }
+    }
+
     _togglePanel(panelId) {
         const panel = document.getElementById(panelId);
         if (!panel) return;
@@ -184,6 +200,118 @@ class Dashboard {
         toggle.title = `${collapsed ? 'Expand' : 'Collapse'} ${panelId === 'changes-panel' ? 'code changes' : 'runtime'} panel`;
         const icon = toggle.querySelector('.panel-toggle-icon');
         if (icon) icon.textContent = collapsed ? '+' : '−';
+        this._syncResizeHandle(panelId);
+        if (!collapsed) this._setPanelWidth(panelId, this._getStoredPanelWidth(panelId));
+    }
+
+    _setupPanelResize() {
+        const handles = document.querySelectorAll('.panel-resize-handle');
+        for (const handle of handles) {
+            handle.addEventListener('pointerdown', (event) => this._startPanelResize(event, handle));
+        }
+    }
+
+    _startPanelResize(event, handle) {
+        if (window.innerWidth <= 980) return;
+        const panelId = handle.dataset.panelId;
+        const side = handle.dataset.side;
+        const panel = document.getElementById(panelId);
+        if (!panel || panel.classList.contains('is-collapsed')) return;
+
+        this._activePanelDrag = { panelId, side, pointerId: event.pointerId };
+        handle.classList.add('is-dragging');
+        document.body.classList.add('is-resizing-panels');
+        handle.setPointerCapture(event.pointerId);
+        event.preventDefault();
+
+        const move = (moveEvent) => this._onPanelResize(moveEvent);
+        const stop = (endEvent) => {
+            if (endEvent.pointerId !== event.pointerId) return;
+            handle.classList.remove('is-dragging');
+            document.body.classList.remove('is-resizing-panels');
+            this._activePanelDrag = null;
+            handle.removeEventListener('pointermove', move);
+            handle.removeEventListener('pointerup', stop);
+            handle.removeEventListener('pointercancel', stop);
+            this.graph._resize();
+        };
+
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
+    }
+
+    _onPanelResize(event) {
+        if (!this._activePanelDrag) return;
+        const { panelId, side } = this._activePanelDrag;
+        const layout = document.getElementById('main-layout');
+        const panel = document.getElementById(panelId);
+        const oppositePanelId = panelId === 'changes-panel' ? 'communications-panel' : 'changes-panel';
+        const oppositePanel = document.getElementById(oppositePanelId);
+        const graphPanel = document.getElementById('graph-panel');
+        if (!layout || !panel || !graphPanel) return;
+
+        const layoutRect = layout.getBoundingClientRect();
+        const graphRect = graphPanel.getBoundingClientRect();
+        const oppositeWidth = oppositePanel && !oppositePanel.classList.contains('is-collapsed')
+            ? oppositePanel.getBoundingClientRect().width
+            : 56;
+        const minimumGraphWidth = Math.min(420, Math.max(300, window.innerWidth * 0.28));
+        const maxWidth = Math.max(280, layoutRect.width - oppositeWidth - minimumGraphWidth - 24);
+        const proposedWidth = side === 'left'
+            ? event.clientX - layoutRect.left
+            : layoutRect.right - event.clientX;
+        const fallbackWidth = side === 'left' ? graphRect.left - layoutRect.left : layoutRect.right - graphRect.right;
+        const width = this._clampPanelWidth(Number.isFinite(proposedWidth) ? proposedWidth : fallbackWidth, maxWidth);
+        this._setPanelWidth(panelId, width);
+    }
+
+    _handleViewportResize() {
+        for (const panelId of this._panelWidthKeys) {
+            this._setPanelWidth(panelId, this._getStoredPanelWidth(panelId));
+            this._syncResizeHandle(panelId);
+        }
+        this.graph._resize();
+    }
+
+    _getStoredPanelWidth(panelId) {
+        const stored = Number(window.localStorage.getItem(`orb:${panelId}:width`));
+        return Number.isFinite(stored) && stored > 0 ? stored : null;
+    }
+
+    _setPanelWidth(panelId, width) {
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        if (window.innerWidth <= 980) {
+            panel.style.width = '';
+            panel.style.flexBasis = '';
+            return;
+        }
+        if (!Number.isFinite(width) || width === null) {
+            panel.style.width = '';
+            panel.style.flexBasis = '';
+            return;
+        }
+        const clampedWidth = this._clampPanelWidth(width);
+        panel.style.width = `${clampedWidth}px`;
+        panel.style.flexBasis = `${clampedWidth}px`;
+        window.localStorage.setItem(`orb:${panelId}:width`, String(clampedWidth));
+        this._syncResizeHandle(panelId);
+        this.graph._resize();
+    }
+
+    _clampPanelWidth(width, maxWidth = null) {
+        const minWidth = 280;
+        const boundedMax = Number.isFinite(maxWidth) ? maxWidth : 520;
+        return Math.max(minWidth, Math.min(Math.round(width), boundedMax));
+    }
+
+    _syncResizeHandle(panelId) {
+        const panel = document.getElementById(panelId);
+        const handle = document.querySelector(`.panel-resize-handle[data-panel-id="${panelId}"]`);
+        if (!panel || !handle) return;
+        const hidden = window.innerWidth <= 980 || panel.classList.contains('is-collapsed');
+        handle.classList.toggle('hidden', hidden);
     }
 
     // ── Event dispatch ────────────────────────────────────────

@@ -1,0 +1,89 @@
+version: "1.0"
+
+# Sample topology demonstrating GraphRAG clusters and bridge configuration.
+# Three clusters of agents share per-cluster SubgraphStores.
+# A BridgeAgent merges cluster_a and cluster_b facts into a shared bridge store.
+
+topologies:
+  graphrag-triad:
+    id: "graphrag-triad"
+    label: "GraphRAG Triad"
+    description: "Three-cluster topology with graph-retrieved context and bridge merging."
+    entry_agent: "coordinator"
+
+    agents:
+      coordinator:
+        role: "Coordinator"
+        category: "entry"
+        description: "Routes the task to the coder cluster."
+        base_complexity: 20
+        suppress_context_guidelines: true
+      coder:
+        role: "Coder"
+        category: "implementation"
+        description: "Implements the solution."
+        base_complexity: 60
+        enable_filesystem: true
+      reviewer:
+        role: "Reviewer"
+        category: "review"
+        description: "Reviews the implementation."
+        base_complexity: 65
+        enable_filesystem: true
+      tester:
+        role: "Tester"
+        category: "validation"
+        description: "Tests the implementation."
+        base_complexity: 35
+        enable_filesystem: true
+      synth:
+        role: "Synthesizer"
+        category: "synthesis"
+        description: "Synthesizes final output."
+        base_complexity: 50
+
+    synthesis_agent: "synth"
+
+    edges:
+      - [coordinator, coder]
+      - [coder, reviewer]
+      - [reviewer, coder]
+      - [coder, tester]
+      - [tester, coder]
+      - [coder, synth]
+
+    clusters:
+      implementation:
+        agents: [coordinator, coder]
+        store_backend: "chroma"
+      review:
+        agents: [reviewer, tester]
+        store_backend: "chroma"
+      bridge_store:
+        agents: [synth]
+        store_backend: "chroma"
+
+    bridge:
+      interval_s: 15.0
+      source_clusters: [implementation, review]
+      target_cluster: bridge_store
+      conflict_resolution: "last_write_wins"
+
+    workflow_steps:
+      - "Coordinator routes task to Coder."
+      - "Coder implements, sends to Reviewer and Tester."
+      - "Reviewer and Tester return feedback."
+      - "Coder incorporates feedback, notifies Synthesizer."
+      - "Synthesizer integrates results."
+
+    completion_rules:
+      coordinator:
+        - "Route the task and complete."
+      coder:
+        - "Implement, get feedback, then complete."
+      reviewer:
+        - "Review and send feedback to Coder."
+      tester:
+        - "Test and send results to Coder."
+      synth:
+        - "Synthesize all results and complete."

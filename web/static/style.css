@@ -3387,6 +3387,36 @@ body {
     align-items: stretch;
 }
 
+.panel-resize-handle {
+    position: relative;
+    flex: 0 0 10px;
+    width: 10px;
+    min-width: 10px;
+    align-self: stretch;
+    cursor: col-resize;
+    border-radius: 999px;
+    opacity: 0.75;
+    transition: opacity 140ms ease, background-color 140ms ease;
+}
+
+.panel-resize-handle::before {
+    content: "";
+    position: absolute;
+    inset: 10px 3px;
+    border-radius: 999px;
+    background: rgba(215, 220, 226, 0.9);
+}
+
+.panel-resize-handle:hover,
+.panel-resize-handle.is-dragging {
+    opacity: 1;
+}
+
+.panel-resize-handle:hover::before,
+.panel-resize-handle.is-dragging::before {
+    background: rgba(23, 105, 224, 0.5);
+}
+
 .side-column,
 #graph-panel {
     border-radius: 18px;
@@ -3698,6 +3728,7 @@ body {
 .side-column.is-collapsed {
     width: 56px;
     min-width: 56px;
+    flex-basis: 56px !important;
 }
 
 .side-column.is-collapsed .side-column-header {
@@ -3788,6 +3819,10 @@ body {
         display: none;
     }
 
+    .panel-resize-handle {
+        display: none;
+    }
+
     .side-column.is-collapsed {
         width: 100%;
         min-width: 0;
@@ -3815,4 +3850,9 @@ body {
         transform: none;
         font-size: 14px;
     }
+}
+
+body.is-resizing-panels {
+    user-select: none;
+    cursor: col-resize;
 }

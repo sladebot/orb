@@ -9,6 +9,23 @@ class OrbSchemaModel(BaseModel):
     model_config = {"protected_namespaces": ()}
 
 
+class ClusterSchema(OrbSchemaModel):
+    """A named group of agents that share a SubgraphStore."""
+
+    agents: list[str]
+    store_backend: str = "chroma"
+    store_kwargs: dict = Field(default_factory=dict)
+
+
+class BridgeSchema(OrbSchemaModel):
+    """Configuration for a BridgeAgent that merges cluster stores."""
+
+    interval_s: float = 30.0
+    source_clusters: list[str]
+    target_cluster: str
+    conflict_resolution: str = "last_write_wins"
+
+
 class ModelSelectionSchema(OrbSchemaModel):
     """Optional model selection hints for multi-provider scenarios."""
 
@@ -61,6 +78,8 @@ class TopologySchema(OrbSchemaModel):
     completion_rules: dict[str, list[str]]
     graph_view: GraphViewSchema | None = None
     selection_hints: SelectionHintsSchema | None = None
+    clusters: dict[str, ClusterSchema] = Field(default_factory=dict)
+    bridge: BridgeSchema | None = None
 
     @field_validator("edges", mode="before")
     @classmethod
@@ -100,6 +119,31 @@ class TopologySchema(OrbSchemaModel):
                 raise ValueError(
                     f"completion_rules references unknown agent '{agent_id}'. "
                     f"Known agents: {sorted(agent_ids)}"
+                )
+
+        # Validate cluster agent references
+        for cluster_name, cluster in self.clusters.items():
+            for agent_id in cluster.agents:
+                if agent_id not in agent_ids:
+                    raise ValueError(
+                        f"Cluster '{cluster_name}' references unknown agent '{agent_id}'. "
+                        f"Known agents: {sorted(agent_ids)}"
+                    )
+
+        # Validate bridge references
+        if self.bridge is not None:
+            cluster_names = set(self.clusters.keys())
+            for src in self.bridge.source_clusters:
+                if src not in cluster_names:
+                    raise ValueError(
+                        f"bridge.source_clusters references unknown cluster '{src}'. "
+                        f"Known clusters: {sorted(cluster_names)}"
+                    )
+            if self.bridge.target_cluster not in cluster_names:
+                raise ValueError(
+                    f"bridge.target_cluster references unknown cluster "
+                    f"'{self.bridge.target_cluster}'. "
+                    f"Known clusters: {sorted(cluster_names)}"
                 )
 
         return self
