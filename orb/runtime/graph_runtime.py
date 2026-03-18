@@ -1002,6 +1002,17 @@ class GraphRuntime:
         for aid, agent in orchestrator.agents.items():
             agent._on_file_write = _make_file_write_cb(aid)
 
+        # Wire GraphRAG subgraph stores if the topology defines clusters
+        from orb.topologies import get_loader
+        from orb.memory.graphrag_config import GraphRAGConfig
+        topo_schema = get_loader().get(topology)
+        if topo_schema and topo_schema.clusters:
+            graphrag_cfg = GraphRAGConfig.from_topology(topo_schema)
+            for aid, agent in orchestrator.agents.items():
+                cluster_name = graphrag_cfg.agent_cluster_map.get(aid)
+                if cluster_name:
+                    agent.set_subgraph_store(graphrag_cfg.cluster_stores[cluster_name])
+
         if self._conversation_session.agent_carryover:
             for aid, agent in orchestrator.agents.items():
                 if aid not in self._conversation_session.agent_carryover:
