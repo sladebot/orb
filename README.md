@@ -4,71 +4,24 @@ A network of LLM agents that collaborate to solve tasks. Agents communicate via 
 
 ---
 
-## Quickstart
+## Install
 
 ```bash
-# Install
 conda create -n orb python=3.12 -y && conda activate orb
 pip install -e .
-
-# First-time setup (auth + settings)
-orb onboard
-
-# Run a task
-orb "write a snake game in Python"
+orb onboard   # first-time auth + settings
 ```
 
----
-
-## Authentication
-
-```bash
-orb auth anthropic          # Anthropic API key or Claude subscription token
-orb auth openai             # OpenAI API key or OAuth (opens browser)
-orb auth status             # Show what's configured
-```
-
-Credentials are stored in `~/.orb/credentials.json`. You can also set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` environment variables directly.
+Set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env vars, or run `orb auth anthropic` / `orb auth openai` to configure interactively.
 
 ---
 
 ## Usage
 
-### Single query
-
 ```bash
-orb "refactor this module to be async"
-```
-
-### Interactive mode
-
-```bash
-orb -i
-```
-
-### Terminal UI
-
-```bash
-orb --tui
-```
-
-Full-screen Textual TUI. Type tasks in the input bar, watch agents collaborate live, follow up without restarting.
-
-### Web dashboard
-
-```bash
-orb --dashboard
-orb --dashboard "build a REST API"
-```
-
-Opens `http://localhost:8080` — live graph canvas, message feed, agent details, and file diffs.
-
-### Daemon mode
-
-```bash
-orb daemon start            # background daemon
-orb tui                     # attach TUI
-orb dashboard               # open browser dashboard
+orb daemon start                        # start background daemon
+orb tui                                 # attach terminal UI
+orb dashboard                           # open web dashboard at localhost:8080
 orb daemon stop
 ```
 
@@ -76,24 +29,21 @@ orb daemon stop
 
 ## Topologies
 
-Topologies define the agent graph. Switch with `--topology`:
+Orb automatically selects the agent topology based on task complexity. Topologies range from a lightweight triad (coordinator, coder, reviewer) to a full hierarchy with a dedicated researcher and multiple reviewers.
+
+**Triad** — general coding tasks
+![Triad topology](docs/triad.png)
+
+**Dual Review** — high-correctness tasks
+![Dual Review topology](docs/dual-review.png)
+
+**Hierarchy** — complex planning + implementation
+![Hierarchy topology](docs/hierarchy.png)
+
+**Custom topologies**
 
 ```bash
-orb --topology triad "write a binary search tree"
-orb --topology dual-review "write a concurrent queue"
-orb --topology hierarchy "plan and implement a refactor"
-```
-
-| Topology | Agents | Best for |
-|----------|--------|----------|
-| `triad` | Coordinator → Coder ↔ Reviewer ↔ Tester | General coding tasks |
-| `dual-review` | + two independent reviewers | High-correctness tasks |
-| `hierarchy` | + dedicated researcher | Complex planning + implementation |
-
-### Custom topologies
-
-```bash
-orb topologies init         # copy sample to ~/.orb/topologies.yaml
+orb topologies init   # copy sample to ~/.orb/topologies.yaml
 ```
 
 Edit `~/.orb/topologies.yaml` to define your own agent graphs. The dashboard hot-reloads on save.
@@ -102,12 +52,10 @@ Edit `~/.orb/topologies.yaml` to define your own agent graphs. The dashboard hot
 
 ## GraphRAG Memory
 
-Agents extract and persist structured facts across runs. Each topology gets its own knowledge store at `~/.orb/chroma/<topology_id>/<cluster>` — agents get smarter about a domain the more you use a topology.
-
-To define clusters in a topology YAML:
+Agents extract and persist structured facts across runs. Each topology gets its own knowledge store at `~/.orb/chroma/<topology_id>/<cluster>`.
 
 ```yaml
-persist_base: "~/.orb/chroma"   # auto-scoped per topology id
+persist_base: "~/.orb/chroma"
 
 clusters:
   implementation:
@@ -116,30 +64,28 @@ clusters:
     agents: [reviewer, tester]
 ```
 
-To browse stored facts:
+Browse stored facts:
 
 ```bash
 chroma run --path ~/.orb/chroma --port 8001
-npx chromadb-admin              # then open http://localhost:3000
+npx chromadb-admin   # open http://localhost:3000
 ```
 
 ---
 
 ## Model Tiers
 
-Agents pick a model tier based on task complexity:
-
 | Tier | Models |
 |------|--------|
-| Local (small / medium / large) | Ollama — Qwen, Llama, DeepSeek |
+| Local | Ollama — Qwen, Llama, DeepSeek |
 | Cloud lite | Claude Haiku, GPT-4o-mini |
 | Cloud fast | Claude Sonnet, GPT-4o |
 | Cloud strong | Claude Opus, o3 |
 
 ```bash
-orb --local-only "hello world"          # force Ollama
-orb --cloud-only "complex refactor"     # force cloud
-orb --model claude-opus-4-6 "..."       # pin a specific model
+orb --local-only "hello world"
+orb --cloud-only "complex refactor"
+orb --model claude-opus-4-6 "..."
 ```
 
 ---
@@ -148,14 +94,10 @@ orb --model claude-opus-4-6 "..."       # pin a specific model
 
 | Flag | Description |
 |------|-------------|
-| `--topology` | Agent topology (`auto`, `triad`, `dual-review`, `hierarchy`, or custom id) |
 | `--budget N` | Max message count (default: 200) |
-| `--tui` | Terminal UI |
-| `--dashboard` | Web dashboard at localhost:8080 |
-| `--local-only` | Force all agents to use Ollama |
-| `--cloud-only` | Force all agents to use cloud models |
-| `--model MODEL` | Override model for all agents |
-| `--ollama-model MODEL` | Override Ollama model |
+| `--local-only` | Force Ollama |
+| `--cloud-only` | Force cloud models |
+| `--model MODEL` | Pin model for all agents |
 
 ---
 
@@ -163,8 +105,6 @@ orb --model claude-opus-4-6 "..."       # pin a specific model
 
 ```bash
 pytest tests/ -v
-
-# Integration tests (requires live API key)
 ANTHROPIC_API_KEY=sk-ant-... pytest tests/integration/ -v
 ```
 
