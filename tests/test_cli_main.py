@@ -286,6 +286,7 @@ async def test_async_main_daemon_honors_explicit_workdir():
          patch("orb.cli.main.Path.mkdir") as mkdir, \
          patch("orb.cli.main.tempfile.mkdtemp", side_effect=AssertionError("should not create temp dir")), \
          patch("orb.cli.main.os.chdir") as chdir, \
+         patch("orb.cli.main._save_daemon_state"), \
          patch("web.server.DashboardServer", FakeDashboardServer), \
          patch("asyncio.Event", return_value=FakeEvent()), \
          patch("asyncio.get_running_loop", return_value=fake_loop):
