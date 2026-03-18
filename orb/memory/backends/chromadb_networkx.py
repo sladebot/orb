@@ -67,6 +67,7 @@ class ChromaDBNetworkXStore(SubgraphStore):
     """Local GraphRAG backend backed by ChromaDB (vector) + NetworkX (graph)."""
 
     def __init__(self, persist_path: str | None = None, collection_name: str | None = None) -> None:
+        self._persist_path = persist_path
         if persist_path:
             self._client = chromadb.PersistentClient(path=persist_path)
             # Persistent stores use a stable collection name by default.

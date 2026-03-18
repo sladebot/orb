@@ -52,6 +52,11 @@ topologies:
       - [tester, coder]
       - [coder, synth]
 
+    # persist_base sets a base directory for all cluster stores.
+    # Each cluster gets its own subdirectory: <persist_base>/<cluster_name>
+    # Use ~ for home directory. Remove to use ephemeral (in-memory) stores.
+    persist_base: "~/.orb/chroma"
+
     clusters:
       implementation:
         agents: [coordinator, coder]

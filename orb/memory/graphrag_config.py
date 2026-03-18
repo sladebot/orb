@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -44,8 +45,16 @@ class GraphRAGConfig:
         # 1. Build one SubgraphStore per cluster
         cluster_stores: dict[str, SubgraphStore] = {}
         for cluster_name, cluster_schema in topology.clusters.items():
+            # Resolve persist_path: cluster-level overrides topology persist_base
+            persist_path: str | None = cluster_schema.persist_path
+            if persist_path is None and topology.persist_base:
+                persist_path = f"{topology.persist_base}/{cluster_name}"
+            if persist_path:
+                persist_path = os.path.expanduser(persist_path)
+
             cluster_stores[cluster_name] = SubgraphStoreFactory.from_config(
                 cluster_schema.store_backend,
+                persist_path=persist_path,
                 **cluster_schema.store_kwargs,
             )
 

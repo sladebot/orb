@@ -15,6 +15,7 @@ class ClusterSchema(OrbSchemaModel):
     agents: list[str]
     store_backend: str = "chroma"
     store_kwargs: dict = Field(default_factory=dict)
+    persist_path: str | None = None
 
 
 class BridgeSchema(OrbSchemaModel):
@@ -80,6 +81,7 @@ class TopologySchema(OrbSchemaModel):
     selection_hints: SelectionHintsSchema | None = None
     clusters: dict[str, ClusterSchema] = Field(default_factory=dict)
     bridge: BridgeSchema | None = None
+    persist_base: str | None = None
 
     @field_validator("edges", mode="before")
     @classmethod
