@@ -31,11 +31,22 @@ class GraphRAGConfig:
     bridge_agent: "BridgeAgent | None" = None
 
     @classmethod
-    def from_topology(cls, topology: "TopologySchema") -> "GraphRAGConfig":
+    def from_topology(
+        cls,
+        topology: "TopologySchema",
+        auto_persist: bool = True,
+    ) -> "GraphRAGConfig":
         """Build SubgraphStores and BridgeAgent from topology clusters/bridge config.
 
-        If the topology has no clusters defined, returns a GraphRAGConfig with
-        empty maps and no bridge agent.
+        Parameters
+        ----------
+        topology:
+            The parsed topology definition.
+        auto_persist:
+            When True (default) and no ``persist_base`` or cluster ``persist_path``
+            is set, stores default to ``~/.orb/chroma/<topology.id>/<cluster_name>``
+            so facts survive between sessions (Option B behaviour).
+            Set to False to force ephemeral stores regardless of topology config.
         """
         if not topology.clusters:
             return cls(cluster_stores={}, agent_cluster_map={}, bridge_agent=None)
@@ -45,10 +56,16 @@ class GraphRAGConfig:
         # 1. Build one SubgraphStore per cluster
         cluster_stores: dict[str, SubgraphStore] = {}
         for cluster_name, cluster_schema in topology.clusters.items():
-            # Resolve persist_path: cluster-level overrides topology persist_base
+            # Resolve persist_path priority:
+            #   1. Explicit cluster persist_path
+            #   2. Topology persist_base + cluster_name
+            #   3. Auto-default: ~/.orb/chroma/<topology.id>/<cluster_name> (if auto_persist)
+            #   4. None → ephemeral
             persist_path: str | None = cluster_schema.persist_path
             if persist_path is None and topology.persist_base:
                 persist_path = f"{topology.persist_base}/{cluster_name}"
+            if persist_path is None and auto_persist:
+                persist_path = f"~/.orb/chroma/{topology.id}/{cluster_name}"
             if persist_path:
                 persist_path = os.path.expanduser(persist_path)
 

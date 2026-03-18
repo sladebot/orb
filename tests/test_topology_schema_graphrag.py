@@ -174,10 +174,11 @@ class TestGraphRAGConfig:
         assert config.agent_cluster_map == {}
         assert config.bridge_agent is None
 
-    def test_graphrag_config_from_topology_with_clusters(self):
+    def test_graphrag_config_from_topology_with_clusters(self, tmp_path):
         """Topology with 2 clusters, 3 agents total → cluster_stores has 2 entries,
         agent_cluster_map maps all 3 agents correctly."""
         data = _wrap(_minimal_topology_data(
+            persist_base=str(tmp_path),
             clusters={
                 "cluster_a": {"agents": ["agent1", "agent2"], "store_backend": "chroma"},
                 "cluster_b": {"agents": ["agent3"], "store_backend": "chroma"},
@@ -198,10 +199,11 @@ class TestGraphRAGConfig:
         assert config.agent_cluster_map["agent3"] == "cluster_b"
         assert config.bridge_agent is None
 
-    def test_graphrag_config_with_bridge(self):
+    def test_graphrag_config_with_bridge(self, tmp_path):
         """Topology with 2 clusters + bridge → bridge_agent is not None,
         source_stores are correct SubgraphStore instances."""
         data = _wrap(_minimal_topology_data(
+            persist_base=str(tmp_path),
             clusters={
                 "cluster_a": {"agents": ["agent1"], "store_backend": "chroma"},
                 "cluster_b": {"agents": ["agent2"], "store_backend": "chroma"},
@@ -240,10 +242,10 @@ class TestGraphRAGConfig:
         }
         assert source_store_ids == expected_ids
 
-    def test_graphrag_config_many_agents_cluster_mapping(self):
+    def test_graphrag_config_many_agents_cluster_mapping(self, tmp_path):
         """Two clusters with 3 agents each → agent_cluster_map maps all 6 correctly."""
         agents = {f"agent{i}": {"role": f"Agent{i}", "description": "D"} for i in range(1, 7)}
-        topo_data = _minimal_topology_data()
+        topo_data = _minimal_topology_data(persist_base=str(tmp_path))
         topo_data["agents"] = agents
         topo_data["clusters"] = {
             "cluster_x": {
@@ -392,7 +394,7 @@ class TestGraphRAGPersistence:
         assert store._persist_path == os.path.expanduser("~/.orb/chroma")
 
     def test_no_persist_path_gives_ephemeral_store(self):
-        """No persist_path and no persist_base → store._persist_path is None (ephemeral)."""
+        """auto_persist=False with no persist_path → store._persist_path is None (ephemeral)."""
         data = _wrap(_minimal_topology_data(
             clusters={
                 "cluster_a": {"agents": ["agent1"], "store_backend": "chroma"},
@@ -404,7 +406,66 @@ class TestGraphRAGPersistence:
         from orb.memory.graphrag_config import GraphRAGConfig
         from orb.memory.backends.chromadb_networkx import ChromaDBNetworkXStore
 
-        config = GraphRAGConfig.from_topology(topo)
+        config = GraphRAGConfig.from_topology(topo, auto_persist=False)
         store = config.cluster_stores["cluster_a"]
         assert isinstance(store, ChromaDBNetworkXStore)
         assert store._persist_path is None
+
+    def test_auto_default_persist_path_uses_topology_id(self, tmp_path, monkeypatch):
+        """When no persist_base or persist_path set, default is ~/.orb/chroma/<topology_id>/<cluster>."""
+        import os
+        # Redirect home so we don't write to real ~/.orb during tests
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        data = _wrap(_minimal_topology_data(
+            clusters={
+                "cluster_a": {"agents": ["agent1"], "store_backend": "chroma"},
+            }
+        ))
+        schema = TopologiesFileSchema.model_validate(data)
+        topo = schema.topologies["test-graphrag"]
+
+        from orb.memory.graphrag_config import GraphRAGConfig
+        from orb.memory.backends.chromadb_networkx import ChromaDBNetworkXStore
+
+        config = GraphRAGConfig.from_topology(topo, auto_persist=True)
+        store = config.cluster_stores["cluster_a"]
+        assert isinstance(store, ChromaDBNetworkXStore)
+        expected = os.path.join(str(tmp_path), ".orb", "chroma", topo.id, "cluster_a")
+        assert store._persist_path == expected
+
+    def test_auto_persist_false_gives_ephemeral(self):
+        """auto_persist=False → stores remain ephemeral even without explicit persist_path."""
+        data = _wrap(_minimal_topology_data(
+            clusters={
+                "cluster_a": {"agents": ["agent1"], "store_backend": "chroma"},
+            }
+        ))
+        schema = TopologiesFileSchema.model_validate(data)
+        topo = schema.topologies["test-graphrag"]
+
+        from orb.memory.graphrag_config import GraphRAGConfig
+        from orb.memory.backends.chromadb_networkx import ChromaDBNetworkXStore
+
+        config = GraphRAGConfig.from_topology(topo, auto_persist=False)
+        store = config.cluster_stores["cluster_a"]
+        assert store._persist_path is None
+
+    def test_explicit_persist_base_overrides_auto_default(self, tmp_path):
+        """Explicit persist_base on topology takes precedence over auto-default."""
+        base = str(tmp_path / "explicit")
+        data = _wrap(_minimal_topology_data(
+            persist_base=base,
+            clusters={
+                "cluster_a": {"agents": ["agent1"], "store_backend": "chroma"},
+            }
+        ))
+        schema = TopologiesFileSchema.model_validate(data)
+        topo = schema.topologies["test-graphrag"]
+
+        from orb.memory.graphrag_config import GraphRAGConfig
+        from orb.memory.backends.chromadb_networkx import ChromaDBNetworkXStore
+
+        config = GraphRAGConfig.from_topology(topo, auto_persist=True)
+        store = config.cluster_stores["cluster_a"]
+        assert store._persist_path == f"{base}/cluster_a"
