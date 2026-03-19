@@ -3,293 +3,300 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Orb Dashboard</title>
+    <title>ORB Command Center</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <!-- Stats bar -->
-    <div id="stats-bar">
-        <!-- Brand -->
-        <div id="brand">
-            <span id="brand-badge">ORB</span>
-            <div id="brand-copy">
-                <span id="brand-subtitle">Agent Runtime</span>
-                <span id="brand-caption">Live graph runtime with subscriber UIs</span>
-            </div>
-        </div>
-
-        <div id="stats-group">
-            <div class="stat">
-                <span class="stat-label">Messages</span>
-                <span id="stat-messages" class="stat-value">0</span>
-            </div>
-            <div class="stat">
-                <span class="stat-label">Budget</span>
-                <span id="stat-budget" class="stat-value">200</span>
-            </div>
-            <div class="stat">
-                <span class="stat-label">Elapsed</span>
-                <span id="stat-elapsed" class="stat-value">0.0s</span>
-            </div>
-            <div class="stat">
-                <span class="stat-label">Status</span>
-                <span id="stat-status" class="stat-value status-waiting">Waiting</span>
-            </div>
-            <div class="stat">
-                <span class="stat-label">Topology</span>
-                <span id="stat-topology" class="stat-value">Auto</span>
-            </div>
-            <div class="stat">
-                <span class="stat-label">Model</span>
-                <span id="stat-model" class="stat-value">Auto</span>
-            </div>
-        </div>
-
-        <div id="connection-pill">
-            <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
-            <span id="connection-label">Disconnected</span>
-        </div>
-    </div>
-
-    <!-- Main layout -->
-    <div id="main-layout">
-        <div id="changes-panel" class="side-column">
-            <div class="side-column-header">
-                <div class="side-column-heading">
-                    <div class="side-column-copy">
-                        <span class="side-column-kicker">Trace</span>
-                        <h2 class="side-column-title">Run Output</h2>
-                    </div>
-                    <button id="changes-panel-toggle" class="panel-toggle" type="button" title="Collapse code changes panel" aria-expanded="true" aria-controls="changes-panel">
-                        <span class="panel-toggle-icon">−</span>
-                    </button>
+    <div class="app-shell">
+        <header id="stats-bar">
+            <div id="brand">
+                <div id="brand-badge-wrap">
+                    <span id="brand-badge">ORB</span>
+                    <span class="pulse-indicator" aria-hidden="true"></span>
+                </div>
+                <div id="brand-copy">
+                    <span id="brand-subtitle">Command Center</span>
+                    <span id="brand-caption">Digital Observer runtime for autonomous graph operations</span>
                 </div>
             </div>
 
-            <div id="changes-panel-body">
-                <div id="changes-log"></div>
-            </div>
-
-            <div id="query-bar">
-                <div id="query-bar-header">
-                    <div>
-                        <span class="query-bar-kicker">Composer</span>
-                        <div class="query-bar-title">Dispatch task</div>
-                    </div>
+            <div id="stats-group">
+                <div class="stat">
+                    <span class="stat-label">Messages</span>
+                    <span id="stat-messages" class="stat-value">0</span>
                 </div>
-                <div id="query-container">
-                    <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
-                    <div id="query-actions">
-                        <div id="model-picker"></div>
-                        <button id="query-send" title="Run (Enter)">
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                <path d="M8 2L8 13M8 2L3 7M8 2L13 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                        </button>
-                        <button id="query-stop" class="hidden" title="Stop run">
-                            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                                <rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor"/>
-                            </svg>
-                        </button>
-                    </div>
+                <div class="stat">
+                    <span class="stat-label">Budget</span>
+                    <span id="stat-budget" class="stat-value">200</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Elapsed</span>
+                    <span id="stat-elapsed" class="stat-value">0.0s</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Status</span>
+                    <span id="stat-status" class="stat-value status-waiting">Waiting</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Topology</span>
+                    <span id="stat-topology" class="stat-value">Auto</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Model</span>
+                    <span id="stat-model" class="stat-value">Auto</span>
                 </div>
             </div>
-        </div>
 
-        <div
-            id="changes-resize-handle"
-            class="panel-resize-handle"
-            data-panel-id="changes-panel"
-            data-side="left"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize run output panel"
-        ></div>
-
-        <div id="graph-panel">
-            <div id="topology-dropdown">
-                <button id="topology-trigger" title="Switch topology">
-                    <svg class="topo-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
-                        <circle cx="7" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/>
-                        <circle cx="3" cy="11" r="2" stroke="currentColor" stroke-width="1.3"/>
-                        <circle cx="11" cy="11" r="2" stroke="currentColor" stroke-width="1.3"/>
-                        <line x1="6" y1="5" x2="4" y2="9" stroke="currentColor" stroke-width="1.1"/>
-                        <line x1="8" y1="5" x2="10" y2="9" stroke="currentColor" stroke-width="1.1"/>
-                    </svg>
-                    <span id="topology-trigger-label">Auto</span>
-                    <span id="topology-trigger-count"></span>
-                    <svg class="topo-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none">
-                        <path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                </button>
-                <div id="topology-menu" class="hidden">
-                    <!-- populated by JS -->
-                </div>
+            <div id="connection-pill">
+                <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+                <span id="connection-label">Daemon Offline</span>
             </div>
-            <canvas id="graph-canvas"></canvas>
-            <div id="graph-loader" class="hidden">
-                <div class="loader-ring"></div>
-                <div id="loader-text">Starting agents…</div>
-            </div>
-        </div>
+            <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
+        </header>
 
-        <div
-            id="communications-resize-handle"
-            class="panel-resize-handle"
-            data-panel-id="communications-panel"
-            data-side="right"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize runtime context panel"
-        ></div>
-
-        <div id="communications-panel" class="side-column">
-            <div class="side-column-header">
-                <div class="side-column-heading">
-                    <div class="side-column-copy">
-                        <span class="side-column-kicker">Inspector</span>
-                        <h2 class="side-column-title">Runtime Context</h2>
-                    </div>
-                    <div class="side-column-actions">
-                        <div id="session-pill">Session idle</div>
-                        <button id="communications-panel-toggle" class="panel-toggle" type="button" title="Collapse runtime panel" aria-expanded="true" aria-controls="communications-panel">
+        <main id="main-layout">
+            <section id="changes-panel" class="side-column">
+                <div class="side-column-header">
+                    <div class="side-column-heading">
+                        <div class="side-column-copy">
+                            <span class="side-column-kicker">Neural Feed</span>
+                            <h2 class="side-column-title">Run Output</h2>
+                        </div>
+                        <button id="changes-panel-toggle" class="panel-toggle" type="button" title="Collapse run output panel" aria-expanded="true" aria-controls="changes-panel">
                             <span class="panel-toggle-icon">−</span>
                         </button>
                     </div>
+                    <p class="side-column-intro">Planning telemetry, file writes, final results, and live graph traffic converge here.</p>
                 </div>
-                <div id="workspace-meta" aria-label="Workspace metadata">
-                    <div class="meta-card meta-card-workdir">
-                        <span class="meta-label">Workspace</span>
-                        <span id="workdir-banner" class="meta-value">—</span>
-                    </div>
-                    <div class="meta-card-row">
-                        <div class="meta-card">
-                            <span class="meta-label">Session</span>
-                            <span id="session-id-banner" class="meta-value">—</span>
-                        </div>
-                        <div class="meta-card meta-card-compact">
-                            <span class="meta-label">Generation</span>
-                            <span id="session-generation-banner" class="meta-value">1</span>
-                        </div>
-                        <div class="meta-card meta-card-compact">
-                            <span class="meta-label">Turn</span>
-                            <span id="session-turn-banner" class="meta-value">0</span>
+
+                <div id="changes-panel-body">
+                    <div id="changes-log"></div>
+                </div>
+
+                <div id="query-bar">
+                    <div id="query-bar-header">
+                        <div class="query-bar-heading">
+                            <span class="query-bar-kicker">Composer</span>
                         </div>
                     </div>
+                    <div id="query-container">
+                        <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
+                        <div id="query-toolbar">
+                            <div id="query-topology-row">
+                                <div id="topology-dropdown">
+                                    <button id="topology-trigger" title="Switch topology">
+                                        <span class="topology-trigger-copy">
+                                            <span class="topology-trigger-kicker">Topology</span>
+                                            <span id="topology-trigger-label">Auto</span>
+                                        </span>
+                                        <span id="topology-trigger-count"></span>
+                                        <span class="topology-trigger-chevron">▾</span>
+                                    </button>
+                                    <div id="topology-menu" class="hidden"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="query-actions">
+                            <button id="query-send" title="Run (Enter)">
+                                <span class="query-action-label">Execute</span>
+                            </button>
+                            <button id="query-stop" class="hidden" title="Stop run">Stop</button>
+                        </div>
+                    </div>
                 </div>
+            </section>
+
+            <div
+                id="changes-resize-handle"
+                class="panel-resize-handle"
+                data-panel-id="changes-panel"
+                data-side="left"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize run output panel"
+            ></div>
+
+            <section id="graph-panel">
+                <div id="graph-panel-overlay-top">
+                    <div id="graph-hud">
+                        <div class="graph-hud-pill">
+                            <span class="graph-hud-label">Topology</span>
+                            <span class="graph-hud-value" id="hero-topology-label">Auto</span>
+                        </div>
+                        <div class="graph-hud-pill">
+                            <span class="graph-hud-label">Runtime</span>
+                            <span class="graph-hud-value" id="hero-status-label">Waiting</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="graph-controls" aria-label="Graph controls">
+                    <button id="graph-zoom-in" class="graph-control-button" type="button" title="Zoom in">+</button>
+                    <button id="graph-zoom-out" class="graph-control-button" type="button" title="Zoom out">−</button>
+                    <button id="graph-reset-view" class="graph-control-button" type="button" title="Reset view">◎</button>
+                </div>
+
+                <canvas id="graph-canvas"></canvas>
+
+                <div id="graph-loader" class="hidden">
+                    <div class="loader-ring"></div>
+                    <div id="loader-text">Starting agents…</div>
+                </div>
+            </section>
+
+            <div
+                id="communications-resize-handle"
+                class="panel-resize-handle"
+                data-panel-id="communications-panel"
+                data-side="right"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize runtime context panel"
+            ></div>
+
+            <section id="communications-panel" class="side-column">
+                <div class="side-column-header">
+                    <div class="side-column-heading">
+                        <div class="side-column-copy">
+                            <span class="side-column-kicker">Live Stream</span>
+                            <h2 class="side-column-title">Activity</h2>
+                        </div>
+                        <div class="side-column-actions">
+                            <div id="session-pill">Session idle</div>
+                            <button id="communications-panel-toggle" class="panel-toggle" type="button" title="Collapse runtime panel" aria-expanded="true" aria-controls="communications-panel">
+                                <span class="panel-toggle-icon">−</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="workspace-meta" aria-label="Workspace metadata">
+                        <div class="meta-card meta-card-workdir">
+                            <span class="meta-label">Workspace</span>
+                            <span id="workdir-banner" class="meta-value">—</span>
+                        </div>
+                        <div class="meta-card-row">
+                            <div class="meta-card">
+                                <span class="meta-label">Session</span>
+                                <span id="session-id-banner" class="meta-value">—</span>
+                            </div>
+                            <div class="meta-card meta-card-compact">
+                                <span class="meta-label">Generation</span>
+                                <span id="session-generation-banner" class="meta-value">1</span>
+                            </div>
+                            <div class="meta-card meta-card-compact">
+                                <span class="meta-label">Turn</span>
+                                <span id="session-turn-banner" class="meta-value">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="communications-panel-body">
+                    <div id="node-detail-panel" class="ndp-closed">
+                        <div id="ndp-header">
+                            <div id="ndp-accent"></div>
+                            <div id="ndp-header-body">
+                                <div id="ndp-title-row">
+                                    <span id="ndp-role"></span>
+                                    <span id="ndp-status-badge"></span>
+                                </div>
+                                <div id="ndp-meta"></div>
+                                <div id="ndp-summary"></div>
+                            </div>
+                            <button id="ndp-close" title="Close">×</button>
+                        </div>
+
+                        <div id="ndp-body">
+                            <div id="ndp-overview-section" class="ndp-section">
+                                <div class="ndp-section-label">Overview</div>
+                                <div id="ndp-overview-grid"></div>
+                            </div>
+
+                            <div id="ndp-topology-section" class="ndp-section">
+                                <div class="ndp-section-label">Topology Position</div>
+                                <div id="ndp-topology-map"></div>
+                            </div>
+
+                            <div id="ndp-activity-section" class="ndp-section hidden">
+                                <div class="ndp-section-label">Activity Timeline</div>
+                                <div id="ndp-activity-log"></div>
+                            </div>
+
+                            <div id="ndp-comm-section" class="ndp-section">
+                                <div class="ndp-section-label">Communication</div>
+                                <div id="ndp-comm-grid"></div>
+                            </div>
+
+                            <div id="ndp-messages-section" class="ndp-section">
+                                <div class="ndp-section-label">Recent Messages</div>
+                                <div id="ndp-message-list"></div>
+                            </div>
+
+                            <div id="ndp-result-section" class="ndp-section hidden">
+                                <div class="ndp-section-label">Result</div>
+                                <div id="ndp-result-body"></div>
+                            </div>
+                        </div>
+
+                        <div id="ndp-chat-row">
+                            <div id="ndp-chat-label">Send input directly to this node</div>
+                            <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
+                            <button id="ndp-chat-send">Send</button>
+                        </div>
+                    </div>
+
+                    <div id="question-panel" class="hidden">
+                        <div id="question-header">
+                            <span id="question-from">agent is asking</span>
+                            <button id="question-dismiss" title="Dismiss">×</button>
+                        </div>
+                        <div id="question-body"></div>
+                        <div id="question-reply-row">
+                            <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                            <button id="question-send">Reply</button>
+                        </div>
+                    </div>
+
+                    <div id="result-panel" class="hidden">
+                        <div id="result-header">
+                            <span id="result-badge">✓ Complete</span>
+                            <span id="result-agent"></span>
+                            <span id="result-elapsed"></span>
+                            <button id="result-copy" title="Copy to clipboard">Copy</button>
+                            <button id="result-close" title="Dismiss">×</button>
+                        </div>
+                        <div id="result-body-wrap">
+                            <div id="result-body"></div>
+                        </div>
+                    </div>
+
+                    <div id="message-log"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="settings-modal" class="hidden" aria-hidden="true">
+        <div id="settings-backdrop"></div>
+        <div id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <div id="settings-header">
+                <div>
+                    <div class="settings-kicker">Preferences</div>
+                    <h2 id="settings-title">Settings</h2>
+                </div>
+                <button id="settings-close" type="button" title="Close settings">×</button>
             </div>
-
-            <div id="communications-panel-body">
-                <div id="node-detail-empty" class="empty-state">
-                    <div class="empty-state-kicker">Node Inspector</div>
-                    <div class="empty-state-title">Select a node</div>
-                    <div class="empty-state-copy">Click a node in the graph to inspect its status, activity, recent messages, and send it direct input.</div>
-                </div>
-
-                <div id="node-detail-panel" class="ndp-closed">
-                    <div id="ndp-header">
-                        <div id="ndp-accent"></div>
-                        <div id="ndp-header-body">
-                            <div id="ndp-title-row">
-                                <span id="ndp-role"></span>
-                                <span id="ndp-status-badge"></span>
-                            </div>
-                            <div id="ndp-meta"></div>
-                            <div id="ndp-summary"></div>
-                        </div>
-                        <button id="ndp-close" title="Close">×</button>
+            <div id="settings-body">
+                <section class="settings-section">
+                    <div class="settings-section-header">
+                        <div class="settings-section-title">Providers</div>
+                        <div class="settings-section-copy">Provider enablement is read from <code>~/.orb/config.json</code>. Edit that file and restart the daemon to apply changes.</div>
                     </div>
-
-                    <div id="ndp-body">
-                        <div id="ndp-overview-section" class="ndp-section">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">◈</span> Overview
-                            </div>
-                            <div id="ndp-overview-grid"></div>
-                        </div>
-
-                        <div id="ndp-topology-section" class="ndp-section">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">⊚</span> Topology Position
-                            </div>
-                            <div id="ndp-topology-map"></div>
-                        </div>
-
-                        <div id="ndp-activity-section" class="ndp-section hidden">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">⚙</span> Activity Timeline
-                            </div>
-                            <div id="ndp-activity-log"></div>
-                        </div>
-
-                        <div id="ndp-comm-section" class="ndp-section">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">⇄</span> Communication
-                            </div>
-                            <div id="ndp-comm-grid"></div>
-                        </div>
-
-                        <div id="ndp-messages-section" class="ndp-section">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">✉</span> Recent Messages
-                            </div>
-                            <div id="ndp-message-list"></div>
-                        </div>
-
-                        <div id="ndp-result-section" class="ndp-section hidden">
-                            <div class="ndp-section-label">
-                                <span class="ndp-section-icon">✓</span> Result
-                            </div>
-                            <div id="ndp-result-body"></div>
-                        </div>
-                    </div>
-
-                    <div id="ndp-chat-row">
-                        <div id="ndp-chat-label">Send input directly to this node</div>
-                        <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
-                        <button id="ndp-chat-send">Send</button>
-                    </div>
-                </div>
-
-                <div id="question-panel" class="hidden">
-                    <div id="question-header">
-                        <span id="question-from">agent is asking</span>
-                        <button id="question-dismiss" title="Dismiss">×</button>
-                    </div>
-                    <div id="question-body"></div>
-                    <div id="question-reply-row">
-                        <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
-                        <button id="question-send">Reply</button>
-                    </div>
-                </div>
-
-                <div id="result-panel" class="hidden">
-                    <div id="result-header">
-                        <span id="result-badge">✓ Complete</span>
-                        <span id="result-agent"></span>
-                        <span id="result-elapsed"></span>
-                        <button id="result-copy" title="Copy to clipboard">Copy</button>
-                        <button id="result-close" title="Dismiss">×</button>
-                    </div>
-                    <div id="result-body-wrap">
-                        <div id="result-body"></div>
-                    </div>
-                </div>
-
-                <div id="planning-panel" class="planning-panel hidden">
-                    <div class="planning-header">
-                        <span>Daemon Plan</span>
-                        <span id="planning-status">idle</span>
-                    </div>
-                    <div id="planning-list" class="planning-list">
-                        <div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>
-                    </div>
-                </div>
-
-                <div id="message-log"></div>
+                    <div id="provider-settings-list"></div>
+                </section>
             </div>
         </div>
     </div>

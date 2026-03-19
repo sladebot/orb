@@ -146,17 +146,19 @@ def parse_args() -> argparse.Namespace:
     topologies_sub = topologies_parser.add_subparsers(dest="topologies_action")
     topologies_init = topologies_sub.add_parser("init", help="Create ~/.orb/topologies.yaml from the bundled sample")
     topologies_init.add_argument("--force", action="store_true", help="Overwrite ~/.orb/topologies.yaml if it already exists")
+    topology_choices = ["auto"] + get_loader().list_ids()
+
     tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     tui_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
-    tui_parser.add_argument("--topology", choices=["auto", "triad", "dual-review", "hierarchy"], default="auto", help="Requested topology when starting a new run")
+    tui_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
     tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
-    dashboard_parser.add_argument("--topology", choices=["auto", "triad", "dual-review", "hierarchy"], default="auto", help="Requested topology when starting a new run")
+    dashboard_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
     daemon_common.add_argument("--host", default=None, help="Daemon bind host")
@@ -185,15 +187,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-only", action="store_true", help="Use only local models")
     parser.add_argument("--cloud-only", action="store_true", help="Use only cloud models")
     parser.add_argument("--ollama-model", type=str, default=os.environ.get("OLLAMA_MODEL"), help="Ollama model to use for all local tiers (e.g. qwen3.5:9b)")
-    parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
-    parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
     parser.add_argument("--connect", type=str, help="Connect TUI or dashboard client to an existing Orb daemon URL")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
-    topology_choices = ["auto"] + get_loader().list_ids()
-    parser.add_argument("--topology", choices=topology_choices, default="auto", help="Agent topology to use")
-    parser.add_argument("--tui", action="store_true", help="Launch interactive terminal TUI")
-    parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI (requires --tui)")
-    parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="Enable verbose logging (default: on)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose logging")
     return parser.parse_args()
@@ -572,7 +567,7 @@ async def async_main() -> None:
         return
 
     fmt = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
-    file_only_logging = bool(args.tui) or args.subcommand in {"daemon", "tui"}
+    file_only_logging = args.subcommand in {"daemon", "tui"}
     if file_only_logging:
         level = logging.DEBUG if args.verbose and not args.quiet else logging.WARNING
         logging.basicConfig(level=level, format=fmt, handlers=[], force=True)
@@ -618,38 +613,6 @@ async def async_main() -> None:
                     print("  Started run on daemon.")
         if not args.no_open:
             webbrowser.open(base)
-        print(f"  Open dashboard at {base}")
-        return
-
-    if args.tui and args.connect:
-        from .tui import attach_tui
-
-        await attach_tui(
-            connect_url=_normalize_connect_url(args.connect),
-            topology=args.topology,
-            budget=args.budget,
-            show_logs=args.logs,
-            initial_query=args.query,
-            exit_after_run=args.exit_after_run,
-        )
-        return
-
-    if args.dashboard and args.connect:
-        import aiohttp
-
-        base = _normalize_connect_url(args.connect)
-
-        if args.query:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{base}/api/start", json={
-                    "query": args.query,
-                    "topology": args.topology,
-                }) as resp:
-                    payload = await resp.json()
-                    if not payload.get("ok"):
-                        print_error(payload.get("error", "Failed to start run"))
-                        sys.exit(1)
-                    print("  Started run on daemon.")
         print(f"  Open dashboard at {base}")
         return
 
@@ -700,76 +663,6 @@ async def async_main() -> None:
     elif args.cloud_only:
         tier_override = ModelTier.CLOUD_FAST
 
-    # --tui: legacy embedded TUI mode; prefer `orb tui` to attach to a daemon
-    if args.tui:
-        from .tui import run_tui_with_dashboard, run_tui_async
-        if args.dashboard:
-            await run_tui_with_dashboard(
-                providers=providers,
-                config=config,
-                model_overrides=model_overrides or None,
-                tier_override=tier_override,
-                topology=args.topology,
-                budget=args.budget,
-                dashboard_port=args.dashboard_port,
-                show_logs=args.logs,
-                initial_query=args.query,
-                exit_after_run=args.exit_after_run,
-            )
-        else:
-            # No public dashboard: backend on loopback-only port 18080
-            await run_tui_async(
-                providers=providers,
-                config=config,
-                model_overrides=model_overrides or None,
-                tier_override=tier_override,
-                topology=args.topology,
-                budget=args.budget,
-                show_logs=args.logs,
-                initial_query=args.query,
-                exit_after_run=args.exit_after_run,
-            )
-        return
-
-    # --dashboard without a query: serve the UI and wait for the browser to start a run
-    if args.dashboard and args.query is None and not args.interactive:
-        from web.server import DashboardServer
-        from web.state import DashboardState
-
-        dash_state = DashboardState()
-        dashboard_server = DashboardServer(dash_state, port=args.dashboard_port)
-        dashboard_server.set_providers(
-            providers=providers,
-            config=config,
-            model_overrides=model_overrides or None,
-            tier_override=tier_override,
-        )
-
-        await dashboard_server.start()
-
-        print_header()
-        print(f"  Dashboard running at http://localhost:{args.dashboard_port}")
-        print("  Open the URL in your browser, type a task, and click Run.")
-        print("  Press Ctrl-C to shut down.\n")
-
-        # Keep server alive until Ctrl-C
-        stop_event = asyncio.Event()
-        try:
-            import signal
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, stop_event.set)
-        except (NotImplementedError, AttributeError):
-            pass  # Windows fallback — will still stop on KeyboardInterrupt
-
-        try:
-            await stop_event.wait()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await dashboard_server.stop()
-        return
-
     if args.interactive or args.query is None:
         await run_repl(
             providers=providers,
@@ -777,16 +670,15 @@ async def async_main() -> None:
             model_overrides=model_overrides or None,
             trace=trace,
             tier_override=tier_override,
-            topology=args.topology if args.topology != "auto" else "triad",
+            topology="triad",
         )
     else:
         print_header()
         live_display = None
-        dashboard_server = None
         orchestrator = None
 
-        if not args.dashboard and trace:
-            topology_id = args.topology if args.topology != "auto" else "triad"
+        if trace:
+            topology_id = "triad"
             orchestrator = create_orchestrator(
                 topology_id,
                 providers=providers,
@@ -797,8 +689,8 @@ async def async_main() -> None:
             )
             from .live_display import LiveDisplay
             live_display = LiveDisplay(budget=args.budget)
-            # Pass topology/model info for the header (use defaults since no LLM prediction here)
-            topo_label = args.topology
+            # Direct CLI runs use the default local topology.
+            topo_label = topology_id
             # Build a quick model map showing what each role will use
             agent_models = {
                 aid: a.config.pinned_model.model_id if a.config.pinned_model else ""
@@ -813,44 +705,10 @@ async def async_main() -> None:
             orchestrator.bus.on_event(live_display.on_event)
             live_display.start()
 
-        if args.dashboard:
-            from web.server import DashboardServer
-            from web.state import DashboardState
-
-            dash_state = DashboardState()
-            dashboard_server = DashboardServer(dash_state, port=args.dashboard_port)
-            dashboard_server.set_providers(
-                providers=providers,
-                config=config,
-                model_overrides=model_overrides or None,
-                tier_override=tier_override,
-            )
-
-            await dashboard_server.start()
-
-            print(f"  Dashboard running at http://localhost:{args.dashboard_port}")
-            status, payload = await dashboard_server.runtime.start_run(
-                args.query,
-                args.topology,
-            )
-            if not payload.get("ok"):
-                print_error(payload.get("error", "Failed to start run"))
-                await dashboard_server.stop()
-                sys.exit(1)
-            await dashboard_server.runtime.wait_for_run()
-            result = dashboard_server.runtime.last_result
-        else:
-            result = await orchestrator.run(args.query)
+        result = await orchestrator.run(args.query)
 
         if live_display:
             live_display.stop()
-
-        if dashboard_server:
-            # Keep dashboard open for a bit so user can inspect
-            if not args.exit_after_run:
-                from rich.prompt import Prompt
-                Prompt.ask("\n[dim]Dashboard running. Press Enter to shut down[/dim]")
-            await dashboard_server.stop()
 
         if result.error:
             print_error(result.error)

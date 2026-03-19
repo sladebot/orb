@@ -15,50 +15,34 @@
 
 const NODE_W = 188;
 const NODE_H = 82;
-const NODE_RADIUS = 10;
+const NODE_RADIUS = 16;
 const PARTICLE_DURATION = 900; // ms
 
 const AGENT_COLORS = {
-    coordinator: '#6e40c9',  // purple
-    coder:       '#0550ae',  // blue
-    reviewer:    '#7d4e00',  // amber
-    reviewer_a:  '#7d4e00',
-    reviewer_b:  '#953800',
-    tester:      '#1a7f37',  // green
-    user:        '#8250df',
+    coordinator: '#acc7ff',
+    coder:       '#7cb7ff',
+    reviewer:    '#ffd37f',
+    reviewer_a:  '#ffd37f',
+    reviewer_b:  '#ffb47d',
+    tester:      '#7de2a7',
+    user:        '#cdbdff',
 };
 
-const FALLBACK_COLORS = ['#9e1239', '#0369a1', '#92400e', '#6b21a8'];
+const FALLBACK_COLORS = ['#cdbdff', '#acc7ff', '#ffd37f', '#7de2a7'];
 
 const STATUS_COLORS = {
-    idle:      '#9198a1',
-    running:   '#0969da',
-    completed: '#1a7f37',
-    error:     '#cf222e',
+    idle:      '#8e97a8',
+    running:   '#acc7ff',
+    completed: '#7de2a7',
+    error:     '#ffb4ab',
 };
 
 const STATUS_BADGE = {
-    idle:      { bg: '#f0f2f5', fg: '#8b949e' },
-    running:   { bg: '#dbeafe', fg: '#0969da' },
-    completed: { bg: '#dcfce7', fg: '#1a7f37' },
-    error:     { bg: '#fee2e2', fg: '#cf222e' },
-    thinking:  { bg: '#fef3c7', fg: '#9a6700' },
-};
-
-// Fractional canvas positions for known topologies
-const LAYOUT_TRIAD = {
-    coordinator: [0.5,  0.15],
-    coder:       [0.5,  0.47],
-    reviewer:    [0.24, 0.81],
-    tester:      [0.76, 0.81],
-};
-
-const LAYOUT_DUAL_REVIEW = {
-    coordinator: [0.5,  0.10],
-    coder:       [0.5,  0.35],
-    reviewer_a:  [0.24, 0.65],
-    reviewer_b:  [0.76, 0.65],
-    tester:      [0.5,  0.88],
+    idle:      { bg: 'rgba(193,198,214,0.12)', fg: '#c1c6d6' },
+    running:   { bg: 'rgba(172,199,255,0.14)', fg: '#acc7ff' },
+    completed: { bg: 'rgba(125,226,167,0.16)', fg: '#7de2a7' },
+    error:     { bg: 'rgba(255,180,171,0.16)', fg: '#ffb4ab' },
+    thinking:  { bg: 'rgba(205,189,255,0.14)', fg: '#cdbdff' },
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,6 +60,10 @@ function agentColor(id) {
     let h = 0;
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) & 0xffff;
     return FALLBACK_COLORS[h % FALLBACK_COLORS.length];
+}
+
+function statusColor(status, fallback) {
+    return STATUS_COLORS[status] || fallback;
 }
 
 function easeInOutCubic(t) {
@@ -105,19 +93,15 @@ function edgeControlPoints(src, tgt) {
     };
 }
 
-/** Find the point on the border of a node rect in the direction of another point. */
+/** Find the point on the border of a node in the direction of another point. */
 function nodeEdgePoint(node, other) {
     const cx = node.x;
     const cy = node.y;
     const dx = other.x - cx;
     const dy = other.y - cy;
-    const hw = NODE_W / 2;
-    const hh = NODE_H / 2;
-    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return { x: cx, y: cy };
-    const sx = dx === 0 ? Infinity : hw / Math.abs(dx);
-    const sy = dy === 0 ? Infinity : hh / Math.abs(dy);
-    const s = Math.min(sx, sy);
-    return { x: cx + dx * s, y: cy + dy * s };
+    const dist = Math.hypot(dx, dy) || 1;
+    const r = node.renderRadius || NODE_RADIUS;
+    return { x: cx + (dx / dist) * r, y: cy + (dy / dist) * r };
 }
 
 /** Draw a rounded rectangle path. */
@@ -153,6 +137,11 @@ class GraphRenderer {
         this._rafId = null;
         this._dpr = window.devicePixelRatio || 1;
         this._gridCanvas = null;  // offscreen cache for dot grid
+        this.zoom = 1;
+        this.minZoom = 0.7;
+        this.maxZoom = 1.8;
+        this.offsetX = 0;
+        this.offsetY = 0;
 
         this._setupEvents();
         this._resize();
@@ -244,34 +233,25 @@ class GraphRenderer {
         const n = ids.length;
 
         if (n === 0) return;
+        const cx = W / 2;
+        const cy = H / 2;
+        const hasCoordinator = Boolean(this.nodes.coordinator);
+        const ringIds = hasCoordinator ? ids.filter((id) => id !== 'coordinator') : ids;
+        const ringCount = ringIds.length;
+        const radius = Math.max(140, Math.min(W, H) * 0.29);
 
-        // Choose layout map
-        let layoutMap = null;
-        if (n === 4 && ids.every(id => id in LAYOUT_TRIAD)) {
-            layoutMap = LAYOUT_TRIAD;
-        } else if (n === 5 && ids.every(id => id in LAYOUT_DUAL_REVIEW)) {
-            layoutMap = LAYOUT_DUAL_REVIEW;
+        if (hasCoordinator) {
+            this.nodes.coordinator.x = cx;
+            this.nodes.coordinator.y = cy;
         }
 
-        if (layoutMap) {
-            for (const id of ids) {
-                const [fx, fy] = layoutMap[id];
-                this.nodes[id].x = fx * W;
-                this.nodes[id].y = fy * H;
-            }
-        } else {
-            // Circular fallback
-            const padding = 80;
-            const cx = W / 2;
-            const cy = H / 2;
-            const rx = W / 2 - padding - NODE_W / 2;
-            const ry = H / 2 - padding - NODE_H / 2;
-            ids.forEach((id, i) => {
-                const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
-                this.nodes[id].x = cx + rx * Math.cos(angle);
-                this.nodes[id].y = cy + ry * Math.sin(angle);
-            });
-        }
+        ringIds.forEach((id, i) => {
+            const angleOffset = hasCoordinator ? -Math.PI / 2 : -Math.PI / 2 - Math.PI / 8;
+            const angle = angleOffset + (2 * Math.PI * i) / Math.max(ringCount, 1);
+            const nodeRadius = radius * (i % 2 === 0 ? 1 : 0.9);
+            this.nodes[id].x = cx + nodeRadius * Math.cos(angle);
+            this.nodes[id].y = cy + nodeRadius * Math.sin(angle);
+        });
     }
 
     // ── Draw ─────────────────────────────────────────────────────────────────
@@ -283,14 +263,18 @@ class GraphRenderer {
 
         ctx.save();
         ctx.scale(this._dpr, this._dpr);
+        ctx.translate(this.offsetX, this.offsetY);
+        ctx.scale(this.zoom, this.zoom);
 
         // 1. Background + dot grid (cached offscreen canvas, repainted only on resize)
         if (this._gridCanvas) {
-            ctx.drawImage(this._gridCanvas, 0, 0, W, H);
+            ctx.drawImage(this._gridCanvas, -this.offsetX / this.zoom, -this.offsetY / this.zoom, W / this.zoom, H / this.zoom);
         } else {
-            ctx.fillStyle = '#f5f7fa';
-            ctx.fillRect(0, 0, W, H);
+            ctx.fillStyle = '#0a0f13';
+            ctx.fillRect(-this.offsetX / this.zoom, -this.offsetY / this.zoom, W / this.zoom, H / this.zoom);
         }
+
+        this._drawCoreBackdrop(ctx, W, H);
 
         // 3. Edges
         this._drawEdges(ctx);
@@ -307,7 +291,7 @@ class GraphRenderer {
     _drawGrid(ctx, W, H) {
         const spacing = 28;
         const r = 1;
-        ctx.fillStyle = '#d0d7de';
+        ctx.fillStyle = 'rgba(65, 71, 84, 0.34)';
         for (let x = spacing / 2; x < W; x += spacing) {
             for (let y = spacing / 2; y < H; y += spacing) {
                 ctx.beginPath();
@@ -324,8 +308,8 @@ class GraphRenderer {
             if (!src || !tgt) continue;
 
             const srcActive = src.status === 'running' || tgt.status === 'running';
-            const edgeColor = srcActive ? '#c8d8f4' : '#d8dde3';
-            const arrowColor = srcActive ? '#9ab5e8' : '#b8c0ca';
+            const edgeColor = srcActive ? 'rgba(172,199,255,0.45)' : 'rgba(65,71,84,0.55)';
+            const arrowColor = srcActive ? '#acc7ff' : '#6d7788';
 
             const p0 = nodeEdgePoint(src, tgt);
             const p1 = nodeEdgePoint(tgt, src);
@@ -333,17 +317,47 @@ class GraphRenderer {
 
             ctx.save();
             ctx.strokeStyle = edgeColor;
-            ctx.lineWidth   = srcActive ? 2 : 1.5;
+            ctx.lineWidth   = srcActive ? 1.8 : 1.2;
             ctx.lineCap     = 'round';
+            ctx.setLineDash(srcActive ? [8, 8] : [5, 10]);
             ctx.beginPath();
             ctx.moveTo(p0.x, p0.y);
             ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, p1.x, p1.y);
             ctx.stroke();
+            ctx.setLineDash([]);
 
             // Arrowhead at target
             this._drawArrow(ctx, cp2, p1, arrowColor);
             ctx.restore();
         }
+    }
+
+    _drawCoreBackdrop(ctx, W, H) {
+        const cx = W / 2;
+        const cy = H / 2;
+        ctx.save();
+
+        const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.34);
+        outer.addColorStop(0, 'rgba(172, 199, 255, 0.09)');
+        outer.addColorStop(0.45, 'rgba(82, 3, 213, 0.08)');
+        outer.addColorStop(1, 'rgba(10, 15, 19, 0)');
+        ctx.fillStyle = outer;
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(W, H) * 0.34, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(65, 71, 84, 0.2)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 10]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(W, H) * 0.18, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(W, H) * 0.29, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.restore();
     }
 
     _drawArrow(ctx, from, to, color) {
@@ -402,21 +416,22 @@ class GraphRenderer {
 
     _drawNodes(ctx) {
         const now = performance.now();
+        if (this.nodes.coordinator) {
+            this._drawNode(ctx, this.nodes.coordinator, now);
+        }
         for (const [id, node] of Object.entries(this.nodes)) {
+            if (id === 'coordinator') continue;
             this._drawNode(ctx, node, now);
         }
     }
 
     _drawNode(ctx, node, now) {
-        const x   = node.x - NODE_W / 2;
-        const y   = node.y - NODE_H / 2;
-        const w   = NODE_W;
-        const h   = NODE_H;
-        const r   = NODE_RADIUS;
-        const col = node.color;
-
+        const accent = statusColor(node.thinking ? 'running' : node.status, node.color);
         const isSelected = this.selectedNode === node.id;
         const isHovered  = this._hoveredId   === node.id;
+        const isCore = node.id === 'coordinator';
+        const ringRadius = isCore ? 30 : 12;
+        node.renderRadius = ringRadius + 8;
 
         // Pulse on message receive
         let pulse = 0;
@@ -427,173 +442,112 @@ class GraphRenderer {
         }
 
         const runPhase = (now % 2000) / 2000;
-        const STRIPE   = 5;   // top accent stripe height
-        const DIVIDER  = 52;  // y-offset for content/stats divider
-        const PAD      = 13;  // horizontal padding
 
         ctx.save();
 
-        // ── Selected glow ring ───────────────────────────────────
-        if (isSelected || pulse > 0.15) {
+        const glowStrength = isSelected ? 34 : isHovered ? 22 : isCore ? 20 : 14;
+        const glowAlpha = isSelected ? 0.7 : isHovered ? 0.45 : 0.28 + pulse * 0.2;
+        if (isSelected || isHovered || pulse > 0.08 || isCore) {
             ctx.save();
-            ctx.shadowColor = col;
-            ctx.shadowBlur  = isSelected ? 20 : 10;
-            const ga = isSelected ? 0.6 : pulse * 0.4;
-            ctx.strokeStyle = col + Math.round(ga * 255).toString(16).padStart(2, '0');
-            ctx.lineWidth   = isSelected ? 2.5 : 1.5;
-            roundRect(ctx, x - 4, y - 4, w + 8, h + 8, r + 3);
+            ctx.shadowColor = accent;
+            ctx.shadowBlur = glowStrength;
+            ctx.fillStyle = accent;
+            ctx.globalAlpha = glowAlpha;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, ringRadius + 10 + pulse * 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        ctx.lineWidth = isCore ? 1.6 : 1.2;
+        ctx.strokeStyle = isSelected ? accent : 'rgba(65,71,84,0.44)';
+        ctx.fillStyle = isCore ? 'rgba(27,32,37,0.86)' : 'rgba(27,32,37,0.96)';
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, ringRadius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        const statusKey  = node.thinking ? 'thinking' : (node.status || 'idle');
+        const innerRadius = isCore ? 12 : 4.5;
+        const innerGlow = accent;
+
+        ctx.save();
+        ctx.shadowColor = innerGlow;
+        ctx.shadowBlur = isCore ? 22 : 12;
+        ctx.fillStyle = innerGlow;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, innerRadius + pulse * (isCore ? 4 : 1.6), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        if (node.thinking || node.status === 'running') {
+            ctx.save();
+            ctx.strokeStyle = accent;
+            ctx.globalAlpha = 0.4 + 0.25 * Math.sin(runPhase * Math.PI * 2);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, ringRadius + 6 + Math.sin(runPhase * Math.PI * 2) * 2, 0, Math.PI * 2);
             ctx.stroke();
             ctx.restore();
         }
 
-        // ── Drop shadow ──────────────────────────────────────────
-        ctx.save();
-        ctx.shadowColor   = isSelected ? col + '28' : 'rgba(0,0,0,0.08)';
-        ctx.shadowBlur    = isHovered ? 18 : isSelected ? 24 : 7;
-        ctx.shadowOffsetY = isHovered ? 5 : 3;
-        ctx.fillStyle = '#fff';
-        roundRect(ctx, x, y, w, h, r);
-        ctx.fill();
+        const showLabel = true;
+        if (showLabel) {
+            this._drawNodeLabel(ctx, node, isCore);
+        }
+
         ctx.restore();
+    }
 
-        // ── White card body ──────────────────────────────────────
-        ctx.fillStyle = '#ffffff';
-        roundRect(ctx, x, y, w, h, r);
+    _drawNodeLabel(ctx, node, isCore) {
+        const title = node.role || node.id;
+        const model = node.model ? _shortModel(node.model) : '';
+        const subtitle = node.lastActivity || model || `${node.msgCount || 0} messages`;
+
+        ctx.save();
+        ctx.font = '700 12px Inter, -apple-system, sans-serif';
+        const titleW = ctx.measureText(title).width;
+        ctx.font = '10px "JetBrains Mono", monospace';
+        const subW = ctx.measureText(subtitle).width;
+        const contentW = Math.max(titleW, subW);
+        const padX = 12;
+        const boxW = Math.min(Math.max(contentW + padX * 2, isCore ? 124 : 110), isCore ? 220 : 190);
+        const boxH = isCore ? 52 : 42;
+        const viewportW = this.canvas.width / this._dpr;
+        const viewportH = this.canvas.height / this._dpr;
+        const worldMinX = -this.offsetX / this.zoom;
+        const worldMinY = -this.offsetY / this.zoom;
+        const worldMaxX = worldMinX + viewportW / this.zoom;
+        const worldMaxY = worldMinY + viewportH / this.zoom;
+        const boxX = Math.max(worldMinX + 16 / this.zoom, Math.min(worldMaxX - boxW - 16 / this.zoom, node.x - boxW / 2));
+        const desiredY = isCore ? node.y + 44 : node.y + 20;
+        const boxY = Math.max(worldMinY + 16 / this.zoom, Math.min(worldMaxY - boxH - 16 / this.zoom, desiredY));
+
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+        ctx.shadowBlur = isCore ? 24 : 14;
+        ctx.fillStyle = isCore ? 'rgba(48, 53, 58, 0.72)' : 'rgba(27, 32, 37, 0.82)';
+        roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.fill();
 
-        // ── Stats tinted footer ──────────────────────────────────
-        ctx.save();
-        roundRect(ctx, x, y, w, h, r);
-        ctx.clip();
-        ctx.fillStyle = '#f6f8fa';
-        ctx.fillRect(x, y + DIVIDER, w, h - DIVIDER);
-        ctx.restore();
-
-        // ── Card border ──────────────────────────────────────────
-        ctx.strokeStyle = isSelected ? col + '80'
-            : isHovered  ? '#c0c8d2'
-            : '#dde1e7';
-        ctx.lineWidth = isSelected ? 1.5 : 1;
-        roundRect(ctx, x, y, w, h, r);
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = isCore ? 'rgba(65, 71, 84, 0.18)' : 'rgba(65, 71, 84, 0.12)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.stroke();
 
-        // ── Top accent stripe ────────────────────────────────────
-        ctx.save();
-        roundRect(ctx, x, y, w, h, r);
-        ctx.clip();
-
-        if (node.status === 'running' || node.thinking) {
-            // Sweeping shimmer across the stripe
-            const sx = x + (runPhase * w * 2) - w * 0.5;
-            const g  = ctx.createLinearGradient(sx, y, sx + w * 0.7, y);
-            g.addColorStop(0,   col + 'cc');
-            g.addColorStop(0.3, col + 'ff');
-            g.addColorStop(0.7, col + 'ff');
-            g.addColorStop(1,   col + 'cc');
-            ctx.fillStyle = g;
-        } else if (node.status === 'completed') {
-            ctx.fillStyle = '#1a7f37';
-        } else if (node.status === 'error') {
-            ctx.fillStyle = '#cf222e';
-        } else {
-            ctx.fillStyle = col;
-            ctx.globalAlpha = pulse > 0 ? 0.75 + 0.25 * pulse : 0.9;
-        }
-        ctx.fillRect(x, y, w, STRIPE);
-        ctx.globalAlpha = 1;
-        ctx.restore();
-
-        // ── Divider line ─────────────────────────────────────────
-        ctx.save();
-        ctx.strokeStyle = '#e4e8ec';
-        ctx.lineWidth   = 0.5;
-        ctx.beginPath();
-        ctx.moveTo(x + PAD, y + DIVIDER);
-        ctx.lineTo(x + w - PAD, y + DIVIDER);
-        ctx.stroke();
-        ctx.restore();
-
-        // ── Role name ────────────────────────────────────────────
-        ctx.textAlign    = 'left';
+        ctx.fillStyle = '#dee3e9';
+        ctx.font = '700 12px Inter, -apple-system, sans-serif';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.font         = '700 13px Inter, -apple-system, sans-serif';
-        ctx.fillStyle    = '#1c2128';
-        ctx.fillText(node.role, x + PAD, y + STRIPE + 8, w - PAD * 2 - 58);
+        ctx.fillText(title, boxX + 12, boxY + 10);
 
-        // ── Status badge ─────────────────────────────────────────
-        const statusKey  = node.thinking ? 'thinking' : (node.status || 'idle');
-        const badge      = STATUS_BADGE[statusKey] || STATUS_BADGE.idle;
-        const statusText = statusKey;
-
-        ctx.font = '600 9px Inter, -apple-system, sans-serif';
-        const btw = ctx.measureText(statusText).width;
-        const bW  = btw + 18;   // dot (5px) + gap + text + h-padding
-        const bH  = 15;
-        const bX  = x + w - bW - PAD + 4;
-        const bY  = y + STRIPE + 7;
-
-        ctx.fillStyle = badge.bg;
-        ctx.beginPath();
-        ctx.roundRect(bX, bY, bW, bH, 7);
-        ctx.fill();
-
-        // Dot
-        const dCx = bX + 7;
-        const dCy = bY + bH / 2;
-        if (statusKey === 'running' || statusKey === 'thinking') {
-            ctx.save();
-            ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(runPhase * Math.PI * 2));
-            ctx.fillStyle   = badge.fg;
-            ctx.beginPath();
-            ctx.arc(dCx, dCy, 3, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-        } else {
-            ctx.fillStyle = badge.fg;
-            ctx.beginPath();
-            ctx.arc(dCx, dCy, 2.5, 0, Math.PI * 2);
-            ctx.fill();
-        }
-
-        ctx.fillStyle    = badge.fg;
-        ctx.textAlign    = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(statusText, bX + 13, bY + bH / 2);
-
-        // ── Model name ───────────────────────────────────────────
-        ctx.textAlign    = 'left';
-        ctx.textBaseline = 'top';
-        if (node.model) {
-            ctx.font      = '10px "JetBrains Mono", monospace';
-            ctx.fillStyle = '#6b7280';
-            ctx.fillText(_shortModel(node.model), x + PAD, y + STRIPE + 26, w - PAD * 2);
-        } else if (node.status !== 'completed' && node.status !== 'error') {
-            ctx.font      = '10px Inter, -apple-system, sans-serif';
-            ctx.fillStyle = '#9198a1';
-            ctx.fillText('selecting model…', x + PAD, y + STRIPE + 26, w - PAD * 2);
-        }
-
-        // ── Footer: msg count + activity ─────────────────────────
-        const fY  = y + DIVIDER + (h - DIVIDER) / 2;  // vertical center of footer
-        ctx.textAlign    = 'left';
-        ctx.textBaseline = 'middle';
-
-        const msgStr = `↑${node.msgCount}`;
-        ctx.font      = '600 9px Inter, -apple-system, sans-serif';
-        ctx.fillStyle = '#8b949e';
-        ctx.fillText(msgStr, x + PAD, fY);
-
-        if (node.lastActivity) {
-            const mW  = ctx.measureText(msgStr).width + 7;
-            const avW = w - PAD * 2 - mW;
-            let act   = node.lastActivity;
-            ctx.font  = '9px Inter, -apple-system, sans-serif';
-            ctx.fillStyle = '#57606a';
-            if (ctx.measureText(act).width > avW) {
-                while (act.length && ctx.measureText(act + '…').width > avW) act = act.slice(0, -1);
-                act += '…';
-            }
-            ctx.fillText(act, x + PAD + mW, fY);
+        if (isCore) {
+            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.fillStyle = '#8e97a8';
+            let sub = subtitle;
+            while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);
+            if (sub !== subtitle) sub += '…';
+            ctx.fillText(sub, boxX + 12, boxY + 28);
         }
 
         ctx.restore();
@@ -610,10 +564,52 @@ class GraphRenderer {
         window.addEventListener('resize', () => this._resize());
         this.canvas.addEventListener('click',     (e) => this._onClick(e));
         this.canvas.addEventListener('mousemove', (e) => this._onMouseMove(e));
+        this.canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
         this.canvas.addEventListener('mouseleave', () => {
             this._hoveredId = null;
             this.canvas.style.cursor = 'default';
         });
+    }
+
+    zoomIn() {
+        this._applyZoom(this.zoom * 1.14);
+    }
+
+    zoomOut() {
+        this._applyZoom(this.zoom / 1.14);
+    }
+
+    resetView() {
+        this.zoom = 1;
+        this.offsetX = 0;
+        this.offsetY = 0;
+    }
+
+    _applyZoom(nextZoom, clientX = null, clientY = null) {
+        const clamped = Math.max(this.minZoom, Math.min(this.maxZoom, nextZoom));
+        if (Math.abs(clamped - this.zoom) < 0.001) return;
+
+        const rect = this.canvas.getBoundingClientRect();
+        const anchorX = clientX === null ? rect.left + rect.width / 2 : clientX;
+        const anchorY = clientY === null ? rect.top + rect.height / 2 : clientY;
+        const localX = anchorX - rect.left;
+        const localY = anchorY - rect.top;
+        const worldX = (localX - this.offsetX) / this.zoom;
+        const worldY = (localY - this.offsetY) / this.zoom;
+
+        this.zoom = clamped;
+        this.offsetX = localX - worldX * this.zoom;
+        this.offsetY = localY - worldY * this.zoom;
+        this._clampOffset();
+    }
+
+    _clampOffset() {
+        const W = this.canvas.width / this._dpr;
+        const H = this.canvas.height / this._dpr;
+        const maxPanX = Math.max(0, (this.zoom - 1) * W * 0.5);
+        const maxPanY = Math.max(0, (this.zoom - 1) * H * 0.5);
+        this.offsetX = Math.max(-maxPanX, Math.min(maxPanX, this.offsetX));
+        this.offsetY = Math.max(-maxPanY, Math.min(maxPanY, this.offsetY));
     }
 
     _resize() {
@@ -630,6 +626,7 @@ class GraphRenderer {
 
         this._rebuildGrid(w, h);
         this._layoutNodes();
+        this._clampOffset();
     }
 
     _rebuildGrid(w, h) {
@@ -638,10 +635,10 @@ class GraphRenderer {
         offscreen.height = h * this._dpr;
         const ctx = offscreen.getContext('2d');
         ctx.scale(this._dpr, this._dpr);
-        ctx.fillStyle = '#f5f7fa';
+        ctx.fillStyle = '#0a0f13';
         ctx.fillRect(0, 0, w, h);
         const spacing = 26;
-        ctx.fillStyle = '#cdd1d6';
+        ctx.fillStyle = 'rgba(65,71,84,0.32)';
         for (let x = spacing / 2; x < w; x += spacing) {
             for (let y = spacing / 2; y < h; y += spacing) {
                 ctx.beginPath();
@@ -654,16 +651,12 @@ class GraphRenderer {
 
     _nodeAt(clientX, clientY) {
         const rect = this.canvas.getBoundingClientRect();
-        const mx   = clientX - rect.left;
-        const my   = clientY - rect.top;
+        const mx   = (clientX - rect.left - this.offsetX) / this.zoom;
+        const my   = (clientY - rect.top - this.offsetY) / this.zoom;
 
         for (const [id, node] of Object.entries(this.nodes)) {
-            if (
-                mx >= node.x - NODE_W / 2 &&
-                mx <= node.x + NODE_W / 2 &&
-                my >= node.y - NODE_H / 2 &&
-                my <= node.y + NODE_H / 2
-            ) {
+            const r = (node.renderRadius || NODE_RADIUS) + 10;
+            if (Math.hypot(mx - node.x, my - node.y) <= r) {
                 return id;
             }
         }
@@ -682,5 +675,11 @@ class GraphRenderer {
             this._hoveredId = id;
             this.canvas.style.cursor = id ? 'pointer' : 'default';
         }
+    }
+
+    _onWheel(e) {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        this._applyZoom(this.zoom * factor, e.clientX, e.clientY);
     }
 }

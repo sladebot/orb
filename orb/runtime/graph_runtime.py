@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from web.state import DashboardState
+from orb.cli.config import get as get_config
 from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
 from orb.messaging.channel import ChannelClosed
 from .transcript import ConversationSession, RunTranscript
@@ -42,6 +43,8 @@ class GraphRuntime:
         self._agents: dict = {}
         self._run_task: asyncio.Task | None = None
         self._providers: dict = {}
+        self._all_providers: dict = {}
+        self._enabled_providers: list[str] = []
         self._config = None
         self._model_overrides = None
         self._tier_override = None
@@ -169,10 +172,42 @@ class GraphRuntime:
             self._subscribers.discard(callback)
 
     def configure(self, providers: dict, config, model_overrides, tier_override) -> None:
-        self._providers = providers
+        self._all_providers = dict(providers)
         self._config = config
         self._model_overrides = model_overrides
         self._tier_override = tier_override
+        provider_cfg = get_config("providers") or {}
+        enabled = [
+            name for name, value in provider_cfg.items()
+            if isinstance(value, dict) and bool(value.get("enabled")) and name in self._all_providers
+        ]
+        self._enabled_providers = enabled
+        if enabled:
+            self._providers = {
+                name: client
+                for name, client in self._all_providers.items()
+                if name in set(enabled)
+            }
+            if not self._providers:
+                self._providers = dict(self._all_providers)
+        else:
+            self._providers = dict(self._all_providers)
+
+    def settings_payload(self) -> dict:
+        model_payload = self.models_payload()
+        available = sorted(self._all_providers.keys())
+        provider_config = get_config("providers") or {}
+        return {
+            "available_providers": available,
+            "providers": {
+                name: {
+                    "enabled": bool((provider_config.get(name) or {}).get("enabled", True)),
+                    "active": name in self._providers,
+                }
+                for name in available
+            },
+            "models": model_payload.get("models", []),
+        }
 
     def _resolved_session_path(self) -> Path:
         return self._session_path or (Path.cwd() / ".orb" / "session.json")

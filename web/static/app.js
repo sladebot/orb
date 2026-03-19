@@ -76,6 +76,9 @@ class Dashboard {
         document.getElementById('question-reply').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') this._sendQuestionReply();
         });
+        document.getElementById('settings-button')?.addEventListener('click', () => this._openSettings());
+        document.getElementById('settings-close')?.addEventListener('click', () => this._closeSettings());
+        document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
 
         // Node detail panel
         document.getElementById('ndp-close').addEventListener('click', () => this._hideNodePanel());
@@ -103,10 +106,12 @@ class Dashboard {
         });
 
         this._selectedModel = 'auto';
+        this._providerPrefs = new Set();
         this._selectedTopology = 'auto';
         this._topologyList = [];    // cached topology metadata
         this._isRunActive = false;
         this._loadModelOptions();
+        this._loadSettings();
         this._loadTopologyOptions();
         this._setChangesEmptyState();
         this._setMessageEmptyState();
@@ -124,6 +129,10 @@ class Dashboard {
             }
         });
         window.addEventListener('resize', () => this._handleViewportResize());
+
+        document.getElementById('graph-zoom-in')?.addEventListener('click', () => this.graph.zoomIn());
+        document.getElementById('graph-zoom-out')?.addEventListener('click', () => this.graph.zoomOut());
+        document.getElementById('graph-reset-view')?.addEventListener('click', () => this.graph.resetView());
 
         this._connect();
     }
@@ -161,7 +170,8 @@ class Dashboard {
         const label = document.getElementById('connection-label');
         el.className = connected ? 'connected' : 'disconnected';
         el.title = connected ? 'Connected' : 'Disconnected';
-        if (label) label.textContent = connected ? 'Live' : 'Offline';
+        if (label) label.textContent = connected ? 'Daemon Connected' : 'Daemon Offline';
+        this._setText('hero-status-label', connected && this._isRunActive ? 'Running' : this._statusText());
     }
 
     _restorePanelState() {
@@ -354,10 +364,12 @@ class Dashboard {
         // Update topology stat from server plan
         if (this._plan?.topology?.label) {
             document.getElementById('stat-topology').textContent = this._plan.topology.label;
+            this._setText('hero-topology-label', this._plan.topology.label);
         }
 
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        document.getElementById('communications-panel')?.classList.remove('node-panel-active');
         const emptyInspector = document.getElementById('node-detail-empty');
         if (emptyInspector) emptyInspector.classList.remove('hidden');
         this.selectedAgent = null;
@@ -448,12 +460,14 @@ class Dashboard {
         if (statusEl && !this._isRunActive) {
             statusEl.textContent = 'Planning';
             statusEl.className = 'stat-value status-running';
+            this._setText('hero-status-label', 'Planning');
         }
 
         if (typeof data.detail === 'string' && data.title === 'Selected topology') {
             const match = data.detail.match(/^([^:]+):?/);
             if (match?.[1]) {
                 document.getElementById('stat-topology').textContent = match[1].trim();
+                this._setText('hero-topology-label', match[1].trim());
             }
         }
     }
@@ -492,6 +506,7 @@ class Dashboard {
         if (data.model && this._selectedModel === 'auto' && !this._runModelShown) {
             this._runModelShown = true;
             document.getElementById('stat-model').textContent = this._shortModel(data.model);
+            this._setText('hero-model-label', this._shortModel(data.model));
         }
     }
 
@@ -600,6 +615,12 @@ class Dashboard {
             el.textContent = 'Waiting';
             el.className   = 'stat-value status-waiting';
         }
+        this._setText('hero-status-label', this._statusText());
+    }
+
+    _statusText() {
+        const el = document.getElementById('stat-status');
+        return el ? el.textContent : 'Waiting';
     }
 
     _heartbeatAge(agent) {
@@ -639,36 +660,7 @@ class Dashboard {
         `;
     }
 
-    _renderPlanningState() {
-        const panel = document.getElementById('planning-panel');
-        const list = document.getElementById('planning-list');
-        const status = document.getElementById('planning-status');
-        if (!panel || !list || !status) return;
-
-        const steps = Array.isArray(this._planSteps) ? this._planSteps : [];
-        if (!steps.length) {
-            panel.classList.toggle('hidden', !this._isRunActive);
-            status.textContent = this._isRunActive ? 'Starting' : 'Idle';
-            status.className = this._isRunActive ? 'planning-status-live' : 'planning-status-idle';
-            list.innerHTML = `<div class="planning-empty">Planning updates will appear as soon as the daemon starts analyzing the run.</div>`;
-            return;
-        }
-
-        panel.classList.remove('hidden');
-        status.textContent = 'Live';
-        status.className = 'planning-status-live';
-        list.innerHTML = steps.map((step) => `
-            <div class="planning-step">
-                <div class="planning-time">${(step.elapsed || 0).toFixed(1)}s</div>
-                <div class="planning-body">
-                    <div class="planning-stage">${this._escapeHtml(step.stage || 'stage')}</div>
-                    <div class="planning-title">${this._escapeHtml(step.title || step.stage || 'Planning step')}</div>
-                    <div class="planning-detail">${this._escapeHtml(step.detail || '')}</div>
-                </div>
-            </div>
-        `).join('');
-        list.scrollTop = list.scrollHeight;
-    }
+    _renderPlanningState() {}
 
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
         const workdirEl = document.getElementById('workdir-banner');
@@ -786,6 +778,7 @@ class Dashboard {
         const emptyInspector = document.getElementById('node-detail-empty');
         if (emptyInspector) emptyInspector.classList.add('hidden');
         document.getElementById('node-detail-panel').classList.remove('ndp-closed');
+        document.getElementById('communications-panel')?.classList.add('node-panel-active');
         this._refreshNodePanel();
         const inp = document.getElementById('ndp-chat-input');
         if (inp) inp.focus();
@@ -793,6 +786,7 @@ class Dashboard {
 
     _hideNodePanel() {
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        document.getElementById('communications-panel')?.classList.remove('node-panel-active');
         const emptyInspector = document.getElementById('node-detail-empty');
         if (emptyInspector) emptyInspector.classList.remove('hidden');
         if (this.selectedAgent) {
@@ -1023,25 +1017,125 @@ class Dashboard {
         const res = await fetch('/api/models');
         const data = await res.json();
         this._modelLabels = {};
-        const picker = document.getElementById('model-picker');
-        picker.innerHTML = '';
-        for (const m of data.models || []) {
+        this._models = data.models || [];
+        this._providerModels = {};
+        for (const m of this._models) {
             this._modelLabels[m.id] = m.label;
-            const pill = document.createElement('button');
-            pill.className = 'model-pill' + (m.local ? ' local' : '') + (m.id === this._selectedModel ? ' selected' : '');
-            pill.textContent = m.label;
-            pill.title = m.id;
-            pill.addEventListener('click', () => {
-                this._selectedModel = m.id;
-                picker.querySelectorAll('.model-pill').forEach(p => p.classList.remove('selected'));
-                pill.classList.add('selected');
-                document.getElementById('stat-model').textContent = m.label;
-            });
-            picker.appendChild(pill);
+            const provider = this._inferProvider(m.id);
+            if (!this._providerModels[provider]) this._providerModels[provider] = [];
+            this._providerModels[provider].push(m);
         }
-        // Set initial stat label
+        this._renderProviderSettings();
+        this._applyProviderPreferences();
         document.getElementById('stat-model').textContent =
             this._modelLabels[this._selectedModel] || 'Auto';
+        this._setText('hero-model-label', this._modelLabels[this._selectedModel] || 'Auto');
+    }
+
+    async _loadSettings() {
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        const availableProviders = data.available_providers || [];
+        const preferredProviders = data.preferred_providers || [];
+        this._providerPrefs = new Set(preferredProviders.length ? preferredProviders : availableProviders);
+        if (Array.isArray(data.models) && data.models.length) {
+            this._models = data.models;
+        }
+        this._renderProviderSettings();
+        this._applyProviderPreferences();
+    }
+
+    _inferProvider(modelId) {
+        if (!modelId) return 'unknown';
+        if (modelId.startsWith('claude')) return 'anthropic';
+        if (modelId.startsWith('gpt') || modelId.startsWith('o1') || modelId.startsWith('o3')) return 'openai-codex';
+        if (modelId.includes('qwen') || modelId.includes('llama') || modelId.includes(':')) return 'ollama';
+        return 'other';
+    }
+
+    _providerLabel(provider) {
+        if (provider === 'openai-codex') return 'openai';
+        return provider;
+    }
+
+    _renderProviderSettings() {
+        const container = document.getElementById('provider-settings-list');
+        if (!container) return;
+        const providers = Object.keys(this._providerModels || {}).sort();
+        if (!providers.length) {
+            container.innerHTML = '<div class="settings-empty">No providers discovered from the current daemon.</div>';
+            return;
+        }
+        container.innerHTML = providers.map((provider) => {
+            const models = this._providerModels[provider] || [];
+            const active = this._providerPrefs.has(provider);
+            return `
+                <label class="provider-option${active ? ' active' : ''}">
+                    <input class="provider-checkbox" type="checkbox" data-provider="${this._escapeHtml(provider)}" ${active ? 'checked' : ''}>
+                    <span class="provider-option-copy">
+                        <span class="provider-option-name">${this._escapeHtml(this._providerLabel(provider))}</span>
+                        <span class="provider-option-meta">${models.length} model${models.length === 1 ? '' : 's'}</span>
+                    </span>
+                </label>
+            `;
+        }).join('');
+        container.querySelectorAll('.provider-checkbox').forEach((checkbox) => {
+            checkbox.addEventListener('change', (event) => this._toggleProvider(event.target.dataset.provider, event.target.checked));
+        });
+    }
+
+    _toggleProvider(provider, checked) {
+        if (!provider) return;
+        const next = new Set(this._providerPrefs);
+        if (checked) {
+            next.add(provider);
+        } else {
+            next.delete(provider);
+        }
+        if (next.size === 0) {
+            return;
+        }
+        this._providerPrefs = next;
+        this._renderProviderSettings();
+        this._saveSettings();
+    }
+
+    _applyProviderPreferences() {
+        const activeProviders = [...this._providerPrefs].filter((provider) => (this._providerModels?.[provider] || []).length > 0);
+        if (activeProviders.length === 1) {
+            this._selectedModel = this._providerModels[activeProviders[0]][0]?.id || 'auto';
+        } else {
+            this._selectedModel = 'auto';
+        }
+        document.getElementById('stat-model').textContent =
+            this._modelLabels[this._selectedModel] || 'Auto';
+        this._setText('hero-model-label', this._modelLabels[this._selectedModel] || 'Auto');
+    }
+
+    async _saveSettings() {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ preferred_providers: [...this._providerPrefs] }),
+        });
+        const data = await res.json();
+        this._providerPrefs = new Set(data.preferred_providers || []);
+        this._renderProviderSettings();
+        this._applyProviderPreferences();
+    }
+
+    _openSettings() {
+        const modal = document.getElementById('settings-modal');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+    }
+
+    _closeSettings() {
+        const modal = document.getElementById('settings-modal');
+        if (!modal) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
     }
 
     async _loadTopologyOptions() {
@@ -1124,16 +1218,19 @@ class Dashboard {
             label.textContent = 'Auto';
             count.textContent = '';
             statEl.textContent = 'Auto';
+            this._setText('hero-topology-label', 'Auto');
         } else {
             const topo = this._topologyList.find(t => t.id === this._selectedTopology);
             if (topo) {
                 label.textContent = topo.label;
                 count.textContent = `\u2014 ${topo.agents.length} agents`;
                 statEl.textContent = topo.label;
+                this._setText('hero-topology-label', topo.label);
             } else {
                 label.textContent = this._selectedTopology;
                 count.textContent = '';
                 statEl.textContent = this._selectedTopology;
+                this._setText('hero-topology-label', this._selectedTopology);
             }
         }
 
@@ -1179,6 +1276,7 @@ class Dashboard {
             ? 'Send a follow-up or use @node to direct a message…'
             : 'Describe a task for the agents…';
         if (!active) this._hideLoader();
+        this._setText('hero-status-label', active ? 'Running' : this._statusText());
 
         // Close and disable/enable topology dropdown
         document.getElementById('topology-trigger').classList.toggle('disabled', active);
@@ -1232,6 +1330,7 @@ class Dashboard {
         this.agents = {};
         this.graph.setTopology([], []);
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        document.getElementById('communications-panel')?.classList.remove('node-panel-active');
         const emptyInspector = document.getElementById('node-detail-empty');
         if (emptyInspector) emptyInspector.classList.remove('hidden');
         this.selectedAgent = null;
@@ -1243,6 +1342,7 @@ class Dashboard {
 
         statusEl.textContent = 'Starting…';
         statusEl.className = 'stat-value status-running';
+        this._setText('hero-status-label', 'Starting');
         this._showLoader('Starting runtime…');
         this._lastQuery = query;
         this._fileChanges = new Map();
@@ -1283,6 +1383,7 @@ class Dashboard {
         const el = document.getElementById('stat-status');
         el.textContent = 'Stopped';
         el.className = 'stat-value status-error';
+        this._setText('hero-status-label', 'Stopped');
         const btn = document.getElementById('query-stop');
         btn.disabled = false;
         btn.textContent = 'Stop';
@@ -1296,6 +1397,7 @@ class Dashboard {
         const statusEl = document.getElementById('stat-status');
         statusEl.textContent = 'Done';
         statusEl.className = 'stat-value status-done';
+        this._setText('hero-status-label', 'Done');
 
         const result = data.result || '';
         const elapsed = data.elapsed !== undefined ? data.elapsed.toFixed(1) + 's' : '';
@@ -1498,10 +1600,10 @@ class Dashboard {
         let html = this._escapeHtml(text);
         // Code blocks (``` ... ```)
         html = html.replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) =>
-            `<pre style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;font-size:11px;overflow-x:auto;margin:6px 0">${code}</pre>`
+            `<pre style="background:rgba(10,15,19,0.78);border:1px solid rgba(65,71,84,0.18);border-radius:14px;padding:12px 14px;font-size:12px;overflow-x:auto;margin:8px 0;color:#dee3e9">${code}</pre>`
         );
         // Inline code
-        html = html.replace(/`([^`]+)`/g, '<code style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;padding:1px 5px;font-size:11px">$1</code>');
+        html = html.replace(/`([^`]+)`/g, '<code style="background:rgba(10,15,19,0.78);border:1px solid rgba(65,71,84,0.18);border-radius:8px;padding:2px 6px;font-size:11px;color:#acc7ff">$1</code>');
         // Bold
         html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
         // Bullet lists
@@ -1712,6 +1814,11 @@ class Dashboard {
         const div = document.createElement('div');
         div.textContent = String(text);
         return div.innerHTML;
+    }
+
+    _setText(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
     }
 }
 

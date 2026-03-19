@@ -52,6 +52,7 @@ class DashboardServer:
         self._app.router.add_get("/api/run-status", self._run_status_handler)
         self._app.router.add_get("/api/predict-topology", self._predict_topology_handler)
         self._app.router.add_get("/api/models", self._models_handler)
+        self._app.router.add_get("/api/settings", self._settings_get_handler)
         self._app.router.add_get("/api/topologies", self._topologies_handler)
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
@@ -183,6 +184,9 @@ class DashboardServer:
 
     async def _models_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.models_payload())
+
+    async def _settings_get_handler(self, request: web.Request) -> web.Response:
+        return web.json_response(self.runtime.settings_payload())
 
     async def _topologies_handler(self, request: web.Request) -> web.Response:
         from orb.topologies import get_loader
