@@ -151,7 +151,9 @@ class Dashboard {
 
     _connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const sessionId = new URL(window.location.href).searchParams.get('session');
+        const wsUrl = `${protocol}//${window.location.host}/ws${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
+        this._wsSessionId = sessionId || '';
 
         this.ws = new WebSocket(wsUrl);
         this._setConnectionStatus(false);
@@ -1393,6 +1395,10 @@ class Dashboard {
             document.getElementById('result-elapsed').textContent = '';
             document.getElementById('result-body').textContent = data.error || 'Failed to start run.';
             document.getElementById('result-panel').classList.remove('hidden');
+            return;
+        }
+        if (data.session_id) {
+            this._updateSessionUrl(data.session_id);
         }
     }
 
@@ -1833,15 +1839,33 @@ class Dashboard {
     }
 
     _updateSessionUrl(sessionId) {
+        const normalizedSessionId = sessionId || '';
         const url = new URL(window.location.href);
-        if (sessionId) {
-            url.searchParams.set('session', sessionId);
+        if (normalizedSessionId) {
+            url.searchParams.set('session', normalizedSessionId);
         } else {
             url.searchParams.delete('session');
         }
         const next = `${url.pathname}${url.search}${url.hash}`;
         const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
         if (next !== current) window.history.replaceState({}, '', next);
+        if ((this._wsSessionId || '') !== normalizedSessionId) {
+            this._reconnectForSession();
+        }
+    }
+
+    _reconnectForSession() {
+        if (!this.ws) {
+            this._connect();
+            return;
+        }
+        try {
+            this.ws.onclose = null;
+            this.ws.close();
+        } catch (_err) {
+            // Ignore close errors and establish a fresh socket immediately.
+        }
+        this._connect();
     }
 
     _renderResult(text) {

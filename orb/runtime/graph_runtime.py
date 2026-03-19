@@ -209,6 +209,158 @@ class GraphRuntime:
             "models": model_payload.get("models", []),
         }
 
+    def _dashboard_sessions_dir(self) -> Path:
+        return Path.home() / ".orb" / "sessions"
+
+    def _dashboard_session_path(self, session_id: str | None = None) -> Path:
+        return self._dashboard_sessions_dir() / f"{session_id or self._conversation_session.session_id}.json"
+
+    def _load_dashboard_snapshot(self, session_id: str | None = None) -> dict | None:
+        path = self._dashboard_session_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, JSONDecodeError, ValueError, TypeError) as exc:
+            logger.warning("Failed to load dashboard snapshot %s: %s", path, exc)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _write_dashboard_snapshot(self, payload: dict, session_id: str | None = None) -> None:
+        path = self._dashboard_session_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(path)
+
+    def _load_dashboard_file_changes(self, session_id: str | None = None) -> list[dict]:
+        snapshot = self._load_dashboard_snapshot(session_id) or {}
+        file_changes = snapshot.get("file_changes") or []
+        return file_changes if isinstance(file_changes, list) else []
+
+    def _dashboard_snapshot_payload(self, *, session_id: str | None = None, run_active: bool | None = None) -> dict:
+        payload = self.state.to_init_event()
+        resolved_session_id = session_id or payload.get("session_id") or self._conversation_session.session_id
+        payload["session_id"] = resolved_session_id
+        payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
+        payload["run_active"] = self.running if run_active is None else bool(run_active)
+        return payload
+
+    @staticmethod
+    def _merge_dashboard_snapshot(live_payload: dict, snapshot: dict | None) -> dict:
+        if not snapshot:
+            return live_payload
+
+        merged = dict(snapshot)
+        merged.update(live_payload)
+
+        for key in ("agents", "edges", "messages", "activity_events", "plan_steps", "file_changes"):
+            live_value = live_payload.get(key)
+            if isinstance(live_value, list) and live_value:
+                merged[key] = live_value
+            elif key in snapshot:
+                merged[key] = snapshot[key]
+
+        for key in ("completed", "final_result", "final_agent", "final_diff", "session_turn", "session_generation", "workdir"):
+            live_value = live_payload.get(key)
+            if live_value not in ("", None, [], {}):
+                merged[key] = live_value
+            elif key in snapshot:
+                merged[key] = snapshot[key]
+
+        live_plan = live_payload.get("plan") or {}
+        snapshot_plan = snapshot.get("plan") or {}
+        merged_plan = dict(snapshot_plan)
+        merged_plan.update(live_plan)
+        for key in ("query", "agent_complexity", "agent_models", "neighbors", "positions", "graph_view", "workdir"):
+            live_value = live_plan.get(key)
+            if live_value not in ("", None, [], {}):
+                merged_plan[key] = live_value
+            elif key in snapshot_plan:
+                merged_plan[key] = snapshot_plan[key]
+        live_topology = live_plan.get("topology") or {}
+        snapshot_topology = snapshot_plan.get("topology") or {}
+        merged_topology = dict(snapshot_topology)
+        merged_topology.update(live_topology)
+        for key in ("id", "label", "description"):
+            if live_topology.get(key) not in ("", None):
+                merged_topology[key] = live_topology[key]
+            elif key in snapshot_topology:
+                merged_topology[key] = snapshot_topology[key]
+        merged_plan["topology"] = merged_topology
+        merged["plan"] = merged_plan
+
+        live_stats = live_payload.get("stats") or {}
+        snapshot_stats = snapshot.get("stats") or {}
+        merged_stats = dict(snapshot_stats)
+        merged_stats.update(live_stats)
+        merged["stats"] = merged_stats
+
+        merged["type"] = "init"
+        return merged
+
+    def _has_live_dashboard_state(self) -> bool:
+        return any((
+            self.state.agents,
+            self.state.messages,
+            self.state.activity_events,
+            self.state.plan_steps,
+            self.state.final_result,
+            self.state.final_diff,
+        ))
+
+    def _persist_dashboard_snapshot(self, *, run_active: bool | None = None) -> None:
+        session_id = self._conversation_session.session_id
+        if not session_id:
+            return
+        try:
+            self._write_dashboard_snapshot(
+                self._dashboard_snapshot_payload(session_id=session_id, run_active=run_active),
+                session_id=session_id,
+            )
+        except OSError as exc:
+            logger.warning("Failed to persist dashboard snapshot: %s", exc)
+
+    def _persist_dashboard_file_change(self, *, path: str, agent: str, content: str, old_content: str = "") -> None:
+        session_id = self._conversation_session.session_id
+        if not session_id:
+            return
+        snapshot = self._load_dashboard_snapshot(session_id) or self._dashboard_snapshot_payload(
+            session_id=session_id,
+            run_active=self.running,
+        )
+        existing = {
+            str(change.get("path")): dict(change)
+            for change in (snapshot.get("file_changes") or [])
+            if isinstance(change, dict) and change.get("path")
+        }
+        existing[path] = {
+            "path": path,
+            "agent": agent,
+            "content": content,
+            "old_content": old_content,
+        }
+        snapshot["file_changes"] = list(existing.values())
+        snapshot["run_active"] = self.running
+        try:
+            self._write_dashboard_snapshot(snapshot, session_id=session_id)
+        except OSError as exc:
+            logger.warning("Failed to persist dashboard file change: %s", exc)
+
+    def _clear_dashboard_file_changes(self, session_id: str | None = None) -> None:
+        resolved_session_id = session_id or self._conversation_session.session_id
+        if not resolved_session_id:
+            return
+        snapshot = self._load_dashboard_snapshot(resolved_session_id) or self._dashboard_snapshot_payload(
+            session_id=resolved_session_id,
+            run_active=self.running,
+        )
+        snapshot["file_changes"] = []
+        try:
+            self._write_dashboard_snapshot(snapshot, session_id=resolved_session_id)
+        except OSError as exc:
+            logger.warning("Failed to clear dashboard file changes: %s", exc)
+
     def _resolved_session_path(self) -> Path:
         return self._session_path or (Path.cwd() / ".orb" / "session.json")
 
@@ -282,11 +434,36 @@ class GraphRuntime:
             return
         self._conversation_session.apply_compaction(summary, preserve_recent_turns=8)
 
-    def current_init_event(self) -> dict:
+    def current_init_event(self, session_id: str | None = None) -> dict:
         self._sync_session_state()
-        event = self.state.to_init_event()
-        event["run_active"] = self.running
-        return event
+        requested_session_id = (session_id or "").strip()
+        current_session_id = self.state.session_id or self._conversation_session.session_id
+        current_snapshot = self._load_dashboard_snapshot(current_session_id)
+
+        if requested_session_id:
+            if requested_session_id != current_session_id or not self.running:
+                snapshot = self._load_dashboard_snapshot(requested_session_id)
+                if snapshot:
+                    snapshot["type"] = "init"
+                    snapshot["run_active"] = bool(self.running and requested_session_id == current_session_id)
+                    return snapshot
+
+        if not self.running and not self._has_live_dashboard_state():
+            snapshot = current_snapshot
+            if snapshot:
+                snapshot["type"] = "init"
+                snapshot["run_active"] = False
+                return snapshot
+
+        live_payload = self._dashboard_snapshot_payload(
+            session_id=requested_session_id or current_session_id,
+            run_active=self.running,
+        )
+        if requested_session_id and requested_session_id == current_session_id:
+            return self._merge_dashboard_snapshot(live_payload, current_snapshot)
+        if not requested_session_id:
+            return self._merge_dashboard_snapshot(live_payload, current_snapshot)
+        return live_payload
 
     async def _record_plan_step(self, stage: str, title: str, detail: str) -> None:
         from web.state import PlanStepRecord
@@ -295,6 +472,7 @@ class GraphRuntime:
         self.state.plan_steps.append(PlanStepRecord(stage=stage, title=title, detail=detail, elapsed=elapsed))
         if len(self.state.plan_steps) > 20:
             self.state.plan_steps = self.state.plan_steps[-20:]
+        self._persist_dashboard_snapshot()
         await self._broadcast(json.dumps({
             "type": "plan_step",
             "stage": stage,
@@ -349,6 +527,7 @@ class GraphRuntime:
         self._run_transcript.add_message(msg)
         self._persist_session()
         self._sync_session_state()
+        self._persist_dashboard_snapshot()
 
         await self._broadcast(json.dumps({
             "type": "message",
@@ -429,6 +608,8 @@ class GraphRuntime:
         self.state.agent_models = agent_models
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
+        self._persist_dashboard_snapshot()
+        self._clear_dashboard_file_changes()
         self._run_task = asyncio.create_task(
             self._run_orchestrator(
                 query,
@@ -444,11 +625,17 @@ class GraphRuntime:
             lambda t: logger.error("Run task failed: %s", t.exception())
             if not t.cancelled() and t.exception() else None
         )
-        return 200, {"ok": True}
+        return 200, {
+            "ok": True,
+            "session_id": self._conversation_session.session_id,
+            "session_generation": self._conversation_session.generation,
+            "session_turn": self._conversation_session.user_turn_count(),
+        }
 
     async def stop_run(self) -> dict:
         if self.running:
             self._run_task.cancel()
+            self._persist_dashboard_snapshot(run_active=False)
             await self._broadcast(json.dumps({"type": "stopped"}))
             return {"ok": True}
         return {"ok": False, "error": "No run in progress"}
@@ -943,10 +1130,10 @@ class GraphRuntime:
         agent_model_map: dict | None = None,
     ) -> None:
         from web.bridge import DashboardBridge
-        from web.state import ActivityRecord, FileChangeRecord
+        from web.state import ActivityRecord
 
         self._turn_count += 1
-        bridge = DashboardBridge(self.state, self._broadcast)
+        bridge = DashboardBridge(self.state, self._broadcast, persist_state=self._persist_dashboard_snapshot)
         effective_overrides = dict(self._model_overrides or {})
         agent_model_map = agent_model_map or self._build_agent_model_map(
             complexity, model_pin, agent_complexity, topology_id=topology
@@ -1013,6 +1200,7 @@ class GraphRuntime:
             ))
             if len(self.state.activity_events) > 100:
                 self.state.activity_events = self.state.activity_events[-100:]
+            self._persist_dashboard_snapshot()
             await self._broadcast(json.dumps({"type": "agent_activity", "agent": agent_id, "activity": activity}))
 
         async def on_agent_heartbeat(agent_id: str, payload: dict) -> None:
@@ -1025,20 +1213,12 @@ class GraphRuntime:
 
         def _make_file_write_cb(aid: str):
             def cb(_, path: str, content: str, old_content: str = "") -> None:
-                existing_index = next(
-                    (index for index, change in enumerate(self.state.file_changes) if change.path == path),
-                    None,
-                )
-                record = FileChangeRecord(
+                self._persist_dashboard_file_change(
                     path=path,
                     agent=aid,
                     content=content,
                     old_content=old_content,
                 )
-                if existing_index is None:
-                    self.state.file_changes.append(record)
-                else:
-                    self.state.file_changes[existing_index] = record
                 asyncio.ensure_future(self._broadcast(json.dumps({
                     "type": "file_write",
                     "agent": aid,
@@ -1120,6 +1300,7 @@ class GraphRuntime:
             self.state.final_result = final_result or ""
             self.state.final_diff = diff or ""
             self.state.session_turn = self._conversation_session.user_turn_count()
+            self._persist_dashboard_snapshot(run_active=False)
             if final_result:
                 await self._broadcast(json.dumps({
                     "type": "run_complete",
@@ -1133,4 +1314,5 @@ class GraphRuntime:
                     "routed": self.state.message_count,
                 }))
 
+        self._persist_dashboard_snapshot(run_active=False)
         self._last_result = result

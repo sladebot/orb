@@ -41,7 +41,7 @@ class DashboardServer:
         self.port = port
         self.runtime = runtime or GraphRuntime(state)
         self._app = web.Application(middlewares=[_no_cache_middleware])
-        self._clients: set[web.WebSocketResponse] = set()
+        self._clients: dict[web.WebSocketResponse, str | None] = {}
         self._runner: web.AppRunner | None = None
 
         self._app.router.add_get("/ws", self._ws_handler)
@@ -93,13 +93,16 @@ class DashboardServer:
 
     async def broadcast(self, data: str) -> None:
         closed = []
-        for ws in self._clients:
+        current_session_id = self.runtime.state.session_id or None
+        for ws, session_id in self._clients.items():
+            if session_id and session_id != current_session_id:
+                continue
             try:
                 await ws.send_str(data)
             except (ConnectionResetError, RuntimeError):
                 closed.append(ws)
         for ws in closed:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
 
     async def _index_handler(self, request: web.Request) -> web.Response:
         build_ts = str(max(
@@ -119,7 +122,8 @@ class DashboardServer:
         return response
 
     async def _state_handler(self, request: web.Request) -> web.Response:
-        return web.json_response(self.runtime.current_init_event())
+        session_id = request.rel_url.query.get("session", "").strip() or None
+        return web.json_response(self.runtime.current_init_event(session_id=session_id))
 
     async def _inject_handler(self, request: web.Request) -> web.Response:
         if request.content_length and request.content_length > 1_048_576:
@@ -206,16 +210,17 @@ class DashboardServer:
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        self._clients.add(ws)
+        session_id = request.rel_url.query.get("session", "").strip() or None
+        self._clients[ws] = session_id
         try:
             logger.info("Dashboard client connected (%s total)", len(self._clients))
             try:
-                await ws.send_str(json.dumps(self.runtime.current_init_event()))
+                await ws.send_str(json.dumps(self.runtime.current_init_event(session_id=session_id)))
             except (ConnectionResetError, RuntimeError):
                 pass
             async for _msg in ws:
                 pass
         finally:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
             logger.info("Dashboard client disconnected (%s total)", len(self._clients))
         return ws

@@ -16,9 +16,15 @@ BroadcastFn = Callable[[str], Awaitable[None]]
 class DashboardBridge:
     """Adapter between the tracing system and the web dashboard."""
 
-    def __init__(self, state: DashboardState, broadcast: BroadcastFn) -> None:
+    def __init__(
+        self,
+        state: DashboardState,
+        broadcast: BroadcastFn,
+        persist_state: Callable[[], None] | None = None,
+    ) -> None:
         self.state = state
         self._broadcast = broadcast
+        self._persist_state = persist_state or (lambda: None)
 
     async def _send(self, event: dict) -> None:
         await self._broadcast(json.dumps(event))
@@ -84,6 +90,7 @@ class DashboardBridge:
         self.state.messages.append(record)
         self.state.message_count += 1
         self.state.budget_remaining = max(0, self.state.budget - self.state.message_count)
+        self._persist_state()
 
         # Update agent status and msg_count for sender
         if msg.from_ in self.state.agents:
@@ -138,6 +145,7 @@ class DashboardBridge:
             self.state.agents[agent_id].status = status
             if model:
                 self.state.agents[agent_id].model = model
+        self._persist_state()
 
         await self._send({
             "type": "agent_status",
@@ -151,6 +159,7 @@ class DashboardBridge:
         if agent_id in self.state.agents:
             self.state.agents[agent_id].status = "completed"
             self.state.agents[agent_id].completed_result = result
+        self._persist_state()
 
         await self._send({
             "type": "complete",
@@ -167,6 +176,7 @@ class DashboardBridge:
             agent.last_heartbeat = ts
             if status and agent.status not in {"completed", "error"}:
                 agent.status = status
+        self._persist_state()
 
         await self._send({
             "type": "agent_heartbeat",
