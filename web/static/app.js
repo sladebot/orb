@@ -393,6 +393,9 @@ class Dashboard {
 
         // Render existing communications
         this.messageLog.innerHTML = '';
+        for (const step of this._planSteps || []) {
+            this._addPlanStepEntry(step);
+        }
         for (const activityEvent of data.activity_events || []) {
             this._handleAgentActivity({
                 type: 'agent_activity',
@@ -447,14 +450,15 @@ class Dashboard {
 
     _handlePlanStep(data) {
         if (!this._planSteps) this._planSteps = [];
-        this._planSteps.push({
+        const step = {
             stage: data.stage || 'planning',
             title: data.title || 'Planning update',
             detail: data.detail || '',
             elapsed: data.elapsed || 0,
-        });
+        };
+        this._planSteps.push(step);
         if (this._planSteps.length > 20) this._planSteps = this._planSteps.slice(-20);
-        this._renderPlanningState();
+        this._addPlanStepEntry(step);
 
         const statusEl = document.getElementById('stat-status');
         if (statusEl && !this._isRunActive) {
@@ -661,6 +665,35 @@ class Dashboard {
     }
 
     _renderPlanningState() {}
+
+    _addPlanStepEntry(step) {
+        const empty = this.messageLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        const stage = String(step.stage || 'planning').toLowerCase();
+        const stageClass = {
+            planning: 'msg-stage-planning',
+            allocator: 'msg-stage-allocator',
+            topology: 'msg-stage-topology',
+            models: 'msg-stage-models',
+            execution: 'msg-stage-execution',
+        }[stage] || 'msg-stage-generic';
+
+        const entry = document.createElement('div');
+        entry.className = 'msg-entry msg-entry-plan';
+        entry.innerHTML = `
+            <div class="msg-header">
+                <span class="msg-time">${(step.elapsed || 0).toFixed(1)}s</span>
+                <span class="msg-type-badge msg-type-system">plan</span>
+                <span class="msg-stage-pill ${stageClass}">${this._escapeHtml(step.stage || 'planning')}</span>
+            </div>
+            <div class="msg-preview"><strong>${this._escapeHtml(step.title || 'Planning update')}</strong></div>
+            ${step.detail ? `<div class="msg-expanded" style="display:block"><div class="msg-full-content">${this._escapeHtml(step.detail)}</div></div>` : ''}
+        `;
+
+        this.messageLog.appendChild(entry);
+        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+    }
 
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
         const workdirEl = document.getElementById('workdir-banner');
@@ -1429,6 +1462,7 @@ class Dashboard {
             : '';
         const el = document.createElement('div');
         el.className = 'final-result-card';
+        const diffFiles = diff ? this._parseDiffFiles(diff) : [];
         el.innerHTML = `
             <div class="final-result-header">
                 <span class="final-result-title">✓ Run Complete</span>
@@ -1437,14 +1471,14 @@ class Dashboard {
                 <button class="final-result-copy">Copy result</button>
             </div>
             <div class="final-result-body">${this._renderResult(result)}</div>
-            ${diff ? `
+            ${diffFiles.length ? `
             <div class="diff-section">
                 <div class="diff-section-header">
                     <span>Files Changed</span>
-                    <button class="diff-toggle">Show diff ▾</button>
                 </div>
-                <div class="diff-stat">${this._renderDiffStat(diff)}</div>
-                <pre class="diff-body hidden">${this._renderDiff(diff)}</pre>
+                <div class="code-change-list">
+                    ${diffFiles.map((file) => this._renderCodeChangeCard(file)).join('')}
+                </div>
             </div>` : ''}
         `;
         el.querySelector('.final-result-copy').addEventListener('click', () => {
@@ -1454,19 +1488,6 @@ class Dashboard {
                 setTimeout(() => { btn.textContent = 'Copy result'; }, 1500);
             });
         });
-        if (diff) {
-            el.querySelector('.diff-toggle').addEventListener('click', (e) => {
-                const pre = el.querySelector('.diff-body');
-                const btn = e.target;
-                if (pre.classList.contains('hidden')) {
-                    pre.classList.remove('hidden');
-                    btn.textContent = 'Hide diff ▴';
-                } else {
-                    pre.classList.add('hidden');
-                    btn.textContent = 'Show diff ▾';
-                }
-            });
-        }
         this.changesLog.appendChild(el);
         this.changesLog.scrollTop = this.changesLog.scrollHeight;
     }
@@ -1493,16 +1514,36 @@ class Dashboard {
             </div>
             <div class="live-diff-summary">Captured from runtime file writes. This is the current overall code delta for the run.</div>
             <div class="live-diff-files">
-                ${files.map((file) => `
-                    <details class="live-diff-file" open>
-                        <summary>
+                ${files.map((file) => this._renderCodeChangeCard({
+                    path: file.path,
+                    agent: file.agent || '',
+                    diff: this._buildUnifiedDiff(file.path, file.oldContent, file.content),
+                    ...this._countDiffStats(this._buildUnifiedDiff(file.path, file.oldContent, file.content)),
+                })).join('')}
+            </div>
+        `;
+    }
+
+    _renderCodeChangeCard(file) {
+        const added = file.added || 0;
+        const removed = file.removed || 0;
+        const total = added + removed;
+        return `
+            <details class="code-change-card"${total <= 40 ? ' open' : ''}>
+                <summary>
+                    <div class="code-change-summary">
+                        <div class="code-change-title-row">
                             <span class="diff-file">${this._escapeHtml(file.path)}</span>
                             ${file.agent ? `<span class="live-diff-agent">${this._escapeHtml(file.agent)}</span>` : ''}
-                        </summary>
-                        <pre class="diff-body">${this._renderDiff(this._buildUnifiedDiff(file.path, file.oldContent, file.content))}</pre>
-                    </details>
-                `).join('')}
-            </div>
+                        </div>
+                        <div class="code-change-meta">
+                            <span class="code-change-stat code-change-stat-add">+${added}</span>
+                            <span class="code-change-stat code-change-stat-del">-${removed}</span>
+                        </div>
+                    </div>
+                </summary>
+                <pre class="diff-body">${this._renderDiff(file.diff || '')}</pre>
+            </details>
         `;
     }
 
@@ -1517,6 +1558,46 @@ class Dashboard {
             return `-${line}`;
         }).join('\n');
         return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@\n${body}`.trim();
+    }
+
+    _parseDiffFiles(diff) {
+        const files = [];
+        let current = null;
+        for (const line of diff.split('\n')) {
+            if (line.startsWith('diff --git ')) {
+                if (current) {
+                    current.diff = current.lines.join('\n');
+                    Object.assign(current, this._countDiffStats(current.diff));
+                    delete current.lines;
+                    files.push(current);
+                }
+                const match = line.match(/ b\/(.+)$/);
+                current = {
+                    path: match?.[1] || 'unknown',
+                    agent: '',
+                    lines: [line],
+                };
+                continue;
+            }
+            if (current) current.lines.push(line);
+        }
+        if (current) {
+            current.diff = current.lines.join('\n');
+            Object.assign(current, this._countDiffStats(current.diff));
+            delete current.lines;
+            files.push(current);
+        }
+        return files;
+    }
+
+    _countDiffStats(diff) {
+        let added = 0;
+        let removed = 0;
+        for (const line of diff.split('\n')) {
+            if (line.startsWith('+') && !line.startsWith('+++')) added += 1;
+            if (line.startsWith('-') && !line.startsWith('---')) removed += 1;
+        }
+        return { added, removed };
     }
 
     _diffLineOps(oldLines, newLines) {
