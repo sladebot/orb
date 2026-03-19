@@ -52,6 +52,14 @@ class PlanStepRecord:
 
 
 @dataclass
+class FileChangeRecord:
+    path: str
+    agent: str
+    content: str
+    old_content: str = ""
+
+
+@dataclass
 class DashboardState:
     """Snapshot of the full system state for dashboard rendering."""
 
@@ -60,6 +68,7 @@ class DashboardState:
     messages: list[MessageRecord] = field(default_factory=list)
     activity_events: list[ActivityRecord] = field(default_factory=list)
     plan_steps: list[PlanStepRecord] = field(default_factory=list)
+    file_changes: list[FileChangeRecord] = field(default_factory=list)
     message_count: int = 0
     budget: int = 200
     budget_remaining: int = 200
@@ -89,6 +98,7 @@ class DashboardState:
         self.messages = []
         self.activity_events = []
         self.plan_steps = []
+        self.file_changes = []
         self.message_count = 0
         self.budget_remaining = self.budget
         self.start_time = time.time()
@@ -173,6 +183,15 @@ class DashboardState:
                     "elapsed": s.elapsed,
                 }
                 for s in self.plan_steps
+            ],
+            "file_changes": [
+                {
+                    "path": change.path,
+                    "agent": change.agent,
+                    "content": change.content,
+                    "old_content": change.old_content,
+                }
+                for change in self.file_changes
             ],
             "stats": {
                 "message_count": self.message_count,

@@ -943,7 +943,7 @@ class GraphRuntime:
         agent_model_map: dict | None = None,
     ) -> None:
         from web.bridge import DashboardBridge
-        from web.state import ActivityRecord
+        from web.state import ActivityRecord, FileChangeRecord
 
         self._turn_count += 1
         bridge = DashboardBridge(self.state, self._broadcast)
@@ -1025,6 +1025,20 @@ class GraphRuntime:
 
         def _make_file_write_cb(aid: str):
             def cb(_, path: str, content: str, old_content: str = "") -> None:
+                existing_index = next(
+                    (index for index, change in enumerate(self.state.file_changes) if change.path == path),
+                    None,
+                )
+                record = FileChangeRecord(
+                    path=path,
+                    agent=aid,
+                    content=content,
+                    old_content=old_content,
+                )
+                if existing_index is None:
+                    self.state.file_changes.append(record)
+                else:
+                    self.state.file_changes[existing_index] = record
                 asyncio.ensure_future(self._broadcast(json.dumps({
                     "type": "file_write",
                     "agent": aid,

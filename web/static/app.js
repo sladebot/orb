@@ -48,6 +48,9 @@ class Dashboard {
         this._fileChanges = new Map();
         this._panelWidthKeys = ['changes-panel', 'communications-panel'];
         this._activePanelDrag = null;
+        this._mentionTargets = [];
+        this._mentionSuggestions = [];
+        this._mentionSelection = 0;
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -55,6 +58,7 @@ class Dashboard {
         // Query bar
         document.getElementById('query-send').addEventListener('click', () => this._submitQuery());
         document.getElementById('query-input').addEventListener('keydown', (e) => {
+            if (this._handleMentionKeydown(e)) return;
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submitQuery(); }
         });
         document.getElementById('query-stop').addEventListener('click', () => this._stopRun());
@@ -66,6 +70,12 @@ class Dashboard {
         qi.addEventListener('input', () => {
             qi.style.height = 'auto';
             qi.style.height = Math.min(qi.scrollHeight, 160) + 'px';
+            this._updateMentionSuggestions();
+        });
+        qi.addEventListener('click', () => this._updateMentionSuggestions());
+        qi.addEventListener('keyup', () => this._updateMentionSuggestions());
+        qi.addEventListener('blur', () => {
+            window.setTimeout(() => this._hideMentionSuggestions(), 120);
         });
 
         // Question panel wiring
@@ -351,6 +361,7 @@ class Dashboard {
         this._plan = data.plan || null;
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
         this._fileChanges = new Map();
+        this._updateSessionUrl(data.session_id || '');
         if (this.changesLog) this.changesLog.innerHTML = '';
         this._setChangesEmptyState();
         this._renderPlanningState();
@@ -387,6 +398,7 @@ class Dashboard {
                 last_heartbeat: agent.last_heartbeat || 0,
             };
         }
+        this._refreshMentionTargets();
 
         this.graph.setTopology(data.agents, data.edges);
         this._hideLoader();
@@ -414,11 +426,13 @@ class Dashboard {
         this._updateStatusIndicator();
 
         if (data.stats) this._handleStats(data.stats);
+        this._hydrateLiveCodeChangesFromInit(data);
 
         // Determine UI state based on run state
         if (data.run_active === true) {
             // Mid-run reconnect
             this._setRunActive(true);
+            this._hydrateCodeChangesFromInit(data);
         } else if (data.completed === true) {
             // Reconnect after a finished run: show result panel with first completed agent's result
             this._setRunActive(false);
@@ -442,6 +456,7 @@ class Dashboard {
                     wrap.classList.toggle('no-overflow', bodyEl.scrollHeight <= bodyEl.clientHeight);
                 });
             }
+            this._hydrateCodeChangesFromInit(data);
         } else {
             // Fresh open or no active run
             this._setRunActive(false);
@@ -1068,9 +1083,12 @@ class Dashboard {
     async _loadSettings() {
         const res = await fetch('/api/settings');
         const data = await res.json();
-        const availableProviders = data.available_providers || [];
-        const preferredProviders = data.preferred_providers || [];
-        this._providerPrefs = new Set(preferredProviders.length ? preferredProviders : availableProviders);
+        const providers = data.providers || {};
+        const enabledProviders = Object.entries(providers)
+            .filter(([, meta]) => meta && meta.enabled)
+            .map(([provider]) => provider);
+        const fallbackProviders = data.available_providers || [];
+        this._providerPrefs = new Set(enabledProviders.length ? enabledProviders : fallbackProviders);
         if (Array.isArray(data.models) && data.models.length) {
             this._models = data.models;
         }
@@ -1094,7 +1112,11 @@ class Dashboard {
     _renderProviderSettings() {
         const container = document.getElementById('provider-settings-list');
         if (!container) return;
-        const providers = Object.keys(this._providerModels || {}).sort();
+        const providerSet = new Set([
+            ...Object.keys(this._providerModels || {}),
+            ...this._providerPrefs,
+        ]);
+        const providers = [...providerSet].sort();
         if (!providers.length) {
             container.innerHTML = '<div class="settings-empty">No providers discovered from the current daemon.</div>';
             return;
@@ -1103,34 +1125,15 @@ class Dashboard {
             const models = this._providerModels[provider] || [];
             const active = this._providerPrefs.has(provider);
             return `
-                <label class="provider-option${active ? ' active' : ''}">
-                    <input class="provider-checkbox" type="checkbox" data-provider="${this._escapeHtml(provider)}" ${active ? 'checked' : ''}>
+                <div class="provider-option provider-option-readonly${active ? ' active' : ''}">
                     <span class="provider-option-copy">
                         <span class="provider-option-name">${this._escapeHtml(this._providerLabel(provider))}</span>
-                        <span class="provider-option-meta">${models.length} model${models.length === 1 ? '' : 's'}</span>
+                        <span class="provider-option-meta">${active ? 'enabled' : 'disabled'} · ${models.length} model${models.length === 1 ? '' : 's'}</span>
                     </span>
-                </label>
+                    <span class="provider-state-pill${active ? ' provider-state-pill-active' : ''}">${active ? 'Enabled' : 'Disabled'}</span>
+                </div>
             `;
         }).join('');
-        container.querySelectorAll('.provider-checkbox').forEach((checkbox) => {
-            checkbox.addEventListener('change', (event) => this._toggleProvider(event.target.dataset.provider, event.target.checked));
-        });
-    }
-
-    _toggleProvider(provider, checked) {
-        if (!provider) return;
-        const next = new Set(this._providerPrefs);
-        if (checked) {
-            next.add(provider);
-        } else {
-            next.delete(provider);
-        }
-        if (next.size === 0) {
-            return;
-        }
-        this._providerPrefs = next;
-        this._renderProviderSettings();
-        this._saveSettings();
     }
 
     _applyProviderPreferences() {
@@ -1143,18 +1146,6 @@ class Dashboard {
         document.getElementById('stat-model').textContent =
             this._modelLabels[this._selectedModel] || 'Auto';
         this._setText('hero-model-label', this._modelLabels[this._selectedModel] || 'Auto');
-    }
-
-    async _saveSettings() {
-        const res = await fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ preferred_providers: [...this._providerPrefs] }),
-        });
-        const data = await res.json();
-        this._providerPrefs = new Set(data.preferred_providers || []);
-        this._renderProviderSettings();
-        this._applyProviderPreferences();
     }
 
     _openSettings() {
@@ -1270,6 +1261,7 @@ class Dashboard {
         // Disable trigger while running
         const trigger = document.getElementById('topology-trigger');
         trigger.classList.toggle('disabled', this._isRunActive);
+        this._refreshMentionTargets();
     }
 
     _toggleTopologyMenu() {
@@ -1317,6 +1309,7 @@ class Dashboard {
             document.getElementById('topology-dropdown').classList.remove('open');
             document.getElementById('topology-menu').classList.add('hidden');
         }
+        this._updateMentionSuggestions();
     }
 
     _showLoader(text = 'Starting agents…') {
@@ -1337,6 +1330,7 @@ class Dashboard {
         if (this._isRunActive) {
             input.value = '';
             input.style.height = 'auto';
+            this._hideMentionSuggestions();
             await fetch('/api/inject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1381,6 +1375,7 @@ class Dashboard {
         this._fileChanges = new Map();
         input.value = '';
         input.style.height = 'auto';
+        this._hideMentionSuggestions();
         const res = await fetch('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1425,6 +1420,7 @@ class Dashboard {
     _handleRunComplete(data) {
         this._clearThinking();
         this._setRunActive(false);
+        this._updateSessionUrl(data.session_id || '');
 
         // Force status to Done
         const statusEl = document.getElementById('stat-status');
@@ -1490,6 +1486,29 @@ class Dashboard {
         });
         this.changesLog.appendChild(el);
         this.changesLog.scrollTop = this.changesLog.scrollHeight;
+    }
+
+    _hydrateCodeChangesFromInit(data) {
+        if (!this.changesLog) return;
+        if (this.changesLog.querySelector('.final-result-card')) return;
+        const result = data.final_result || '';
+        const diff = data.final_diff || '';
+        if (!result && !diff) return;
+        this._renderInitialCodeChanges(result, diff, '', data.session_turn || 0);
+    }
+
+    _hydrateLiveCodeChangesFromInit(data) {
+        const fileChanges = Array.isArray(data.file_changes) ? data.file_changes : [];
+        if (!fileChanges.length) return;
+        this._fileChanges = new Map(
+            fileChanges.map((file) => [file.path, {
+                path: file.path,
+                agent: file.agent || '',
+                content: file.content || '',
+                oldContent: file.old_content || '',
+            }])
+        );
+        this._renderLiveCodeChanges();
     }
 
     _renderLiveCodeChanges() {
@@ -1675,6 +1694,155 @@ class Dashboard {
     }
 
     // ── Utilities ─────────────────────────────────────────────
+
+    _topologyAgents(topologyId) {
+        if (!topologyId || topologyId === 'auto') return [];
+        const topo = this._topologyList.find((item) => item.id === topologyId);
+        return [...(topo?.agents || [])].sort();
+    }
+
+    _refreshMentionTargets() {
+        const liveTargets = Object.keys(this.agents || {});
+        if (liveTargets.length) {
+            this._mentionTargets = liveTargets.sort();
+            return;
+        }
+        const plannedTopologyTargets = this._topologyAgents(this._plan?.topology?.id);
+        if (plannedTopologyTargets.length) {
+            this._mentionTargets = plannedTopologyTargets;
+            return;
+        }
+        const selectedTopologyTargets = this._topologyAgents(this._selectedTopology);
+        if (selectedTopologyTargets.length) {
+            this._mentionTargets = selectedTopologyTargets;
+            return;
+        }
+        this._mentionTargets = ['coordinator'];
+    }
+
+    _mentionState() {
+        const input = document.getElementById('query-input');
+        if (!input) return null;
+        const value = input.value || '';
+        const caret = input.selectionStart ?? value.length;
+        const prefix = value.slice(0, caret);
+        const match = prefix.match(/(^|\s)@([\w-]*)$/);
+        if (!match) return null;
+        return {
+            input,
+            value,
+            caret,
+            query: (match[2] || '').toLowerCase(),
+            start: caret - (match[2] || '').length - 1,
+        };
+    }
+
+    _updateMentionSuggestions() {
+        this._refreshMentionTargets();
+        const menu = document.getElementById('query-mentions');
+        const state = this._mentionState();
+        if (!menu || !state || !this._mentionTargets.length) {
+            this._hideMentionSuggestions();
+            return;
+        }
+        const suggestions = this._mentionTargets
+            .filter((target) => target.toLowerCase().includes(state.query))
+            .slice(0, 8);
+        if (!suggestions.length) {
+            this._hideMentionSuggestions();
+            return;
+        }
+        this._mentionSuggestions = suggestions;
+        if (this._mentionSelection >= suggestions.length) this._mentionSelection = 0;
+        menu.innerHTML = suggestions.map((target, index) => `
+            <button
+                type="button"
+                class="query-mention-item${index === this._mentionSelection ? ' active' : ''}"
+                data-target="${this._escapeHtml(target)}"
+            >
+                <span class="query-mention-handle">@${this._escapeHtml(target)}</span>
+                <span class="query-mention-meta">node</span>
+            </button>
+        `).join('');
+        menu.querySelectorAll('.query-mention-item').forEach((button, index) => {
+            button.addEventListener('mouseenter', () => {
+                this._mentionSelection = index;
+                this._updateMentionSuggestions();
+            });
+            button.addEventListener('mousedown', (event) => {
+                event.preventDefault();
+                this._applyMentionSuggestion(button.dataset.target || '');
+            });
+        });
+        menu.classList.remove('hidden');
+    }
+
+    _hideMentionSuggestions() {
+        const menu = document.getElementById('query-mentions');
+        if (!menu) return;
+        this._mentionSuggestions = [];
+        this._mentionSelection = 0;
+        menu.classList.add('hidden');
+        menu.innerHTML = '';
+    }
+
+    _handleMentionKeydown(event) {
+        const menu = document.getElementById('query-mentions');
+        const isOpen = menu && !menu.classList.contains('hidden') && this._mentionSuggestions.length > 0;
+        if (!isOpen) return false;
+
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            this._mentionSelection = (this._mentionSelection + 1) % this._mentionSuggestions.length;
+            this._updateMentionSuggestions();
+            return true;
+        }
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            this._mentionSelection = (this._mentionSelection - 1 + this._mentionSuggestions.length) % this._mentionSuggestions.length;
+            this._updateMentionSuggestions();
+            return true;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            this._hideMentionSuggestions();
+            return true;
+        }
+        if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+            event.preventDefault();
+            this._applyMentionSuggestion(this._mentionSuggestions[this._mentionSelection] || '');
+            return true;
+        }
+        return false;
+    }
+
+    _applyMentionSuggestion(target) {
+        if (!target) return;
+        const state = this._mentionState();
+        if (!state) return;
+        const before = state.value.slice(0, state.start);
+        const after = state.value.slice(state.caret);
+        const insertion = `@${target} `;
+        state.input.value = `${before}${insertion}${after}`;
+        const nextCaret = before.length + insertion.length;
+        state.input.focus();
+        state.input.setSelectionRange(nextCaret, nextCaret);
+        state.input.style.height = 'auto';
+        state.input.style.height = Math.min(state.input.scrollHeight, 160) + 'px';
+        this._hideMentionSuggestions();
+    }
+
+    _updateSessionUrl(sessionId) {
+        const url = new URL(window.location.href);
+        if (sessionId) {
+            url.searchParams.set('session', sessionId);
+        } else {
+            url.searchParams.delete('session');
+        }
+        const next = `${url.pathname}${url.search}${url.hash}`;
+        const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        if (next !== current) window.history.replaceState({}, '', next);
+    }
 
     _renderResult(text) {
         // Basic markdown-like rendering: bold, code blocks, bullets, paragraphs
