@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orb Topology Preview</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0a0f13;
+            --panel: rgba(16, 21, 27, 0.94);
+            --line: rgba(65, 71, 84, 0.18);
+            --text: #dee3e9;
+            --muted: #8e97a8;
+            --primary: #acc7ff;
+            --success: #7de2a7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            min-height: 100vh;
+            display: flex;
+            align-items: stretch;
+            justify-content: center;
+            background:
+                radial-gradient(circle at top left, rgba(172, 199, 255, 0.08), transparent 28%),
+                radial-gradient(circle at top right, rgba(82, 3, 213, 0.12), transparent 24%),
+                linear-gradient(180deg, #10161d 0%, #0b1014 100%);
+            color: var(--text);
+            font-family: Inter, system-ui, sans-serif;
+        }
+
+        .frame {
+            width: 1440px;
+            height: 900px;
+            padding: 28px;
+            display: flex;
+        }
+
+        .graph-panel {
+            position: relative;
+            flex: 1;
+            overflow: hidden;
+            border-radius: 28px;
+            background:
+                radial-gradient(circle at 15% 20%, rgba(172, 199, 255, 0.13), transparent 28%),
+                radial-gradient(circle at 80% 15%, rgba(82, 3, 213, 0.12), transparent 24%),
+                linear-gradient(180deg, #0e1318, #0a0f13);
+            box-shadow:
+                inset 0 0 0 1px rgba(65, 71, 84, 0.16),
+                0 30px 70px -34px rgba(0, 0, 0, 0.8);
+        }
+
+        .hud {
+            position: absolute;
+            top: 22px;
+            left: 22px;
+            right: 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .hud-left {
+            display: flex;
+            gap: 8px;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(48, 53, 58, 0.56);
+            box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.14);
+            backdrop-filter: blur(18px);
+        }
+
+        .pill-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            color: var(--muted);
+        }
+
+        .pill-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .title-block {
+            position: absolute;
+            left: 26px;
+            bottom: 24px;
+            padding: 16px 18px;
+            border-radius: 20px;
+            background: var(--panel);
+            box-shadow:
+                inset 0 0 0 1px var(--line),
+                0 18px 40px -30px rgba(0, 0, 0, 0.9);
+            z-index: 2;
+        }
+
+        .kicker {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+            color: var(--muted);
+        }
+
+        h1 {
+            margin-top: 8px;
+            font-size: 26px;
+            line-height: 1;
+        }
+
+        p {
+            margin-top: 10px;
+            max-width: 48ch;
+            font-size: 14px;
+            line-height: 1.55;
+            color: #c1c6d6;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="frame">
+        <section class="graph-panel">
+            <div class="hud">
+                <div class="hud-left">
+                    <div class="pill">
+                        <span class="pill-label">Topology</span>
+                        <span class="pill-value" id="topology-name">Triad</span>
+                    </div>
+                    <div class="pill">
+                        <span class="pill-label">Runtime</span>
+                        <span class="pill-value">Running</span>
+                    </div>
+                </div>
+            </div>
+            <canvas id="graph-canvas"></canvas>
+            <div class="title-block">
+                <div class="kicker">Orb Dashboard</div>
+                <h1 id="topology-title">Triad</h1>
+                <p id="topology-copy"></p>
+            </div>
+        </section>
+    </div>
+
+    <script src="../web/static/graph.js"></script>
+    <script>
+        const PREVIEWS = {
+            triad: {
+                label: 'Triad',
+                copy: 'Coordinator routes into coder, with reviewer and tester branching as peer validation nodes.',
+                agents: [
+                    { id: 'coordinator', role: 'Coordinator', status: 'running' },
+                    { id: 'coder', role: 'Coder', status: 'running' },
+                    { id: 'reviewer', role: 'Reviewer', status: 'idle' },
+                    { id: 'tester', role: 'Tester', status: 'idle' },
+                ],
+                edges: [
+                    { source: 'coordinator', target: 'coder' },
+                    { source: 'coder', target: 'reviewer' },
+                    { source: 'coder', target: 'tester' },
+                    { source: 'reviewer', target: 'tester' },
+                ],
+                graphView: {
+                    rows: [
+                        [{ node: 'coordinator' }],
+                        [{ node: 'coder' }],
+                        [{ node: 'reviewer' }, { node: 'tester' }],
+                    ],
+                    order: ['coordinator', 'coder', 'reviewer', 'tester'],
+                },
+            },
+            'dual-review': {
+                label: 'Dual Review',
+                copy: 'Coder fans work into two review branches and tester validation, keeping the topology broad and parallel.',
+                agents: [
+                    { id: 'coordinator', role: 'Coordinator', status: 'running' },
+                    { id: 'coder', role: 'Coder', status: 'running' },
+                    { id: 'reviewer_a', role: 'Reviewer A', status: 'idle' },
+                    { id: 'reviewer_b', role: 'Reviewer B', status: 'idle' },
+                    { id: 'tester', role: 'Tester', status: 'idle' },
+                ],
+                edges: [
+                    { source: 'coordinator', target: 'coder' },
+                    { source: 'coder', target: 'reviewer_a' },
+                    { source: 'reviewer_a', target: 'coder' },
+                    { source: 'coder', target: 'reviewer_b' },
+                    { source: 'reviewer_b', target: 'coder' },
+                    { source: 'reviewer_a', target: 'reviewer_b' },
+                    { source: 'reviewer_b', target: 'reviewer_a' },
+                    { source: 'coder', target: 'tester' },
+                    { source: 'tester', target: 'coder' },
+                ],
+                graphView: {
+                    rows: [
+                        [{ node: 'coordinator' }],
+                        [{ node: 'coder' }],
+                        [{ node: 'reviewer_a' }, { node: 'tester' }, { node: 'reviewer_b' }],
+                    ],
+                    order: ['coordinator', 'coder', 'reviewer_a', 'tester', 'reviewer_b'],
+                },
+            },
+            hierarchy: {
+                label: 'Hierarchy',
+                copy: 'A deeper planning topology where researcher feeds coder and implementation splits into review and testing.',
+                agents: [
+                    { id: 'coordinator', role: 'Coordinator', status: 'running' },
+                    { id: 'researcher', role: 'Researcher', status: 'running' },
+                    { id: 'coder', role: 'Coder', status: 'running' },
+                    { id: 'reviewer', role: 'Reviewer', status: 'idle' },
+                    { id: 'tester', role: 'Tester', status: 'idle' },
+                ],
+                edges: [
+                    { source: 'coordinator', target: 'researcher' },
+                    { source: 'researcher', target: 'coder' },
+                    { source: 'coder', target: 'reviewer' },
+                    { source: 'coder', target: 'tester' },
+                ],
+                graphView: {
+                    rows: [
+                        [{ node: 'coordinator' }],
+                        [{ node: 'researcher' }],
+                        [{ node: 'coder' }],
+                        [{ node: 'reviewer' }, { node: 'tester' }],
+                    ],
+                    order: ['coordinator', 'researcher', 'coder', 'reviewer', 'tester'],
+                },
+            },
+        };
+
+        const params = new URLSearchParams(window.location.search);
+        const topologyId = params.get('topology') || 'triad';
+        const preview = PREVIEWS[topologyId] || PREVIEWS.triad;
+
+        document.getElementById('topology-name').textContent = preview.label;
+        document.getElementById('topology-title').textContent = preview.label;
+        document.getElementById('topology-copy').textContent = preview.copy;
+
+        const graph = new GraphRenderer(document.getElementById('graph-canvas'));
+        graph.setTopology(preview.agents, preview.edges, preview.graphView);
+        graph.setRunState('running');
+        graph.zoom = 1;
+        graph.offsetX = 0;
+        graph.offsetY = 0;
+    </script>
+</body>
+</html>

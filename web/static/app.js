@@ -694,6 +694,7 @@ class Dashboard {
 
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
         const workdirEl = document.getElementById('workdir-banner');
+        const composerWorkdirEl = document.getElementById('composer-workdir');
         const sessionEl = document.getElementById('session-id-banner');
         const generationEl = document.getElementById('session-generation-banner');
         const turnEl = document.getElementById('session-turn-banner');
@@ -705,6 +706,10 @@ class Dashboard {
 
         workdirEl.textContent = workspaceName;
         workdirEl.title = workdir || '';
+        if (composerWorkdirEl) {
+            composerWorkdirEl.textContent = workspaceName;
+            composerWorkdirEl.title = workdir || '';
+        }
 
         sessionEl.textContent = shortSession;
         sessionEl.title = sessionId || '';
@@ -1312,6 +1317,8 @@ class Dashboard {
 
         dd.classList.remove('open-up');
         menu.style.maxHeight = '';
+        menu.style.left = '0px';
+        menu.style.right = 'auto';
 
         const dropdownRect = dd.getBoundingClientRect();
         const menuRect = menu.getBoundingClientRect();
@@ -1323,6 +1330,15 @@ class Dashboard {
 
         dd.classList.toggle('open-up', shouldOpenUp);
         menu.style.maxHeight = `${Math.min(available, Math.max(220, viewportHeight * 0.52))}px`;
+
+        const positionedRect = menu.getBoundingClientRect();
+        const overflowRight = positionedRect.right - window.innerWidth + 16;
+        const overflowLeft = 16 - positionedRect.left;
+        if (overflowRight > 0) {
+            menu.style.left = `${-overflowRight}px`;
+        } else if (overflowLeft > 0) {
+            menu.style.left = `${overflowLeft}px`;
+        }
     }
 
     _setRunActive(active) {

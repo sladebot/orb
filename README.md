@@ -1,5 +1,7 @@
 # Orb
 
+![TUI](docs/orb-tui.png)
+
 A network of LLM agents that collaborate to solve tasks. Agents communicate via async channels over a shared message bus, pick models dynamically based on task complexity, and build up a persistent knowledge graph across runs.
 
 ---
