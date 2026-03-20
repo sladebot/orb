@@ -52,8 +52,9 @@ class AnthropicProvider(LLMClient):
 
     Key resolution order:
       1. ``api_key`` constructor argument
-      2. ``ANTHROPIC_OAUTH_TOKEN`` env var
-      3. ``ANTHROPIC_API_KEY`` env var
+      2. ``ANTHROPIC_SETUP_TOKEN`` env var
+      3. ``ANTHROPIC_OAUTH_TOKEN`` env var
+      4. ``ANTHROPIC_API_KEY`` env var
     """
 
     def __init__(self, api_key: str | None = None) -> None:
@@ -61,6 +62,7 @@ class AnthropicProvider(LLMClient):
 
         token = (
             api_key
+            or os.environ.get("ANTHROPIC_SETUP_TOKEN")
             or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
             or os.environ.get("ANTHROPIC_API_KEY")
         )

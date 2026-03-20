@@ -117,7 +117,11 @@ def _codex_factory() -> "LLMClient":
 
 def _anthropic_api_key() -> str | None:
     """Return an Anthropic API key: env var takes priority, then stored credentials."""
-    key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
+    key = (
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("ANTHROPIC_SETUP_TOKEN")
+        or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
+    )
     if key:
         return key
     try:

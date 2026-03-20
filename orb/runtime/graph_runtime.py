@@ -371,8 +371,10 @@ class GraphRuntime:
         return catalog, defaults
 
     async def _fetch_ollama_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        from orb.llm.registry import _ollama_base_url
+
         provider_cfg = self._provider_config_entry("ollama")
-        endpoint = str(provider_cfg.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
+        endpoint = str(provider_cfg.get("base_url") or _ollama_base_url()).rstrip("/")
         if endpoint.endswith("/v1"):
             endpoint = endpoint[:-3]
         try:
