@@ -48,6 +48,7 @@ class DashboardServer:
         self._app.router.add_get("/api/state", self._state_handler)
         self._app.router.add_post("/api/inject", self._inject_handler)
         self._app.router.add_post("/api/start", self._start_handler)
+        self._app.router.add_post("/api/session/new", self._new_session_handler)
         self._app.router.add_post("/api/stop", self._stop_run_handler)
         self._app.router.add_get("/api/run-status", self._run_status_handler)
         self._app.router.add_get("/api/predict-topology", self._predict_topology_handler)
@@ -174,6 +175,10 @@ class DashboardServer:
 
     async def _stop_run_handler(self, request: web.Request) -> web.Response:
         return web.json_response(await self.runtime.stop_run())
+
+    async def _new_session_handler(self, request: web.Request) -> web.Response:
+        status, payload = await self.runtime.new_session()
+        return web.json_response(payload, status=status)
 
     async def _run_status_handler(self, request: web.Request) -> web.Response:
         return web.json_response({

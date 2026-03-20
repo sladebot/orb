@@ -56,12 +56,11 @@ class Dashboard {
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
 
         // Query bar
-        document.getElementById('query-send').addEventListener('click', () => this._submitQuery());
+        document.getElementById('query-send').addEventListener('click', () => this._handlePrimaryQueryAction());
         document.getElementById('query-input').addEventListener('keydown', (e) => {
             if (this._handleMentionKeydown(e)) return;
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submitQuery(); }
         });
-        document.getElementById('query-stop').addEventListener('click', () => this._stopRun());
         document.getElementById('changes-panel-toggle').addEventListener('click', () => this._togglePanel('changes-panel'));
         document.getElementById('communications-panel-toggle').addEventListener('click', () => this._togglePanel('communications-panel'));
         this._setupPanelResize();
@@ -87,6 +86,7 @@ class Dashboard {
             if (e.key === 'Enter') this._sendQuestionReply();
         });
         document.getElementById('settings-button')?.addEventListener('click', () => this._openSettings());
+        document.getElementById('new-session-button')?.addEventListener('click', () => this._createNewSession());
         document.getElementById('settings-close')?.addEventListener('click', () => this._closeSettings());
         document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
 
@@ -127,9 +127,13 @@ class Dashboard {
         this._setMessageEmptyState();
         this._restorePanelState();
         this._restorePanelWidths();
+        this.graph.setRunState('idle');
 
         // Topology dropdown toggle
-        document.getElementById('topology-trigger').addEventListener('click', () => this._toggleTopologyMenu());
+        document.getElementById('topology-trigger').addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._toggleTopologyMenu();
+        });
         // Close dropdown on outside click
         document.addEventListener('click', (e) => {
             const dd = document.getElementById('topology-dropdown');
@@ -138,7 +142,10 @@ class Dashboard {
                 document.getElementById('topology-menu').classList.add('hidden');
             }
         });
-        window.addEventListener('resize', () => this._handleViewportResize());
+        window.addEventListener('resize', () => {
+            this._handleViewportResize();
+            this._positionTopologyMenu();
+        });
 
         document.getElementById('graph-zoom-in')?.addEventListener('click', () => this.graph.zoomIn());
         document.getElementById('graph-zoom-out')?.addEventListener('click', () => this.graph.zoomOut());
@@ -184,6 +191,8 @@ class Dashboard {
         el.title = connected ? 'Connected' : 'Disconnected';
         if (label) label.textContent = connected ? 'Daemon Connected' : 'Daemon Offline';
         this._setText('hero-status-label', connected && this._isRunActive ? 'Running' : this._statusText());
+        const newSessionButton = document.getElementById('new-session-button');
+        if (newSessionButton) newSessionButton.disabled = this._isRunActive;
     }
 
     _restorePanelState() {
@@ -402,7 +411,7 @@ class Dashboard {
         }
         this._refreshMentionTargets();
 
-        this.graph.setTopology(data.agents, data.edges);
+        this.graph.setTopology(data.agents, data.edges, this._plan?.graph_view || null);
         this._hideLoader();
 
         // Render existing communications
@@ -434,34 +443,34 @@ class Dashboard {
         if (data.run_active === true) {
             // Mid-run reconnect
             this._setRunActive(true);
+            this.graph.setRunState('running');
             this._hydrateCodeChangesFromInit(data);
         } else if (data.completed === true) {
-            // Reconnect after a finished run: show result panel with first completed agent's result
+            // Reconnect after a finished run: keep the result in the left rail only.
             this._setRunActive(false);
+            this.graph.setRunState('completed');
             const completedAgent = data.agents.find(a =>
                 a.status === 'completed' && a.completed_result && !a.completed_result.startsWith('Consensus:')
             );
             if (completedAgent) {
-                document.getElementById('result-agent').textContent = completedAgent.role;
-                document.getElementById('result-elapsed').textContent = '';
-                document.getElementById('result-body').innerHTML = this._renderResult(completedAgent.completed_result);
-                document.getElementById('result-panel').classList.remove('hidden');
                 this._renderInitialCodeChanges(
                     data.final_result || completedAgent.completed_result,
                     data.final_diff || '',
                     '',
                     data.session_turn || 0,
                 );
-                const bodyEl = document.getElementById('result-body');
-                const wrap = document.getElementById('result-body-wrap');
-                requestAnimationFrame(() => {
-                    wrap.classList.toggle('no-overflow', bodyEl.scrollHeight <= bodyEl.clientHeight);
+                this._addRunCompleteActivity({
+                    agent: completedAgent.role || completedAgent.id || 'run',
+                    elapsed: data.stats?.elapsed || 0,
+                    result: data.final_result || completedAgent.completed_result || '',
+                    hydrated: true,
                 });
             }
             this._hydrateCodeChangesFromInit(data);
         } else {
             // Fresh open or no active run
             this._setRunActive(false);
+            this.graph.setRunState('idle');
         }
     }
 
@@ -563,41 +572,9 @@ class Dashboard {
         this._updateStatusIndicator();
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
 
-        // Show result panel for the first real completion (not a consensus relay)
+        // Final completion is rendered in the left rail run-output surface.
         const isConsensus = data.is_consensus === true;
-        const panel = document.getElementById('result-panel');
-        if (!isConsensus && data.result && data.result.trim() && panel.classList.contains('hidden')) {
-            const agent = this.agents[data.agent];
-            document.getElementById('result-agent').textContent =
-                (agent ? agent.role : data.agent);
-
-            // Show elapsed time from last stats update
-            const elapsedEl = document.getElementById('result-elapsed');
-            if (this._lastElapsed !== undefined) {
-                elapsedEl.textContent = this._lastElapsed.toFixed(1) + 's';
-            } else {
-                elapsedEl.textContent = '';
-            }
-
-            // Render markdown-like formatting
-            const bodyEl = document.getElementById('result-body');
-            bodyEl.innerHTML = this._renderResult(data.result || '');
-
-            panel.classList.remove('hidden');
-
-            // Check overflow to control the fade gradient
-            const wrap = document.getElementById('result-body-wrap');
-            // Use rAF so the DOM has painted and scrollHeight is accurate
-            requestAnimationFrame(() => {
-                const overflows = bodyEl.scrollHeight > bodyEl.clientHeight;
-                wrap.classList.toggle('no-overflow', !overflows);
-                // Also hide fade when user scrolls to the bottom
-                bodyEl.addEventListener('scroll', () => {
-                    const atBottom = bodyEl.scrollHeight - bodyEl.scrollTop <= bodyEl.clientHeight + 2;
-                    wrap.classList.toggle('no-overflow', atBottom);
-                }, { passive: true });
-            });
-        }
+        if (isConsensus) return;
     }
 
     _handleStats(data) {
@@ -628,13 +605,16 @@ class Dashboard {
         if (statuses.every(s => s === 'completed')) {
             el.textContent = 'Done';
             el.className   = 'stat-value status-done';
+            this.graph.setRunState('completed');
             this._setRunActive(false);
         } else if (statuses.some(s => s === 'running')) {
             el.textContent = 'Running';
             el.className   = 'stat-value status-running';
+            this.graph.setRunState('running');
         } else {
             el.textContent = 'Waiting';
             el.className   = 'stat-value status-waiting';
+            this.graph.setRunState(this._isRunActive ? 'running' : 'idle');
         }
         this._setText('hero-status-label', this._statusText());
     }
@@ -751,6 +731,38 @@ class Dashboard {
                 <div class="empty-state-copy">${this._escapeHtml(text)}</div>
             </div>
         `;
+    }
+
+    _addRunCompleteActivity(data) {
+        if (!this.messageLog || !data?.result) return;
+        if (data.hydrated) {
+            if (this.messageLog.querySelector('[data-activity-kind="run-complete"]')) return;
+        } else {
+            const existing = this.messageLog.querySelector('[data-activity-kind="run-complete"]');
+            if (existing) existing.remove();
+        }
+
+        const empty = this.messageLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        const preview = String(data.result || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+        const entry = document.createElement('div');
+        entry.className = 'msg-entry msg-entry-run-complete';
+        entry.dataset.activityKind = 'run-complete';
+        entry.innerHTML = `
+            <div class="msg-header">
+                <span class="msg-time">${(data.elapsed || 0).toFixed(1)}s</span>
+                <span class="msg-type-badge msg-type-complete">complete</span>
+                <span class="msg-stage-pill msg-stage-complete">done</span>
+            </div>
+            <div class="msg-preview"><strong>Run complete</strong> by ${this._escapeHtml(data.agent || 'runtime')}</div>
+            <div class="msg-expanded" style="display:block">
+                <div class="msg-section-label">Summary</div>
+                <div class="msg-full-content">${this._escapeHtml(preview)}${preview.length >= 180 ? '…' : ''}</div>
+            </div>
+        `;
+        this.messageLog.appendChild(entry);
+        this.messageLog.scrollTop = this.messageLog.scrollHeight;
     }
 
     // ── Message log ───────────────────────────────────────────
@@ -1270,6 +1282,7 @@ class Dashboard {
         if (this._isRunActive) return;
         const dd = document.getElementById('topology-dropdown');
         const menu = document.getElementById('topology-menu');
+        if (!dd || !menu) return;
 
         if (dd.classList.contains('open')) {
             dd.classList.remove('open');
@@ -1288,22 +1301,50 @@ class Dashboard {
 
             dd.classList.add('open');
             menu.classList.remove('hidden');
+            this._positionTopologyMenu();
         }
+    }
+
+    _positionTopologyMenu() {
+        const dd = document.getElementById('topology-dropdown');
+        const menu = document.getElementById('topology-menu');
+        if (!dd || !menu || menu.classList.contains('hidden')) return;
+
+        dd.classList.remove('open-up');
+        menu.style.maxHeight = '';
+
+        const dropdownRect = dd.getBoundingClientRect();
+        const menuRect = menu.getBoundingClientRect();
+        const viewportHeight = window.innerHeight;
+        const spaceBelow = viewportHeight - dropdownRect.bottom - 16;
+        const spaceAbove = dropdownRect.top - 16;
+        const shouldOpenUp = menuRect.height > spaceBelow && spaceAbove > spaceBelow;
+        const available = Math.max(160, shouldOpenUp ? spaceAbove - 10 : spaceBelow - 10);
+
+        dd.classList.toggle('open-up', shouldOpenUp);
+        menu.style.maxHeight = `${Math.min(available, Math.max(220, viewportHeight * 0.52))}px`;
     }
 
     _setRunActive(active) {
         this._isRunActive = active;
         const send = document.getElementById('query-send');
-        const stop = document.getElementById('query-stop');
+        const sendLabel = send?.querySelector('.query-action-label');
         const input = document.getElementById('query-input');
-        send.classList.remove('hidden');
-        stop.classList.toggle('hidden', !active);
+        const newSessionButton = document.getElementById('new-session-button');
+        if (send) {
+            send.classList.toggle('is-stop', active);
+            send.title = active ? 'Stop run' : 'Run (Enter)';
+            send.disabled = false;
+        }
+        if (sendLabel) sendLabel.textContent = active ? 'Stop' : 'Execute';
         input.disabled = false;
+        if (newSessionButton) newSessionButton.disabled = active;
         input.placeholder = active
             ? 'Send a follow-up or use @node to direct a message…'
             : 'Describe a task for the agents…';
         if (!active) this._hideLoader();
         this._setText('hero-status-label', active ? 'Running' : this._statusText());
+        this.graph.setRunState(active ? 'running' : (this._statusText() === 'Done' ? 'completed' : 'idle'));
 
         // Close and disable/enable topology dropdown
         document.getElementById('topology-trigger').classList.toggle('disabled', active);
@@ -1312,6 +1353,14 @@ class Dashboard {
             document.getElementById('topology-menu').classList.add('hidden');
         }
         this._updateMentionSuggestions();
+    }
+
+    _handlePrimaryQueryAction() {
+        if (this._isRunActive) {
+            this._stopRun();
+            return;
+        }
+        this._submitQuery();
     }
 
     _showLoader(text = 'Starting agents…') {
@@ -1357,7 +1406,7 @@ class Dashboard {
         this._setMessageEmptyState('Waiting for the runtime to build the graph and emit activity.');
         this._renderPlanningState();
         this.agents = {};
-        this.graph.setTopology([], []);
+        this.graph.setTopology([], [], null);
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
         document.getElementById('communications-panel')?.classList.remove('node-panel-active');
         const emptyInspector = document.getElementById('node-detail-empty');
@@ -1402,30 +1451,66 @@ class Dashboard {
         }
     }
 
+    async _createNewSession() {
+        if (this._isRunActive) return;
+        const button = document.getElementById('new-session-button');
+        const previousLabel = button?.textContent || 'New Session';
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Starting…';
+        }
+        try {
+            const res = await fetch('/api/session/new', { method: 'POST' });
+            let data = null;
+            try {
+                data = await res.json();
+            } catch (_err) {
+                data = { ok: false, error: `New session endpoint returned ${res.status}. The daemon may need a restart.` };
+            }
+            if (!data.ok) {
+                document.getElementById('result-agent').textContent = 'Session Error';
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').textContent = data.error || 'Failed to start a new session.';
+                document.getElementById('result-panel').classList.remove('hidden');
+                return;
+            }
+            this._resetForSession(data.init || {});
+        } finally {
+            if (button) {
+                button.textContent = previousLabel;
+                button.disabled = this._isRunActive;
+            }
+        }
+    }
+
     // ── Stop run ──────────────────────────────────────────────
 
     async _stopRun() {
-        const btn = document.getElementById('query-stop');
+        const btn = document.getElementById('query-send');
+        const label = btn?.querySelector('.query-action-label');
         btn.disabled = true;
-        btn.textContent = 'Stopping…';
+        if (label) label.textContent = 'Stopping…';
         await fetch('/api/stop', { method: 'POST' });
     }
 
     _handleStopped() {
         this._clearThinking();
         this._setRunActive(false);
+        this.graph.setRunState('idle');
         const el = document.getElementById('stat-status');
         el.textContent = 'Stopped';
         el.className = 'stat-value status-error';
         this._setText('hero-status-label', 'Stopped');
-        const btn = document.getElementById('query-stop');
+        const btn = document.getElementById('query-send');
+        const label = btn?.querySelector('.query-action-label');
         btn.disabled = false;
-        btn.textContent = 'Stop';
+        if (label) label.textContent = 'Execute';
     }
 
     _handleRunComplete(data) {
         this._clearThinking();
         this._setRunActive(false);
+        this.graph.setRunState('completed');
         this._updateSessionUrl(data.session_id || '');
 
         // Force status to Done
@@ -1446,12 +1531,11 @@ class Dashboard {
 
         const diff = data.diff || '';
         this._renderInitialCodeChanges(result, diff, elapsed, sessionTurn);
-
-        // Also update the result panel
-        document.getElementById('result-agent').textContent = 'Final Result';
-        document.getElementById('result-elapsed').textContent = elapsed;
-        document.getElementById('result-body').innerHTML = this._renderResult(result);
-        document.getElementById('result-panel').classList.remove('hidden');
+        this._addRunCompleteActivity({
+            agent: data.agent || 'run',
+            elapsed: data.elapsed || 0,
+            result,
+        });
     }
 
     _renderInitialCodeChanges(result, diff, elapsed = '', sessionTurn = 0) {
@@ -1463,7 +1547,7 @@ class Dashboard {
             ? `<span class="followup-hint">↩ type a follow-up to continue this session</span>`
             : '';
         const el = document.createElement('div');
-        el.className = 'final-result-card';
+        el.className = 'final-result-card final-result-card-complete';
         const diffFiles = diff ? this._parseDiffFiles(diff) : [];
         el.innerHTML = `
             <div class="final-result-header">
@@ -1515,6 +1599,47 @@ class Dashboard {
             }])
         );
         this._renderLiveCodeChanges();
+    }
+
+    _resetForSession(data) {
+        this._closeSettings();
+        this._hideLoader();
+        this._clearThinking();
+        this._thinkingAgent = null;
+        this._rawMessages = [];
+        this._agentActivityLines = {};
+        this._plan = null;
+        this._planSteps = [];
+        this._fileChanges = new Map();
+        this.agents = {};
+        this.selectedAgent = null;
+        this._isRunActive = false;
+        this.messageLog.innerHTML = '';
+        if (this.changesLog) this.changesLog.innerHTML = '';
+        this._setChangesEmptyState();
+        this._setMessageEmptyState();
+        this._handleStats({ message_count: 0, budget_remaining: 200, elapsed: 0 });
+        const statusEl = document.getElementById('stat-status');
+        if (statusEl) {
+            statusEl.textContent = 'Waiting';
+            statusEl.className = 'stat-value status-waiting';
+        }
+        document.getElementById('result-panel').classList.add('hidden');
+        document.getElementById('question-panel').classList.add('hidden');
+        document.getElementById('node-detail-panel').classList.add('ndp-closed');
+        document.getElementById('communications-panel')?.classList.remove('node-panel-active');
+        const emptyInspector = document.getElementById('node-detail-empty');
+        if (emptyInspector) emptyInspector.classList.remove('hidden');
+        this.graph.selectedNode = null;
+        this.graph.setTopology([], [], null);
+        this.graph.setRunState('idle');
+        this._selectedTopology = 'auto';
+        this._updateTopologyTrigger();
+        this._updateWorkdir('', data.session_id || '', data.session_generation || 1, data.session_turn || 0);
+        this._setText('hero-status-label', 'Waiting');
+        this._setText('hero-topology-label', 'Auto');
+        document.getElementById('stat-topology').textContent = 'Auto';
+        this._updateSessionUrl(data.session_id || '');
     }
 
     _renderLiveCodeChanges() {

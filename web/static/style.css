@@ -268,6 +268,34 @@ a {
     flex: 0 0 auto;
 }
 
+#new-session-button {
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(27, 32, 37, 0.88);
+    box-shadow: inset 0 0 0 1px var(--outline-soft);
+    color: var(--text-secondary);
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+#new-session-button:hover {
+    color: var(--primary);
+    box-shadow: inset 0 0 0 1px rgba(172, 199, 255, 0.18);
+}
+
+#new-session-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 #settings-button:hover {
     color: var(--primary);
 }
@@ -311,6 +339,10 @@ a {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+#changes-panel {
+    overflow: visible;
 }
 
 .side-column-header {
@@ -393,6 +425,10 @@ a {
     flex-direction: column;
     gap: 18px;
     padding: 0 16px 16px;
+}
+
+#changes-panel-body {
+    overflow: visible;
 }
 
 #communications-panel-body {
@@ -601,6 +637,7 @@ a {
 #topology-dropdown {
     position: relative;
     pointer-events: auto;
+    z-index: 12;
 }
 
 #topology-trigger {
@@ -651,6 +688,9 @@ a {
     top: calc(100% + 10px);
     right: 0;
     width: min(360px, 70vw);
+    max-height: min(420px, 52vh);
+    overflow-y: auto;
+    overflow-x: hidden;
     padding: 10px;
     border-radius: 18px;
     box-shadow:
@@ -659,6 +699,12 @@ a {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    z-index: 20;
+}
+
+#topology-dropdown.open-up #topology-menu {
+    top: auto;
+    bottom: calc(100% + 10px);
 }
 
 .topo-menu-warning {
@@ -821,6 +867,7 @@ body.is-resizing-panels {
 
 #query-container {
     position: relative;
+    overflow: visible;
     margin-top: 14px;
     padding: 14px;
     border-radius: 18px;
@@ -924,16 +971,13 @@ body.is-resizing-panels {
     cursor: pointer;
 }
 
-#query-stop {
-    min-width: 96px;
-    padding: 11px 16px;
-    border-radius: 12px;
+#query-send.is-stop {
     background: rgba(255, 180, 171, 0.12);
     color: var(--error);
-    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(255, 180, 171, 0.18);
 }
 
-#query-stop:disabled {
+#query-send:disabled {
     opacity: 0.7;
     cursor: wait;
 }
@@ -1635,6 +1679,24 @@ pre {
     line-height: 1.7;
 }
 
+.final-result-card-complete {
+    background:
+        linear-gradient(180deg, rgba(20, 37, 30, 0.96), rgba(11, 22, 18, 0.98)),
+        rgba(10, 15, 19, 0.7);
+    box-shadow:
+        0 22px 38px -32px rgba(0, 0, 0, 0.9),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+        inset 0 0 0 1px rgba(125, 226, 167, 0.18);
+}
+
+.final-result-card-complete .final-result-title {
+    color: var(--success);
+}
+
+.final-result-card-complete .final-result-header {
+    padding-bottom: 2px;
+}
+
 #result-panel,
 #question-panel {
     padding: 18px;
@@ -1879,6 +1941,13 @@ pre {
     flex-direction: column;
     overflow: hidden;
     z-index: 6;
+    border-radius: 22px 0 0 22px;
+    background:
+        radial-gradient(circle at top right, rgba(172, 199, 255, 0.08), transparent 22%),
+        linear-gradient(180deg, rgba(22, 28, 34, 0.98), rgba(11, 16, 20, 0.98));
+    box-shadow:
+        -20px 0 48px -34px rgba(0, 0, 0, 0.92),
+        inset 1px 0 0 rgba(255, 255, 255, 0.03);
     transition: opacity 220ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1), visibility 220ms ease;
 }
 
@@ -1916,29 +1985,34 @@ pre {
     align-items: stretch;
     gap: 0;
     border-bottom: 1px solid rgba(65, 71, 84, 0.14);
+    background: linear-gradient(180deg, rgba(24, 30, 36, 0.92), rgba(18, 24, 29, 0.78));
+    backdrop-filter: blur(18px);
 }
 
 #ndp-accent {
-    width: 5px;
+    width: 6px;
     background: var(--primary);
     flex: 0 0 auto;
+    box-shadow: 0 0 28px rgba(172, 199, 255, 0.28);
 }
 
 #ndp-header-body {
     flex: 1;
     min-width: 0;
-    padding: 18px;
+    padding: 22px 20px 18px;
 }
 
 #ndp-title-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
 }
 
 #ndp-role {
     font-family: "Space Grotesk", sans-serif;
-    font-size: 22px;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     flex: 1;
 }
 
@@ -1947,11 +2021,13 @@ pre {
 .ndp-badge-running,
 .ndp-badge-completed,
 .ndp-badge-error {
-    padding: 5px 10px;
+    padding: 6px 11px;
     border-radius: 999px;
-    font-size: 11px;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.16em;
+    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.12);
 }
 
 .ndp-badge-idle {
@@ -1979,14 +2055,15 @@ pre {
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    margin-top: 10px;
+    margin-top: 12px;
 }
 
 #ndp-summary {
-    margin-top: 12px;
+    margin-top: 14px;
     color: var(--text-secondary);
     font-size: 13px;
-    line-height: 1.6;
+    line-height: 1.7;
+    max-width: 48ch;
 }
 
 #ndp-body {
@@ -1994,11 +2071,28 @@ pre {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    padding: 8px 0 0;
 }
 
 .ndp-section {
-    padding: 18px;
-    border-bottom: 1px solid rgba(65, 71, 84, 0.12);
+    margin: 0 14px 14px;
+    padding: 16px;
+    border-radius: 18px;
+    border-bottom: 0;
+    background:
+        linear-gradient(180deg, rgba(20, 26, 31, 0.92), rgba(13, 18, 23, 0.92));
+    box-shadow:
+        0 18px 34px -30px rgba(0, 0, 0, 0.84),
+        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+        inset 0 0 0 1px rgba(65, 71, 84, 0.12);
+}
+
+.ndp-section-label {
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--text-muted);
 }
 
 #ndp-overview-grid,
@@ -2013,8 +2107,10 @@ pre {
 .ndp-comm-card {
     padding: 14px;
     border-radius: 16px;
-    background: rgba(10, 15, 19, 0.56);
-    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.12);
+    background: rgba(9, 14, 18, 0.74);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.02),
+        inset 0 0 0 1px rgba(65, 71, 84, 0.12);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -2023,7 +2119,8 @@ pre {
 .ndp-overview-value,
 .ndp-comm-value {
     font-family: "Space Grotesk", sans-serif;
-    font-size: 20px;
+    font-size: 22px;
+    letter-spacing: 0.01em;
 }
 
 .ndp-overview-note,
@@ -2044,20 +2141,23 @@ pre {
     margin-top: 12px;
     padding: 16px;
     border-radius: 16px;
-    background: rgba(10, 15, 19, 0.56);
-    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.12);
+    background: rgba(9, 14, 18, 0.74);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.02),
+        inset 0 0 0 1px rgba(65, 71, 84, 0.12);
 }
 
 .ndp-topology-node {
     font-family: "JetBrains Mono", monospace;
     color: var(--text-primary);
+    font-size: 12px;
 }
 
 .ndp-topology-copy {
     margin-top: 12px;
     color: var(--text-secondary);
     font-size: 13px;
-    line-height: 1.6;
+    line-height: 1.7;
 }
 
 .ndp-neighbor-row,
@@ -2075,7 +2175,8 @@ pre {
 .ndp-edge-item {
     padding: 8px 10px;
     border-radius: 12px;
-    background: rgba(27, 32, 37, 0.88);
+    background: rgba(27, 32, 37, 0.76);
+    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.1);
 }
 
 #ndp-message-list {
@@ -2088,8 +2189,10 @@ pre {
 .ndp-msg-entry {
     padding: 14px;
     border-radius: 16px;
-    background: rgba(10, 15, 19, 0.56);
-    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.12);
+    background: rgba(9, 14, 18, 0.74);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.02),
+        inset 0 0 0 1px rgba(65, 71, 84, 0.12);
 }
 
 .ndp-msg-header {
@@ -2097,11 +2200,17 @@ pre {
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    font-size: 12px;
+    font-size: 11px;
 }
 
 .ndp-msg-type {
     margin-left: auto;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
 }
 
 .ndp-msg-meta {
@@ -2113,6 +2222,9 @@ pre {
 
 .ndp-msg-preview {
     margin-top: 10px;
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.6;
 }
 
 .ndp-msg-details {
@@ -2122,19 +2234,27 @@ pre {
 .ndp-msg-details summary {
     cursor: pointer;
     color: var(--primary);
-    font-size: 12px;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
 }
 
 .ndp-msg-full {
     margin-top: 10px;
     padding: 12px;
     border-radius: 14px;
-    background: rgba(27, 32, 37, 0.92);
+    background: rgba(27, 32, 37, 0.76);
     overflow: auto;
 }
 
 #ndp-result-body {
     margin-top: 12px;
+    padding: 14px;
+    border-radius: 14px;
+    background: rgba(9, 14, 18, 0.74);
+    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.12);
+    line-height: 1.7;
 }
 
 #ndp-chat-row,
@@ -2146,15 +2266,17 @@ pre {
 }
 
 #ndp-chat-row {
-    padding: 18px;
+    padding: 16px 14px 18px;
     border-top: 1px solid rgba(65, 71, 84, 0.12);
+    background: linear-gradient(180deg, rgba(17, 22, 27, 0.72), rgba(12, 17, 22, 0.94));
 }
 
 #ndp-chat-label {
     grid-column: 1 / -1;
-    font-size: 12px;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.16em;
     color: var(--text-muted);
 }
 
@@ -2162,8 +2284,10 @@ pre {
 #question-reply {
     padding: 12px 14px;
     border-radius: 14px;
-    background: rgba(10, 15, 19, 0.64);
-    box-shadow: inset 0 -1px 0 rgba(65, 71, 84, 0.22);
+    background: rgba(10, 15, 19, 0.78);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.02),
+        inset 0 0 0 1px rgba(65, 71, 84, 0.14);
 }
 
 #question-body {
@@ -2512,8 +2636,7 @@ pre {
 
     #query-send,
     #ndp-chat-send,
-    #question-send,
-    #query-stop {
+    #question-send {
         min-width: 88px;
         padding: 8px 12px;
         font-size: 10px;

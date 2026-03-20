@@ -99,11 +99,71 @@ class GraphRuntime:
                 "order": topo.graph_view.order,
             }
 
-        # Auto-generate a basic fallback when no graph_view is defined
+        # Auto-generate a layered fallback when no graph_view is defined.
+        # This keeps simple topologies like triad branched instead of stacked
+        # one node per row in the dashboard.
         order = list(topo.agents.keys())
-        rows: list[list[dict]] = []
+        if not order:
+            return {"rows": [], "order": []}
+
+        root = topo.entry_agent if topo.entry_agent in topo.agents else order[0]
+        outgoing: dict[str, list[str]] = {agent_id: [] for agent_id in order}
+        incoming: dict[str, list[str]] = {agent_id: [] for agent_id in order}
+        for edge in topo.edges:
+            if isinstance(edge, tuple) and len(edge) == 2:
+                source, target = edge
+            else:
+                source = getattr(edge, "a", None)
+                target = getattr(edge, "b", None)
+            if source in outgoing and target in outgoing:
+                outgoing[source].append(target)
+                incoming[target].append(source)
+
+        layers: dict[str, int] = {root: 0}
+        queue: list[str] = [root]
+        while queue:
+            current = queue.pop(0)
+            depth = layers[current]
+            for nxt in outgoing.get(current, []):
+                if nxt not in layers:
+                    layers[nxt] = depth + 1
+                    queue.append(nxt)
+
+        def infer_layer(agent_id: str) -> int:
+            agent = topo.agents[agent_id]
+            category = (agent.category or "").lower()
+            role = (agent.role or agent_id).lower()
+            key = f"{category} {role}"
+            if "entry" in key or "coordinator" in key:
+                return 0
+            if "discovery" in key or "research" in key:
+                return 1
+            if "implement" in key or "coder" in key or "worker" in key:
+                return 2
+            if "review" in key or "validation" in key or "test" in key:
+                return 3
+            return 2
+
         for agent_id in order:
-            rows.append([{"node": agent_id}])
+            if agent_id not in layers:
+                parent_layers = [layers[parent] for parent in incoming.get(agent_id, []) if parent in layers]
+                layers[agent_id] = (min(parent_layers) + 1) if parent_layers else infer_layer(agent_id)
+
+        unique_layers = sorted(set(layers.values()))
+        positions: dict[str, int] = {root: 0}
+        rows: list[list[dict]] = []
+        for layer in unique_layers:
+            row_ids = [agent_id for agent_id in order if layers.get(agent_id) == layer]
+            row_ids.sort(
+                key=lambda agent_id: (
+                    sum(positions[parent] for parent in incoming.get(agent_id, []) if parent in positions)
+                    / max(1, len([parent for parent in incoming.get(agent_id, []) if parent in positions])),
+                    order.index(agent_id),
+                )
+            )
+            for index, agent_id in enumerate(row_ids):
+                positions[agent_id] = index
+            rows.append([{"node": agent_id} for agent_id in row_ids])
         return {"rows": rows, "order": order}
 
     @staticmethod
@@ -639,6 +699,26 @@ class GraphRuntime:
             await self._broadcast(json.dumps({"type": "stopped"}))
             return {"ok": True}
         return {"ok": False, "error": "No run in progress"}
+
+    async def new_session(self) -> tuple[int, dict]:
+        if self.running:
+            return 409, {"ok": False, "error": "Cannot start a new session while a run is in progress"}
+
+        self.state.reset()
+        self._agents = {}
+        self._last_result = None
+        self._conversation_session = ConversationSession()
+        self._run_transcript = RunTranscript(session=self._conversation_session)
+        self._persist_session()
+        self._sync_session_state()
+        self._persist_dashboard_snapshot(run_active=False)
+        return 200, {
+            "ok": True,
+            "session_id": self._conversation_session.session_id,
+            "session_generation": self._conversation_session.generation,
+            "session_turn": self._conversation_session.user_turn_count(),
+            "init": self.current_init_event(session_id=self._conversation_session.session_id),
+        }
 
     def models_payload(self) -> dict:
         from orb.llm.types import ANTHROPIC_MODEL_LABELS, ANTHROPIC_PROVIDER, ANTHROPIC_MODELS

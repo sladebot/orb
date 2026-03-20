@@ -54,6 +54,7 @@
                 <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
                 <span id="connection-label">Daemon Offline</span>
             </div>
+            <button id="new-session-button" type="button" title="Start a new session">New Session</button>
             <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
         </header>
 
@@ -74,6 +75,18 @@
 
                 <div id="changes-panel-body">
                     <div id="changes-log"></div>
+                </div>
+
+                <div id="question-panel" class="hidden">
+                    <div id="question-header">
+                        <span id="question-from">agent is asking</span>
+                        <button id="question-dismiss" title="Dismiss">×</button>
+                    </div>
+                    <div id="question-body"></div>
+                    <div id="question-reply-row">
+                        <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                        <button id="question-send">Reply</button>
+                    </div>
                 </div>
 
                 <div id="query-bar">
@@ -104,7 +117,6 @@
                             <button id="query-send" title="Run (Enter)">
                                 <span class="query-action-label">Execute</span>
                             </button>
-                            <button id="query-stop" class="hidden" title="Stop run">Stop</button>
                         </div>
                     </div>
                 </div>
@@ -246,18 +258,6 @@
                             <div id="ndp-chat-label">Send input directly to this node</div>
                             <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
                             <button id="ndp-chat-send">Send</button>
-                        </div>
-                    </div>
-
-                    <div id="question-panel" class="hidden">
-                        <div id="question-header">
-                            <span id="question-from">agent is asking</span>
-                            <button id="question-dismiss" title="Dismiss">×</button>
-                        </div>
-                        <div id="question-body"></div>
-                        <div id="question-reply-row">
-                            <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
-                            <button id="question-send">Reply</button>
                         </div>
                     </div>
 

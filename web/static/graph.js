@@ -13,8 +13,10 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const NODE_W = 188;
-const NODE_H = 82;
+const NODE_W = 136;
+const NODE_H = 44;
+const CORE_NODE_W = 154;
+const CORE_NODE_H = 50;
 const NODE_RADIUS = 16;
 const PARTICLE_DURATION = 900; // ms
 
@@ -66,6 +68,10 @@ function statusColor(status, fallback) {
     return STATUS_COLORS[status] || fallback;
 }
 
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
 function easeInOutCubic(t) {
     return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
@@ -95,13 +101,22 @@ function edgeControlPoints(src, tgt) {
 
 /** Find the point on the border of a node in the direction of another point. */
 function nodeEdgePoint(node, other) {
-    const cx = node.x;
-    const cy = node.y;
-    const dx = other.x - cx;
-    const dy = other.y - cy;
-    const dist = Math.hypot(dx, dy) || 1;
-    const r = node.renderRadius || NODE_RADIUS;
-    return { x: cx + (dx / dist) * r, y: cy + (dy / dist) * r };
+    const halfW = (node.w || NODE_W) / 2;
+    const halfH = (node.h || NODE_H) / 2;
+    const dx = other.x - node.x;
+    const dy = other.y - node.y;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+        return {
+            x: node.x + Math.sign(dx || 1) * halfW,
+            y: node.y + clamp(dy, -halfH * 0.55, halfH * 0.55),
+        };
+    }
+
+    return {
+        x: node.x + clamp(dx, -halfW * 0.55, halfW * 0.55),
+        y: node.y + Math.sign(dy || 1) * halfH,
+    };
 }
 
 /** Draw a rounded rectangle path. */
@@ -132,6 +147,7 @@ class GraphRenderer {
 
         this.selectedNode = null;
         this.onNodeClick = null;
+        this.graphView = null;
 
         this._hoveredId = null;
         this._rafId = null;
@@ -142,6 +158,10 @@ class GraphRenderer {
         this.maxZoom = 1.8;
         this.offsetX = 0;
         this.offsetY = 0;
+        this.runState = 'idle';
+        this.runStateChangedAt = performance.now();
+        this._layoutRows = [];
+        this._layoutBands = [];
 
         this._setupEvents();
         this._resize();
@@ -154,10 +174,15 @@ class GraphRenderer {
 
     // ── Public API ───────────────────────────────────────────────────────────
 
-    setTopology(agents, edges) {
+    setTopology(agents, edges, graphView = null) {
         this.nodes = {};
         this.edges = edges || [];
         this.particles = [];
+        this.graphView = graphView || null;
+        this.selectedNode = null;
+        this.zoom = 1;
+        this.offsetX = 0;
+        this.offsetY = 0;
 
         for (const agent of agents) {
             const id = agent.id;
@@ -169,6 +194,8 @@ class GraphRenderer {
                 msgCount:     agent.msg_count || 0,
                 lastActivity: '',
                 x: 0, y: 0,
+                w: id === 'coordinator' ? CORE_NODE_W : NODE_W,
+                h: id === 'coordinator' ? CORE_NODE_H : NODE_H,
                 pulseStart: null,
                 thinking:   false,
                 color: agentColor(id),
@@ -189,6 +216,13 @@ class GraphRenderer {
     updateAgentActivity(agentId, preview) {
         const n = this.nodes[agentId];
         if (n) n.lastActivity = preview || '';
+    }
+
+    setRunState(nextState) {
+        const normalized = nextState || 'idle';
+        if (this.runState === normalized) return;
+        this.runState = normalized;
+        this.runStateChangedAt = performance.now();
     }
 
     setNodeThinking(agentId, thinking) {
@@ -233,25 +267,209 @@ class GraphRenderer {
         const n = ids.length;
 
         if (n === 0) return;
-        const cx = W / 2;
-        const cy = H / 2;
-        const hasCoordinator = Boolean(this.nodes.coordinator);
-        const ringIds = hasCoordinator ? ids.filter((id) => id !== 'coordinator') : ids;
-        const ringCount = ringIds.length;
-        const radius = Math.max(140, Math.min(W, H) * 0.29);
+        if (this._layoutGraphView(W, H)) return;
+        this._layoutLayered(W, H);
+    }
 
-        if (hasCoordinator) {
-            this.nodes.coordinator.x = cx;
-            this.nodes.coordinator.y = cy;
+    _layoutGraphView(W, H) {
+        const rows = this.graphView?.rows;
+        if (!Array.isArray(rows) || !rows.length) return false;
+        const nodeIds = new Set(Object.keys(this.nodes));
+
+        const populatedRows = rows.filter((row) => Array.isArray(row) && row.some((item) => item?.node));
+        if (!populatedRows.length) return false;
+
+        const laneTop = 116;
+        const laneBottom = H - 92;
+        const rowGap = populatedRows.length === 1
+            ? 0
+            : Math.max(100, Math.min(156, (laneBottom - laneTop) / Math.max(populatedRows.length - 1, 1)));
+        const top = populatedRows.length === 1 ? H * 0.46 : laneTop;
+        const placed = new Set();
+        this._layoutRows = [];
+        this._layoutBands = [];
+        const left = 84;
+        const right = W - 84;
+        const usableWidth = Math.max(220, right - left);
+
+        populatedRows.forEach((row, rowIndex) => {
+            if (!Array.isArray(row)) return;
+            const y = top + rowIndex * rowGap;
+            const rowNodes = row
+                .map((item) => item?.node)
+                .filter(Boolean)
+                .filter((id) => this.nodes[id]);
+            if (!rowNodes.length) return;
+            const count = rowNodes.length;
+            const preferredGap = count <= 2 ? 248 : count <= 4 ? 204 : 180;
+            const usedWidth = Math.min(usableWidth, Math.max(180, (count - 1) * preferredGap));
+            const startX = W / 2 - usedWidth / 2;
+            const step = count === 1 ? 0 : usedWidth / Math.max(count - 1, 1);
+            this._layoutRows.push(y);
+            this._layoutBands.push({ y, top: y - 38, bottom: y + 38 });
+
+            rowNodes.forEach((id, index) => {
+                const node = this.nodes[id];
+                node.x = count === 1 ? W / 2 : startX + index * step;
+                node.y = y;
+                node.w = id === 'coordinator' ? CORE_NODE_W : NODE_W;
+                node.h = id === 'coordinator' ? CORE_NODE_H : NODE_H;
+                placed.add(id);
+            });
+        });
+
+        const unplaced = [...nodeIds].filter((id) => !placed.has(id));
+        if (!unplaced.length) return true;
+
+        const fallbackY = Math.min(H - 72, top + rows.length * rowGap);
+        const gap = W / (unplaced.length + 1);
+        unplaced.forEach((id, index) => {
+            this.nodes[id].x = gap * (index + 1);
+            this.nodes[id].y = fallbackY;
+            this.nodes[id].w = id === 'coordinator' ? CORE_NODE_W : NODE_W;
+            this.nodes[id].h = id === 'coordinator' ? CORE_NODE_H : NODE_H;
+        });
+        return true;
+    }
+
+    _layoutLayered(W, H) {
+        const ids = Object.keys(this.nodes);
+        const root = this.nodes.coordinator ? 'coordinator' : (ids[0] || null);
+        const outgoing = new Map(ids.map((id) => [id, []]));
+        const incoming = new Map(ids.map((id) => [id, []]));
+        const linked = new Map(ids.map((id) => [id, new Set()]));
+        for (const edge of this.edges) {
+            if (outgoing.has(edge.source)) outgoing.get(edge.source).push(edge.target);
+            if (incoming.has(edge.target)) incoming.get(edge.target).push(edge.source);
+            if (linked.has(edge.source) && linked.has(edge.target)) {
+                linked.get(edge.source).add(edge.target);
+                linked.get(edge.target).add(edge.source);
+            }
         }
 
-        ringIds.forEach((id, i) => {
-            const angleOffset = hasCoordinator ? -Math.PI / 2 : -Math.PI / 2 - Math.PI / 8;
-            const angle = angleOffset + (2 * Math.PI * i) / Math.max(ringCount, 1);
-            const nodeRadius = radius * (i % 2 === 0 ? 1 : 0.9);
-            this.nodes[id].x = cx + nodeRadius * Math.cos(angle);
-            this.nodes[id].y = cy + nodeRadius * Math.sin(angle);
+        const layers = new Map();
+        if (root) {
+            const queue = [root];
+            layers.set(root, 0);
+            while (queue.length) {
+                const current = queue.shift();
+                const depth = layers.get(current) || 0;
+                for (const next of outgoing.get(current) || []) {
+                    if (!layers.has(next)) {
+                        layers.set(next, depth + 1);
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+
+        const inferLayer = (id, role = '') => {
+            const key = `${id} ${role}`.toLowerCase();
+            if (key.includes('coordinator')) return 0;
+            if (key.includes('research')) return 1;
+            if (key.includes('coder') || key.includes('implement')) return 2;
+            if (key.includes('review') || key.includes('test') || key.includes('validat')) return 3;
+            return 2;
+        };
+
+        ids.forEach((id) => {
+            if (layers.has(id)) return;
+            const neighborLayers = [...(linked.get(id) || [])]
+                .map((neighbor) => layers.get(neighbor))
+                .filter((value) => Number.isFinite(value));
+            if (neighborLayers.length) layers.set(id, Math.min(...neighborLayers) + 1);
+            else layers.set(id, inferLayer(id, this.nodes[id].role));
         });
+
+        const uniqueLayers = [...new Set([...layers.values()].sort((a, b) => a - b))];
+        const positions = new Map(root ? [[root, 0]] : []);
+        const rows = uniqueLayers.map((layer) => {
+            const row = ids.filter((id) => layers.get(id) === layer);
+            row.sort((a, b) => {
+                const aParents = (incoming.get(a) || []).filter((id) => positions.has(id));
+                const bParents = (incoming.get(b) || []).filter((id) => positions.has(id));
+                const aPos = aParents.length ? aParents.reduce((sum, id) => sum + positions.get(id), 0) / aParents.length : Number.POSITIVE_INFINITY;
+                const bPos = bParents.length ? bParents.reduce((sum, id) => sum + positions.get(id), 0) / bParents.length : Number.POSITIVE_INFINITY;
+                if (aPos !== bPos) return aPos - bPos;
+                return a.localeCompare(b);
+            });
+            row.forEach((id, index) => positions.set(id, index));
+            return row;
+        });
+        const left = 72;
+        const right = W - 72;
+        const usableWidth = Math.max(240, right - left);
+        const layoutLines = [];
+
+        rows.forEach((row) => {
+            const rowMaxPerLine = row.length <= 5
+                ? row.length
+                : Math.max(3, Math.floor((usableWidth + 44) / 184));
+            for (let i = 0; i < row.length; i += rowMaxPerLine) {
+                layoutLines.push(row.slice(i, i + rowMaxPerLine));
+            }
+        });
+
+        const top = 118;
+        const bottom = H - 88;
+        const usableHeight = Math.max(180, bottom - top);
+        const rowGap = layoutLines.length === 1
+            ? 0
+            : Math.max(108, Math.min(164, usableHeight / Math.max(layoutLines.length - 1, 1)));
+        this._layoutRows = [];
+        this._layoutBands = [];
+
+        layoutLines.forEach((row, rowIndex) => {
+            const y = layoutLines.length === 1 ? H * 0.48 : top + rowIndex * rowGap;
+            const count = row.length;
+            this._layoutRows.push(y);
+            this._layoutBands.push({ y, top: y - 38, bottom: y + 38 });
+
+            row.forEach((id, index) => {
+                const node = this.nodes[id];
+                node.w = id === 'coordinator' ? CORE_NODE_W : NODE_W;
+                node.h = id === 'coordinator' ? CORE_NODE_H : NODE_H;
+                node.y = y;
+                node.x = count === 1 ? W / 2 : left + (usableWidth * (index + 0.5)) / count;
+            });
+        });
+
+        const minGap = 164;
+        for (let pass = 0; pass < 3; pass++) {
+            layoutLines.forEach((row) => {
+                const desired = new Map(row.map((id) => {
+                    const parents = (incoming.get(id) || []).filter((parentId) => this.nodes[parentId]);
+                    if (!parents.length) return [id, this.nodes[id].x];
+                    const avgParentX = parents.reduce((sum, parentId) => sum + this.nodes[parentId].x, 0) / parents.length;
+                    return [id, avgParentX];
+                }));
+
+                row.sort((a, b) => desired.get(a) - desired.get(b));
+
+                let cursor = left + 40;
+                row.forEach((id, index) => {
+                    const target = clamp(desired.get(id), left + 40, right - 40);
+                    const x = Math.max(cursor, target);
+                    this.nodes[id].x = x;
+                    cursor = x + minGap;
+                });
+
+                const overflow = cursor - minGap - (right - 40);
+                if (overflow > 0) {
+                    for (let i = row.length - 1; i >= 0; i--) {
+                        const id = row[i];
+                        const nextX = i === row.length - 1 ? right - 40 : this.nodes[row[i + 1]].x - minGap;
+                        this.nodes[id].x = Math.min(this.nodes[id].x, nextX);
+                    }
+                }
+
+                const rowCenter = row.reduce((sum, id) => sum + this.nodes[id].x, 0) / Math.max(1, row.length);
+                const delta = W / 2 - rowCenter;
+                row.forEach((id) => {
+                    this.nodes[id].x = clamp(this.nodes[id].x + delta, left + 40, right - 40);
+                });
+            });
+        }
     }
 
     // ── Draw ─────────────────────────────────────────────────────────────────
@@ -285,6 +503,9 @@ class GraphRenderer {
         // 5. Nodes
         this._drawNodes(ctx);
 
+        // 6. Network state
+        this._drawNetworkStatus(ctx, W, H);
+
         ctx.restore();
     }
 
@@ -302,32 +523,32 @@ class GraphRenderer {
     }
 
     _drawEdges(ctx) {
+        const isComplete = this.runState === 'completed';
         for (const edge of this.edges) {
             const src = this.nodes[edge.source];
             const tgt = this.nodes[edge.target];
             if (!src || !tgt) continue;
 
             const srcActive = src.status === 'running' || tgt.status === 'running';
-            const edgeColor = srcActive ? 'rgba(172,199,255,0.45)' : 'rgba(65,71,84,0.55)';
-            const arrowColor = srcActive ? '#acc7ff' : '#6d7788';
+            const edgeColor = isComplete
+                ? 'rgba(125,226,167,0.34)'
+                : srcActive ? 'rgba(172,199,255,0.46)' : 'rgba(78,86,99,0.4)';
+            const arrowColor = isComplete ? '#7de2a7' : srcActive ? '#acc7ff' : '#6d7788';
 
-            const p0 = nodeEdgePoint(src, tgt);
-            const p1 = nodeEdgePoint(tgt, src);
-            const { cp1, cp2 } = edgeControlPoints(p0, p1);
+            const route = this._edgeRoute(src, tgt);
+            if (!route) continue;
 
             ctx.save();
             ctx.strokeStyle = edgeColor;
-            ctx.lineWidth   = srcActive ? 1.8 : 1.2;
+            ctx.lineWidth   = isComplete ? 1.5 : srcActive ? 1.8 : 1.35;
             ctx.lineCap     = 'round';
-            ctx.setLineDash(srcActive ? [8, 8] : [5, 10]);
-            ctx.beginPath();
-            ctx.moveTo(p0.x, p0.y);
-            ctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, p1.x, p1.y);
+            ctx.lineJoin    = 'round';
+            ctx.setLineDash(isComplete ? [4, 8] : srcActive ? [8, 8] : [7, 10]);
+            this._traceRoute(ctx, route);
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Arrowhead at target
-            this._drawArrow(ctx, cp2, p1, arrowColor);
+            this._drawArrow(ctx, route[route.length - 2], route[route.length - 1], arrowColor);
             ctx.restore();
         }
     }
@@ -335,28 +556,94 @@ class GraphRenderer {
     _drawCoreBackdrop(ctx, W, H) {
         const cx = W / 2;
         const cy = H / 2;
+        const completePulse = this.runState === 'completed'
+            ? Math.min(1, (performance.now() - this.runStateChangedAt) / 900)
+            : 0;
         ctx.save();
 
-        const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.34);
-        outer.addColorStop(0, 'rgba(172, 199, 255, 0.09)');
-        outer.addColorStop(0.45, 'rgba(82, 3, 213, 0.08)');
+        const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.42);
+        outer.addColorStop(0, completePulse > 0 ? 'rgba(125, 226, 167, 0.14)' : 'rgba(172, 199, 255, 0.07)');
+        outer.addColorStop(0.45, completePulse > 0 ? 'rgba(125, 226, 167, 0.06)' : 'rgba(38, 73, 116, 0.08)');
         outer.addColorStop(1, 'rgba(10, 15, 19, 0)');
         ctx.fillStyle = outer;
         ctx.beginPath();
-        ctx.arc(cx, cy, Math.min(W, H) * 0.34, 0, Math.PI * 2);
+        ctx.arc(cx, cy, Math.min(W, H) * 0.42, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.strokeStyle = 'rgba(65, 71, 84, 0.2)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 10]);
-        ctx.beginPath();
-        ctx.arc(cx, cy, Math.min(W, H) * 0.18, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx, cy, Math.min(W, H) * 0.29, 0, Math.PI * 2);
-        ctx.stroke();
+        for (const band of this._layoutBands || []) {
+            const laneGlow = ctx.createLinearGradient(56, band.y, W - 56, band.y);
+            laneGlow.addColorStop(0, 'rgba(10, 15, 19, 0)');
+            laneGlow.addColorStop(0.18, completePulse > 0 ? 'rgba(125, 226, 167, 0.04)' : 'rgba(172, 199, 255, 0.025)');
+            laneGlow.addColorStop(0.5, completePulse > 0 ? 'rgba(125, 226, 167, 0.08)' : 'rgba(65, 71, 84, 0.08)');
+            laneGlow.addColorStop(0.82, completePulse > 0 ? 'rgba(125, 226, 167, 0.04)' : 'rgba(172, 199, 255, 0.025)');
+            laneGlow.addColorStop(1, 'rgba(10, 15, 19, 0)');
+            ctx.fillStyle = laneGlow;
+            roundRect(ctx, 58, band.top, W - 116, band.bottom - band.top, 24);
+            ctx.fill();
+
+            ctx.strokeStyle = completePulse > 0 ? 'rgba(125, 226, 167, 0.08)' : 'rgba(65, 71, 84, 0.08)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([10, 14]);
+            ctx.beginPath();
+            ctx.moveTo(72, band.y);
+            ctx.lineTo(W - 72, band.y);
+            ctx.stroke();
+        }
         ctx.setLineDash([]);
 
+        ctx.restore();
+    }
+
+    _drawNetworkStatus(ctx, W, H) {
+        let label = 'Idle';
+        let accent = 'rgba(193, 198, 214, 0.82)';
+        let fill = 'rgba(27, 32, 37, 0.82)';
+
+        if (this.runState === 'running') {
+            label = 'Network Running';
+            accent = '#acc7ff';
+            fill = 'rgba(18, 30, 44, 0.86)';
+        } else if (this.runState === 'completed') {
+            label = 'Network Complete';
+            accent = '#7de2a7';
+            fill = 'rgba(18, 39, 31, 0.9)';
+        } else if (this.runState === 'stopped') {
+            label = 'Network Stopped';
+            accent = '#ffb4ab';
+            fill = 'rgba(42, 23, 23, 0.86)';
+        }
+
+        const boxW = 172;
+        const boxH = 34;
+        const x = W / 2 - boxW / 2;
+        const y = 22;
+
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = fill;
+        roundRect(ctx, x, y, boxW, boxH, 16);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = this.runState === 'completed'
+            ? 'rgba(125, 226, 167, 0.24)'
+            : this.runState === 'running'
+                ? 'rgba(172, 199, 255, 0.24)'
+                : 'rgba(65, 71, 84, 0.18)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, boxW, boxH, 16);
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.arc(x + 16, y + boxH / 2, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.font = '700 11px "Space Grotesk", sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, x + 28, y + boxH / 2 + 0.5);
         ctx.restore();
     }
 
@@ -392,10 +679,9 @@ class GraphRenderer {
             const raw = Math.min(1, elapsed / p.duration);
             const t = easeInOutCubic(raw);
 
-            const p0 = nodeEdgePoint(src, tgt);
-            const p1 = nodeEdgePoint(tgt, src);
-            const { cp1, cp2 } = edgeControlPoints(p0, p1);
-            const pos = bezierPoint(p0, cp1, cp2, p1, t);
+            const route = this._edgeRoute(src, tgt);
+            if (!route) continue;
+            const pos = this._pointAlongRoute(route, t);
 
             const color = src.color;
 
@@ -430,8 +716,12 @@ class GraphRenderer {
         const isSelected = this.selectedNode === node.id;
         const isHovered  = this._hoveredId   === node.id;
         const isCore = node.id === 'coordinator';
-        const ringRadius = isCore ? 30 : 12;
-        node.renderRadius = ringRadius + 8;
+        const isComplete = this.runState === 'completed';
+        const width = node.w || (isCore ? CORE_NODE_W : NODE_W);
+        const height = node.h || (isCore ? CORE_NODE_H : NODE_H);
+        const x = node.x - width / 2;
+        const y = node.y - height / 2;
+        node.renderRadius = Math.max(width, height) / 2;
 
         // Pulse on message receive
         let pulse = 0;
@@ -445,38 +735,41 @@ class GraphRenderer {
 
         ctx.save();
 
-        const glowStrength = isSelected ? 34 : isHovered ? 22 : isCore ? 20 : 14;
-        const glowAlpha = isSelected ? 0.7 : isHovered ? 0.45 : 0.28 + pulse * 0.2;
-        if (isSelected || isHovered || pulse > 0.08 || isCore) {
+        const completionGlow = isComplete && node.status === 'completed' ? 0.24 : 0;
+        const glowStrength = isSelected ? 34 : isHovered ? 24 : isCore ? 22 : isComplete ? 18 : 14;
+        const glowAlpha = isSelected ? 0.7 : isHovered ? 0.45 : 0.28 + pulse * 0.2 + completionGlow;
+        if (isSelected || isHovered || pulse > 0.08 || isCore || (isComplete && node.status === 'completed')) {
             ctx.save();
             ctx.shadowColor = accent;
             ctx.shadowBlur = glowStrength;
             ctx.fillStyle = accent;
             ctx.globalAlpha = glowAlpha;
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, ringRadius + 10 + pulse * 6, 0, Math.PI * 2);
+            roundRect(ctx, x - 8, y - 8, width + 16, height + 16, 22);
             ctx.fill();
             ctx.restore();
         }
 
         ctx.lineWidth = isCore ? 1.6 : 1.2;
-        ctx.strokeStyle = isSelected ? accent : 'rgba(65,71,84,0.44)';
-        ctx.fillStyle = isCore ? 'rgba(27,32,37,0.86)' : 'rgba(27,32,37,0.96)';
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, ringRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = isSelected ? accent : isComplete && node.status === 'completed' ? 'rgba(125,226,167,0.38)' : 'rgba(65,71,84,0.44)';
+        ctx.fillStyle = isComplete && node.status === 'completed'
+            ? (isCore ? 'rgba(22,38,31,0.94)' : 'rgba(18,34,28,0.96)')
+            : isCore ? 'rgba(21,27,32,0.92)' : 'rgba(18,23,29,0.96)';
+        roundRect(ctx, x, y, width, height, 18);
         ctx.fill();
         ctx.stroke();
 
-        const statusKey  = node.thinking ? 'thinking' : (node.status || 'idle');
-        const innerRadius = isCore ? 12 : 4.5;
-        const innerGlow = accent;
+        ctx.save();
+        ctx.fillStyle = `${accent}22`;
+        roundRect(ctx, x + 1.5, y + 1.5, width - 3, Math.max(8, height * 0.24), 16);
+        ctx.fill();
+        ctx.restore();
 
         ctx.save();
-        ctx.shadowColor = innerGlow;
-        ctx.shadowBlur = isCore ? 22 : 12;
-        ctx.fillStyle = innerGlow;
+        ctx.shadowColor = accent;
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = accent;
         ctx.beginPath();
-        ctx.arc(node.x, node.y, innerRadius + pulse * (isCore ? 4 : 1.6), 0, Math.PI * 2);
+        ctx.arc(x + 16, node.y, isCore ? 5.5 + pulse * 1.8 : 4.5 + pulse * 1.2, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
 
@@ -485,34 +778,54 @@ class GraphRenderer {
             ctx.strokeStyle = accent;
             ctx.globalAlpha = 0.4 + 0.25 * Math.sin(runPhase * Math.PI * 2);
             ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.arc(node.x, node.y, ringRadius + 6 + Math.sin(runPhase * Math.PI * 2) * 2, 0, Math.PI * 2);
+            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, 20);
+            ctx.stroke();
+            ctx.restore();
+        } else if (isComplete && node.status === 'completed') {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(125,226,167,0.42)';
+            ctx.lineWidth = 1.2;
+            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, 20);
             ctx.stroke();
             ctx.restore();
         }
 
-        const showLabel = true;
-        if (showLabel) {
-            this._drawNodeLabel(ctx, node, isCore);
+        ctx.fillStyle = '#eef2f8';
+        ctx.font = isCore ? '700 14px "Space Grotesk", sans-serif' : '700 12px "Space Grotesk", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.role || node.id, node.x, node.y + 0.5);
+
+        if (isCore) {
+            ctx.fillStyle = 'rgba(142,151,168,0.92)';
+            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.fillText('ENTRY', node.x, y + height - 11);
         }
+
+        if (isSelected || isHovered) this._drawNodeLabel(ctx, node, isCore, isSelected, isHovered);
 
         ctx.restore();
     }
 
-    _drawNodeLabel(ctx, node, isCore) {
+    _drawNodeLabel(ctx, node, isCore, isSelected = false, isHovered = false) {
         const title = node.role || node.id;
         const model = node.model ? _shortModel(node.model) : '';
         const subtitle = node.lastActivity || model || `${node.msgCount || 0} messages`;
+        const detailVisible = isCore || isSelected || isHovered;
+        if (!detailVisible) return;
 
         ctx.save();
-        ctx.font = '700 12px Inter, -apple-system, sans-serif';
+        ctx.font = '700 12px "Space Grotesk", sans-serif';
         const titleW = ctx.measureText(title).width;
         ctx.font = '10px "JetBrains Mono", monospace';
         const subW = ctx.measureText(subtitle).width;
         const contentW = Math.max(titleW, subW);
         const padX = 12;
-        const boxW = Math.min(Math.max(contentW + padX * 2, isCore ? 124 : 110), isCore ? 220 : 190);
-        const boxH = isCore ? 52 : 42;
+        const boxW = Math.min(
+            Math.max(contentW + padX * 2, isCore ? 132 : 118),
+            isCore ? 220 : 184,
+        );
+        const boxH = isCore ? 56 : 44;
         const viewportW = this.canvas.width / this._dpr;
         const viewportH = this.canvas.height / this._dpr;
         const worldMinX = -this.offsetX / this.zoom;
@@ -520,37 +833,144 @@ class GraphRenderer {
         const worldMaxX = worldMinX + viewportW / this.zoom;
         const worldMaxY = worldMinY + viewportH / this.zoom;
         const boxX = Math.max(worldMinX + 16 / this.zoom, Math.min(worldMaxX - boxW - 16 / this.zoom, node.x - boxW / 2));
-        const desiredY = isCore ? node.y + 44 : node.y + 20;
+        const above = node.y > worldMinY + (viewportH / this.zoom) * 0.55;
+        const desiredY = above
+            ? node.y - ((node.h || NODE_H) / 2) - boxH - 12
+            : node.y + ((node.h || NODE_H) / 2) + 12;
         const boxY = Math.max(worldMinY + 16 / this.zoom, Math.min(worldMaxY - boxH - 16 / this.zoom, desiredY));
 
         ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-        ctx.shadowBlur = isCore ? 24 : 14;
-        ctx.fillStyle = isCore ? 'rgba(48, 53, 58, 0.72)' : 'rgba(27, 32, 37, 0.82)';
+        ctx.shadowBlur = isCore ? 22 : 16;
+        ctx.fillStyle = isCore ? 'rgba(28, 34, 40, 0.92)' : 'rgba(20, 25, 30, 0.94)';
         roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.fill();
 
         ctx.shadowBlur = 0;
-        ctx.strokeStyle = isCore ? 'rgba(65, 71, 84, 0.18)' : 'rgba(65, 71, 84, 0.12)';
+        ctx.strokeStyle = isSelected ? 'rgba(172, 199, 255, 0.24)' : 'rgba(65, 71, 84, 0.16)';
         ctx.lineWidth = 1;
         roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.stroke();
 
         ctx.fillStyle = '#dee3e9';
-        ctx.font = '700 12px Inter, -apple-system, sans-serif';
+        ctx.font = '700 12px "Space Grotesk", sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText(title, boxX + 12, boxY + 10);
 
-        if (isCore) {
-            ctx.font = '10px "JetBrains Mono", monospace';
-            ctx.fillStyle = '#8e97a8';
-            let sub = subtitle;
-            while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);
-            if (sub !== subtitle) sub += '…';
-            ctx.fillText(sub, boxX + 12, boxY + 28);
-        }
+        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.fillStyle = '#8e97a8';
+        let sub = subtitle;
+        while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);
+        if (sub !== subtitle) sub += '…';
+        ctx.fillText(sub, boxX + 12, boxY + 30);
 
         ctx.restore();
+    }
+
+    _edgeRoute(src, tgt) {
+        const srcHalfW = (src.w || NODE_W) / 2;
+        const srcHalfH = (src.h || NODE_H) / 2;
+        const tgtHalfW = (tgt.w || NODE_W) / 2;
+        const tgtHalfH = (tgt.h || NODE_H) / 2;
+        const rowGap = this._layoutRows.length > 1
+            ? Math.abs(this._layoutRows[1] - this._layoutRows[0])
+            : 120;
+        const trackOffset = this._edgeTrackOffset(src.id, tgt.id);
+
+        if (Math.abs(src.y - tgt.y) < 8) {
+            const start = {
+                x: src.x + Math.sign((tgt.x - src.x) || 1) * srcHalfW,
+                y: src.y,
+            };
+            const end = {
+                x: tgt.x - Math.sign((tgt.x - src.x) || 1) * tgtHalfW,
+                y: tgt.y,
+            };
+            const laneY = src.y + (trackOffset === 0 ? -18 : trackOffset);
+            return this._compactRoute([
+                start,
+                { x: start.x + 12 * Math.sign((tgt.x - src.x) || 1), y: laneY },
+                { x: end.x - 12 * Math.sign((tgt.x - src.x) || 1), y: laneY },
+                end,
+            ]);
+        }
+
+        const goingDown = tgt.y > src.y;
+        const start = { x: src.x, y: src.y + (goingDown ? srcHalfH : -srcHalfH) };
+        const end = { x: tgt.x, y: tgt.y + (goingDown ? -tgtHalfH : tgtHalfH) };
+        const sourceExitY = start.y + (goingDown ? 18 : -18);
+        const targetEntryY = end.y + (goingDown ? -18 : 18);
+        const baseTrackX = src.x + (tgt.x - src.x) * 0.5;
+        const trackX = clamp(
+            baseTrackX + trackOffset,
+            Math.min(src.x, tgt.x) - Math.min(120, rowGap * 0.35),
+            Math.max(src.x, tgt.x) + Math.min(120, rowGap * 0.35),
+        );
+
+        return this._compactRoute([
+            start,
+            { x: start.x, y: sourceExitY },
+            { x: trackX, y: sourceExitY },
+            { x: trackX, y: targetEntryY },
+            { x: end.x, y: targetEntryY },
+            end,
+        ]);
+    }
+
+    _traceRoute(ctx, route) {
+        if (!route?.length) return;
+        ctx.beginPath();
+        ctx.moveTo(route[0].x, route[0].y);
+        for (let i = 1; i < route.length; i++) {
+            ctx.lineTo(route[i].x, route[i].y);
+        }
+    }
+
+    _pointAlongRoute(route, t) {
+        if (!route?.length) return { x: 0, y: 0 };
+        const segments = [];
+        let total = 0;
+
+        for (let i = 1; i < route.length; i++) {
+            const a = route[i - 1];
+            const b = route[i];
+            const len = Math.hypot(b.x - a.x, b.y - a.y);
+            segments.push({ a, b, len });
+            total += len;
+        }
+
+        let target = total * t;
+        for (const segment of segments) {
+            if (target <= segment.len) {
+                const ratio = segment.len ? target / segment.len : 0;
+                return {
+                    x: segment.a.x + (segment.b.x - segment.a.x) * ratio,
+                    y: segment.a.y + (segment.b.y - segment.a.y) * ratio,
+                };
+            }
+            target -= segment.len;
+        }
+
+        return route[route.length - 1];
+    }
+
+    _edgeTrackOffset(sourceId, targetId) {
+        const key = `${sourceId}->${targetId}`;
+        let hash = 0;
+        for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) & 0xffff;
+        const slots = [-54, -30, -12, 12, 30, 54];
+        return slots[hash % slots.length];
+    }
+
+    _compactRoute(points) {
+        const compact = [];
+        for (const point of points) {
+            const prev = compact[compact.length - 1];
+            if (!prev || Math.abs(prev.x - point.x) > 0.5 || Math.abs(prev.y - point.y) > 0.5) {
+                compact.push(point);
+            }
+        }
+        return compact;
     }
 
     // ── Events ───────────────────────────────────────────────────────────────
@@ -655,8 +1075,9 @@ class GraphRenderer {
         const my   = (clientY - rect.top - this.offsetY) / this.zoom;
 
         for (const [id, node] of Object.entries(this.nodes)) {
-            const r = (node.renderRadius || NODE_RADIUS) + 10;
-            if (Math.hypot(mx - node.x, my - node.y) <= r) {
+            const halfW = ((node.w || NODE_W) / 2) + 8;
+            const halfH = ((node.h || NODE_H) / 2) + 8;
+            if (mx >= node.x - halfW && mx <= node.x + halfW && my >= node.y - halfH && my <= node.y + halfH) {
                 return id;
             }
         }
