@@ -141,6 +141,10 @@ def parse_args() -> argparse.Namespace:
     cfg_set.add_argument("key", help="Setting name (e.g. local-models)")
     cfg_set.add_argument("value", help="New value (e.g. false)")
 
+    models_parser = subparsers.add_parser("models", help="Inspect or refresh provider model catalogs")
+    models_sub = models_parser.add_subparsers(dest="models_action")
+    models_sub.add_parser("refresh", help="Fetch latest provider model catalogs into ~/.orb/config.json")
+
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
     topologies_parser = subparsers.add_parser("topologies", help="Manage user topology definitions")
     topologies_sub = topologies_parser.add_subparsers(dest="topologies_action")
@@ -457,6 +461,40 @@ async def async_main() -> None:
                 print_error(str(exc))
                 sys.exit(1)
         return
+
+    if args.subcommand == "models":
+        action = getattr(args, "models_action", None) or "refresh"
+        if action == "refresh":
+            from web.state import DashboardState
+            from orb.runtime.graph_runtime import GraphRuntime
+            from .config import load_config
+
+            runtime = GraphRuntime(DashboardState())
+            runtime.configure(
+                providers=build_providers(local_only=False, cloud_only=False),
+                config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
+                model_overrides=None,
+                tier_override=None,
+            )
+            await runtime.refresh_provider_catalogs()
+
+            cfg = load_config()
+            providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+            print("Updated provider catalogs in ~/.orb/config.json")
+            for provider_name in ("anthropic", "openai-codex", "ollama"):
+                entry = providers_cfg.get(provider_name) if isinstance(providers_cfg, dict) else None
+                if not isinstance(entry, dict):
+                    continue
+                catalog = entry.get("catalog") or []
+                defaults = entry.get("default_models") or {}
+                if catalog:
+                    print(f"  {provider_name:<13} {len(catalog)} models")
+                if isinstance(defaults, dict) and defaults:
+                    summary = ", ".join(f"{k}={v}" for k, v in defaults.items())
+                    print(f"    defaults: {summary}")
+            return
+        print_error("Unknown models command")
+        sys.exit(1)
 
     if args.subcommand == "onboard":
         from .onboard import run_onboarding

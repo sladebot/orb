@@ -67,6 +67,7 @@ class DashboardServer:
 
     async def start(self) -> None:
         self.runtime.subscribe(self.broadcast)
+        await self.runtime.refresh_provider_catalogs()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
