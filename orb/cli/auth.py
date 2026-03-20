@@ -12,9 +12,29 @@ from pathlib import Path
 from threading import Event, Thread
 
 import httpx
+from orb.llm.anthropic import AnthropicProvider
+from orb.llm.codex import OpenAICodexProvider
+from orb.llm.openai import OpenAIProvider
+from orb.llm.types import (
+    ANTHROPIC_HAIKU_MODEL,
+    ANTHROPIC_MODEL_LABELS,
+    ANTHROPIC_OPUS_MODEL,
+    ANTHROPIC_SONNET_MODEL,
+    CompletionRequest,
+    ModelConfig,
+    ModelTier,
+)
 
-# ── Anthropic OAuth beta header ──────────────────────────────────────────────
-_ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+# ── Anthropic beta headers ───────────────────────────────────────────────────
+_ANTHROPIC_DEFAULT_BETAS = [
+    "fine-grained-tool-streaming-2025-05-14",
+    "interleaved-thinking-2025-05-14",
+]
+_ANTHROPIC_OAUTH_BETAS = ",".join([
+    "oauth-2025-04-20",
+    "claude-code-20250219",
+    *_ANTHROPIC_DEFAULT_BETAS,
+])
 
 # ── OAuth constants (OpenAI Codex CLI — same as pi-ai / openclaw) ─────────────
 _AUTH_URL     = "https://auth.openai.com/oauth/authorize"
@@ -303,22 +323,22 @@ async def auth_openai() -> None:
 
 
 def save_anthropic_key(api_key: str) -> None:
-    """Store an Anthropic API key or Claude subscription OAuth token."""
+    """Store an Anthropic API key or Claude setup-token."""
     key = (api_key or "").strip()
     if not key:
         raise ValueError("Anthropic credential cannot be empty")
     if key.startswith("sk-ant-api"):
         _save_credentials("anthropic", {"api_key": key})
     else:
-        _save_credentials("anthropic", {"oauth_token": key})
+        _save_credentials("anthropic", {"setup_token": key})
 
 
 def get_anthropic_key() -> str | None:
-    """Return stored Anthropic OAuth token or API key, or None if not stored."""
+    """Return stored Anthropic setup-token or API key, or None if not stored."""
     creds = load_credentials("anthropic")
     if not creds:
         return None
-    return creds.get("oauth_token") or creds.get("api_key")
+    return creds.get("setup_token") or creds.get("oauth_token") or creds.get("api_key")
 
 
 async def auth_anthropic(credential: str | None = None) -> None:
@@ -326,7 +346,7 @@ async def auth_anthropic(credential: str | None = None) -> None:
     raw = (credential or "").strip()
     if raw:
         save_anthropic_key(raw)
-        kind = "Anthropic API key" if raw.startswith("sk-ant-api") else "Claude OAuth token"
+        kind = "Anthropic API key" if raw.startswith("sk-ant-api") else "Claude setup-token"
         print(f"{kind} stored at {CREDS_PATH}")
         return
 
@@ -347,7 +367,7 @@ async def auth_anthropic(credential: str | None = None) -> None:
         return
 
     save_anthropic_key(raw)
-    kind = "Anthropic API key" if raw.startswith("sk-ant-api") else "Claude OAuth token"
+    kind = "Anthropic API key" if raw.startswith("sk-ant-api") else "Claude setup-token"
     print(f"{kind} stored at {CREDS_PATH}")
 
 
@@ -369,12 +389,7 @@ def revoke_anthropic_key() -> None:
 async def _check_anthropic(key: str) -> bool:
     """Return True if the Anthropic key/token works (models list call)."""
     try:
-        headers = {"anthropic-version": "2023-06-01"}
-        if not key.startswith("sk-ant-api"):
-            headers["Authorization"] = f"Bearer {key}"
-            headers["anthropic-beta"] = _ANTHROPIC_OAUTH_BETAS
-        else:
-            headers["x-api-key"] = key
+        headers = _anthropic_headers(key)
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 "https://api.anthropic.com/v1/models",
@@ -384,6 +399,46 @@ async def _check_anthropic(key: str) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def _anthropic_headers(key: str) -> dict[str, str]:
+    headers = {"anthropic-version": "2023-06-01"}
+    if not key.startswith("sk-ant-api"):
+        headers["Authorization"] = f"Bearer {key}"
+        headers["anthropic-beta"] = _ANTHROPIC_OAUTH_BETAS
+    else:
+        headers["x-api-key"] = key
+    return headers
+
+
+async def _check_anthropic_model(key: str, model_id: str) -> bool:
+    provider = AnthropicProvider(api_key=key)
+    try:
+        await provider.complete(
+            CompletionRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                model_config=ModelConfig(
+                    tier=ModelTier.CLOUD_FAST,
+                    model_id=model_id,
+                    provider="anthropic",
+                    max_tokens=1,
+                    temperature=0,
+                ),
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        await provider.close()
+
+
+async def _check_anthropic_model_matrix(key: str) -> dict[str, bool]:
+    return {
+        ANTHROPIC_HAIKU_MODEL: await _check_anthropic_model(key, ANTHROPIC_HAIKU_MODEL),
+        ANTHROPIC_SONNET_MODEL: await _check_anthropic_model(key, ANTHROPIC_SONNET_MODEL),
+        ANTHROPIC_OPUS_MODEL: await _check_anthropic_model(key, ANTHROPIC_OPUS_MODEL),
+    }
 
 
 async def _check_openai_key(key: str) -> bool:
@@ -398,6 +453,28 @@ async def _check_openai_key(key: str) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+async def _check_openai_key_model(key: str, model_id: str) -> bool:
+    provider = OpenAIProvider(api_key=key)
+    try:
+        await provider.complete(
+            CompletionRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                model_config=ModelConfig(
+                    tier=ModelTier.CLOUD_FAST,
+                    model_id=model_id,
+                    provider="openai",
+                    max_tokens=1,
+                    temperature=0,
+                ),
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        await provider.close()
 
 
 async def _check_openai_oauth(token: str) -> bool:
@@ -421,12 +498,57 @@ async def _check_openai_oauth(token: str) -> bool:
         return False
 
 
+async def _check_openai_oauth_model(token: str, model_id: str) -> bool:
+    provider = OpenAICodexProvider(token)
+    try:
+        await provider.complete(
+            CompletionRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                model_config=ModelConfig(
+                    tier=ModelTier.CLOUD_FAST,
+                    model_id=model_id,
+                    provider="openai-codex",
+                    max_tokens=1,
+                    temperature=0,
+                ),
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        await provider.close()
+
+
+async def _check_ollama_models() -> dict[str, bool]:
+    models = ("qwen3.5:9b", "qwen3.5:27b")
+    try:
+        base_url = (
+            os.environ.get("OLLAMA_BASE_URL", "")
+            or os.environ.get("OPENAI_BASE_URL", "")
+            or "http://127.0.0.1:11434"
+        ).rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{base_url}/api/tags", timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+        installed = {item.get("name") for item in payload.get("models") or [] if item.get("name")}
+        return {model_id: model_id in installed for model_id in models}
+    except Exception:
+        return {model_id: False for model_id in models}
+
+
 async def auth_status() -> None:
     """Print current auth status for all providers, verifying each credential with a live API call."""
     import asyncio
 
     def _ok(connected: bool) -> str:
         return "CONNECTED" if connected else "FAILED (check key/network)"
+
+    def _model_ok(connected: bool) -> str:
+        return "OK" if connected else "FAILED"
 
     tasks = {}
 
@@ -454,12 +576,14 @@ async def auth_status() -> None:
     # Anthropic
     stored_creds = load_credentials("anthropic") or {}
     stored_ant = get_anthropic_key()
-    env_ant    = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
+    env_ant    = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_SETUP_TOKEN") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
     ant_key    = stored_ant or env_ant
-    if stored_creds.get("oauth_token"):
-        ant_source = "Claude OAuth stored"
+    if stored_creds.get("setup_token") or stored_creds.get("oauth_token"):
+        ant_source = "Claude setup-token stored"
         if stored_creds.get("source") == "claude-cli":
             ant_source = "Claude CLI import"
+    elif os.environ.get("ANTHROPIC_SETUP_TOKEN"):
+        ant_source = "ANTHROPIC_SETUP_TOKEN env"
     elif stored_creds.get("api_key"):
         ant_source = "API key stored"
     elif os.environ.get("ANTHROPIC_OAUTH_TOKEN"):
@@ -480,3 +604,26 @@ async def auth_status() -> None:
         for label, result in zip(labels, results):
             connected = result if isinstance(result, bool) else False
             print(f"{label}  →  {_ok(connected)}")
+
+    if ant_key:
+        matrix = await _check_anthropic_model_matrix(ant_key)
+        print("    models:")
+        for model_id in (ANTHROPIC_HAIKU_MODEL, ANTHROPIC_SONNET_MODEL, ANTHROPIC_OPUS_MODEL):
+            label = ANTHROPIC_MODEL_LABELS[model_id]
+            print(f"      anthropic  {label:<18} {model_id}  →  {_model_ok(matrix.get(model_id, False))}")
+
+    if creds and creds.get("api_key"):
+        model_ok = await _check_openai_key_model(creds["api_key"], "gpt-5.4")
+        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+    elif creds and creds.get("access_token") and (creds.get("expires_at", 0) - time.time()) > 60:
+        model_ok = await _check_openai_oauth_model(creds["access_token"], "gpt-5.4")
+        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+    elif openai_key:
+        model_ok = await _check_openai_key_model(openai_key, "gpt-5.4")
+        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+
+    if os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OPENAI_BASE_URL"):
+        matrix = await _check_ollama_models()
+        print("    models:")
+        for model_id in ("qwen3.5:9b", "qwen3.5:27b"):
+            print(f"      ollama     {model_id:<18} {model_id}  →  {_model_ok(matrix.get(model_id, False))}")

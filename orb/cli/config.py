@@ -45,8 +45,12 @@ def _normalized_provider_config(
         for name, value in providers.items():
             if name not in normalized:
                 continue
-            if isinstance(value, dict) and "enabled" in value:
-                normalized[name]["enabled"] = bool(value["enabled"])
+            if isinstance(value, dict):
+                for extra_key, extra_value in value.items():
+                    if extra_key == "enabled":
+                        normalized[name]["enabled"] = bool(extra_value)
+                    else:
+                        normalized[name][extra_key] = extra_value
             elif isinstance(value, bool):
                 normalized[name]["enabled"] = value
         return normalized

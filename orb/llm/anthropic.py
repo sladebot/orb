@@ -17,17 +17,28 @@ from .types import (
     ToolCall,
 )
 
-OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+OAUTH_BETAS = ",".join([
+    "oauth-2025-04-20",
+    "claude-code-20250219",
+    "fine-grained-tool-streaming-2025-05-14",
+    "interleaved-thinking-2025-05-14",
+])
 DEFAULT_MODEL = ANTHROPIC_SONNET_MODEL
 ANTHROPIC_MODEL_ALIASES = {
+    "claude-3-5-haiku-latest": ANTHROPIC_HAIKU_MODEL,
+    "claude-3-5-haiku-20241022": ANTHROPIC_HAIKU_MODEL,
     "claude-haiku-4-5": ANTHROPIC_HAIKU_MODEL,
     ANTHROPIC_HAIKU_MODEL: ANTHROPIC_HAIKU_MODEL,
+    "claude-sonnet-4-0": ANTHROPIC_SONNET_MODEL,
     "claude-sonnet-4-5": ANTHROPIC_SONNET_MODEL,
-    ANTHROPIC_SONNET_MODEL: ANTHROPIC_SONNET_MODEL,
     "claude-sonnet-4-20250514": ANTHROPIC_SONNET_MODEL,
+    "claude-sonnet-4-5-20250929": ANTHROPIC_SONNET_MODEL,
+    ANTHROPIC_SONNET_MODEL: ANTHROPIC_SONNET_MODEL,
+    "claude-opus-4-0": ANTHROPIC_OPUS_MODEL,
     "claude-opus-4": ANTHROPIC_OPUS_MODEL,
-    ANTHROPIC_OPUS_MODEL: ANTHROPIC_OPUS_MODEL,
     "claude-opus-4-20250514": ANTHROPIC_OPUS_MODEL,
+    "claude-opus-4-5-20251101": ANTHROPIC_OPUS_MODEL,
+    ANTHROPIC_OPUS_MODEL: ANTHROPIC_OPUS_MODEL,
 }
 
 
@@ -41,8 +52,9 @@ class AnthropicProvider(LLMClient):
 
     Key resolution order:
       1. ``api_key`` constructor argument
-      2. ``ANTHROPIC_OAUTH_TOKEN`` env var
-      3. ``ANTHROPIC_API_KEY`` env var
+      2. ``ANTHROPIC_SETUP_TOKEN`` env var
+      3. ``ANTHROPIC_OAUTH_TOKEN`` env var
+      4. ``ANTHROPIC_API_KEY`` env var
     """
 
     def __init__(self, api_key: str | None = None) -> None:
@@ -50,6 +62,7 @@ class AnthropicProvider(LLMClient):
 
         token = (
             api_key
+            or os.environ.get("ANTHROPIC_SETUP_TOKEN")
             or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
             or os.environ.get("ANTHROPIC_API_KEY")
         )

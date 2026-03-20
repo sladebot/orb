@@ -10,8 +10,9 @@ from json import JSONDecodeError
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from web.state import DashboardState
-from orb.cli.config import get as get_config
+from orb.cli.config import get as get_config, load_config, save_config
 from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
 from orb.messaging.channel import ChannelClosed
 from .transcript import ConversationSession, RunTranscript
@@ -252,6 +253,151 @@ class GraphRuntime:
                 self._providers = dict(self._all_providers)
         else:
             self._providers = dict(self._all_providers)
+
+    @staticmethod
+    def _provider_config_entry(provider: str) -> dict:
+        provider_cfg = get_config("providers") or {}
+        entry = provider_cfg.get(provider) or {}
+        return entry if isinstance(entry, dict) else {}
+
+    @classmethod
+    def _provider_catalog(cls, provider: str) -> list[dict]:
+        catalog = cls._provider_config_entry(provider).get("catalog") or []
+        return [item for item in catalog if isinstance(item, dict) and item.get("id")]
+
+    @classmethod
+    def _provider_default_model(cls, provider: str, key: str, fallback: str) -> str:
+        defaults = cls._provider_config_entry(provider).get("default_models") or {}
+        model_id = defaults.get(key) if isinstance(defaults, dict) else None
+        return str(model_id) if model_id else fallback
+
+    @staticmethod
+    def _anthropic_label_for_model(model_id: str) -> str:
+        parts = model_id.replace("claude-", "").split("-")
+        family = parts[0].capitalize() if parts else "Claude"
+        version = ".".join(parts[1:3]) if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit() else ""
+        return f"Claude {family} {version}".strip()
+
+    @staticmethod
+    def _pick_catalog_model(catalog: list[dict], token: str, fallback: str) -> str:
+        for item in catalog:
+            model_id = str(item.get("id", ""))
+            if token in model_id:
+                return model_id
+        return fallback
+
+    async def refresh_provider_catalogs(self) -> None:
+        cfg = load_config()
+        providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+        updated = False
+
+        if "anthropic" in self._all_providers:
+            catalog, defaults = await self._fetch_anthropic_catalog()
+            if catalog:
+                entry = dict(providers_cfg.get("anthropic") or {})
+                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+                    entry["catalog"] = catalog
+                    entry["default_models"] = defaults
+                    entry["refreshed_at"] = int(time.time())
+                    providers_cfg["anthropic"] = entry
+                    updated = True
+
+        if "openai-codex" in self._all_providers:
+            catalog = [{"id": "gpt-5.4", "label": "GPT-5.4", "local": False}]
+            defaults = {
+                "cloud_lite": "gpt-5.4",
+                "cloud_fast": "gpt-5.4",
+                "cloud_strong": "gpt-5.4",
+            }
+            entry = dict(providers_cfg.get("openai-codex") or {})
+            if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+                entry["catalog"] = catalog
+                entry["default_models"] = defaults
+                entry["refreshed_at"] = int(time.time())
+                providers_cfg["openai-codex"] = entry
+                updated = True
+
+        if "ollama" in self._all_providers:
+            catalog, defaults = await self._fetch_ollama_catalog()
+            if catalog:
+                entry = dict(providers_cfg.get("ollama") or {})
+                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+                    entry["catalog"] = catalog
+                    entry["default_models"] = defaults
+                    entry["refreshed_at"] = int(time.time())
+                    providers_cfg["ollama"] = entry
+                    updated = True
+
+        if updated:
+            cfg["providers"] = providers_cfg
+            save_config(cfg)
+
+    async def _fetch_anthropic_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        from orb.cli.auth import _anthropic_headers, get_anthropic_key
+        from orb.llm.types import ANTHROPIC_HAIKU_MODEL, ANTHROPIC_OPUS_MODEL, ANTHROPIC_SONNET_MODEL
+
+        key = get_anthropic_key()
+        if not key:
+            return [], {}
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers=_anthropic_headers(key),
+                    timeout=15.0,
+                )
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+        except Exception as exc:
+            logger.warning("Failed to refresh Anthropic model catalog: %s", exc)
+            return [], {}
+
+        catalog = []
+        for item in data:
+            model_id = str(item.get("id") or "").strip()
+            if not model_id:
+                continue
+            catalog.append({
+                "id": model_id,
+                "label": self._anthropic_label_for_model(model_id),
+                "local": False,
+            })
+
+        defaults = {
+            "cloud_lite": self._pick_catalog_model(catalog, "haiku", ANTHROPIC_HAIKU_MODEL),
+            "cloud_fast": self._pick_catalog_model(catalog, "sonnet", ANTHROPIC_SONNET_MODEL),
+            "cloud_strong": self._pick_catalog_model(catalog, "opus", ANTHROPIC_OPUS_MODEL),
+        }
+        return catalog, defaults
+
+    async def _fetch_ollama_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        from orb.llm.registry import _ollama_base_url
+
+        provider_cfg = self._provider_config_entry("ollama")
+        endpoint = str(provider_cfg.get("base_url") or _ollama_base_url()).rstrip("/")
+        if endpoint.endswith("/v1"):
+            endpoint = endpoint[:-3]
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{endpoint}/api/tags", timeout=5.0)
+            resp.raise_for_status()
+            data = resp.json().get("models") or []
+        except Exception:
+            return [], {}
+
+        catalog = []
+        for item in data:
+            model_id = str(item.get("name") or "").strip()
+            if not model_id:
+                continue
+            catalog.append({"id": model_id, "label": model_id, "local": True})
+
+        defaults = {
+            "local_small": self._pick_catalog_model(catalog, "9b", "qwen3.5:9b"),
+            "local_medium": self._pick_catalog_model(catalog, "27b", "qwen3.5:27b"),
+            "local_large": self._pick_catalog_model(catalog, "27b", "qwen3.5:27b"),
+        }
+        return catalog, defaults
 
     def settings_payload(self) -> dict:
         model_payload = self.models_payload()
@@ -725,20 +871,50 @@ class GraphRuntime:
 
         models = [{"id": "auto", "label": "Auto-select", "provider": "auto", "local": False}]
         if "anthropic" in self._providers:
-            for config in ANTHROPIC_MODELS.values():
-                models.append({
-                    "id": config.model_id,
-                    "label": ANTHROPIC_MODEL_LABELS[config.model_id],
-                    "provider": ANTHROPIC_PROVIDER,
-                    "local": False,
-                })
+            configured = self._provider_catalog("anthropic")
+            if configured:
+                for item in configured:
+                    models.append({
+                        "id": item["id"],
+                        "label": item.get("label") or item["id"],
+                        "provider": ANTHROPIC_PROVIDER,
+                        "local": False,
+                    })
+            else:
+                for config in ANTHROPIC_MODELS.values():
+                    models.append({
+                        "id": config.model_id,
+                        "label": ANTHROPIC_MODEL_LABELS[config.model_id],
+                        "provider": ANTHROPIC_PROVIDER,
+                        "local": False,
+                    })
         if "openai-codex" in self._providers:
-            models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
+            configured = self._provider_catalog("openai-codex")
+            if configured:
+                for item in configured:
+                    models.append({
+                        "id": item["id"],
+                        "label": item.get("label") or item["id"],
+                        "provider": "openai-codex",
+                        "local": False,
+                    })
+            else:
+                models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
         if "ollama" in self._providers:
-            models += [
-                {"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True},
-                {"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True},
-            ]
+            configured = self._provider_catalog("ollama")
+            if configured:
+                for item in configured:
+                    models.append({
+                        "id": item["id"],
+                        "label": item.get("label") or item["id"],
+                        "provider": "ollama",
+                        "local": True,
+                    })
+            else:
+                models += [
+                    {"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True},
+                    {"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True},
+                ]
         return {"models": models}
 
     def _pick_primary_result(self, completions: dict[str, str]) -> tuple[str | None, str]:
@@ -791,9 +967,6 @@ class GraphRuntime:
         def ant(tier: ModelTier, model_id: str) -> ModelConfig:
             return ModelConfig(tier=tier, model_id=model_id, provider=ANTHROPIC_PROVIDER)
 
-        def codex(tier: ModelTier) -> ModelConfig:
-            return ModelConfig(tier=tier, model_id="gpt-5.4", provider=OPENAI_CODEX_PROVIDER)
-
         force_provider: str | None = None
         if model_pin and model_pin != "auto":
             if "claude" in model_pin:
@@ -812,16 +985,25 @@ class GraphRuntime:
             logger.warning("Forced provider '%s' not available; falling back to auto", force_provider)
             force_provider = None
 
-        q9 = ollama("qwen3.5:9b") if has_ollama and force_provider in (None, "ollama") else None
-        q27 = ollama("qwen3.5:27b") if has_ollama and force_provider in (None, "ollama") else None
+        anthropic_haiku = self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL)
+        anthropic_sonnet = self._provider_default_model("anthropic", "cloud_fast", ANTHROPIC_SONNET_MODEL)
+        anthropic_opus = self._provider_default_model("anthropic", "cloud_strong", ANTHROPIC_OPUS_MODEL)
+        codex_default = self._provider_default_model("openai-codex", "cloud_fast", "gpt-5.4")
+        ollama_small = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
+        ollama_medium = self._provider_default_model("ollama", "local_medium", "qwen3.5:27b")
         use_ant = has_anthropic and force_provider in (None, "anthropic")
         use_codex = has_codex and force_provider in (None, "openai-codex")
+        q9 = ollama(ollama_small) if has_ollama and force_provider in (None, "ollama") else None
+        q27 = ollama(ollama_medium) if has_ollama and force_provider in (None, "ollama") else None
 
-        haiku = (ant(ModelTier.CLOUD_LITE, ANTHROPIC_HAIKU_MODEL) if use_ant else
+        def codex(tier: ModelTier) -> ModelConfig:
+            return ModelConfig(tier=tier, model_id=codex_default, provider=OPENAI_CODEX_PROVIDER)
+
+        haiku = (ant(ModelTier.CLOUD_LITE, anthropic_haiku) if use_ant else
                  codex(ModelTier.CLOUD_LITE) if use_codex else None)
-        sonnet = (ant(ModelTier.CLOUD_FAST, ANTHROPIC_SONNET_MODEL) if use_ant else
+        sonnet = (ant(ModelTier.CLOUD_FAST, anthropic_sonnet) if use_ant else
                   codex(ModelTier.CLOUD_FAST) if use_codex else None)
-        opus = (ant(ModelTier.CLOUD_STRONG, ANTHROPIC_OPUS_MODEL) if use_ant else
+        opus = (ant(ModelTier.CLOUD_STRONG, anthropic_opus) if use_ant else
                 codex(ModelTier.CLOUD_STRONG) if use_codex else None)
 
         def best(*choices):
