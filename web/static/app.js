@@ -76,6 +76,16 @@ class Dashboard {
         qi.addEventListener('blur', () => {
             window.setTimeout(() => this._hideMentionSuggestions(), 120);
         });
+        document.querySelectorAll('.query-sample').forEach((button) => {
+            button.addEventListener('click', () => {
+                const prompt = button.dataset.prompt || '';
+                if (!prompt) return;
+                qi.value = prompt;
+                qi.style.height = 'auto';
+                qi.style.height = Math.min(qi.scrollHeight, 160) + 'px';
+                qi.focus();
+            });
+        });
 
         // Question panel wiring
         document.getElementById('question-dismiss').addEventListener('click', () => {
@@ -1085,13 +1095,7 @@ class Dashboard {
         const data = await res.json();
         this._modelLabels = {};
         this._models = data.models || [];
-        this._providerModels = {};
-        for (const m of this._models) {
-            this._modelLabels[m.id] = m.label;
-            const provider = this._inferProvider(m.id);
-            if (!this._providerModels[provider]) this._providerModels[provider] = [];
-            this._providerModels[provider].push(m);
-        }
+        this._indexModelsByProvider(this._models);
         this._renderProviderSettings();
         this._applyProviderPreferences();
         document.getElementById('stat-model').textContent =
@@ -1110,9 +1114,24 @@ class Dashboard {
         this._providerPrefs = new Set(enabledProviders.length ? enabledProviders : fallbackProviders);
         if (Array.isArray(data.models) && data.models.length) {
             this._models = data.models;
+            this._indexModelsByProvider(this._models);
         }
+        this._providerSettings = providers;
         this._renderProviderSettings();
         this._applyProviderPreferences();
+    }
+
+    _indexModelsByProvider(models) {
+        this._providerModels = {};
+        this._modelLabels = this._modelLabels || {};
+        for (const m of models || []) {
+            if (!m || !m.id) continue;
+            this._modelLabels[m.id] = m.label;
+            const provider = m.provider || this._inferProvider(m.id);
+            if (!provider || provider === 'auto') continue;
+            if (!this._providerModels[provider]) this._providerModels[provider] = [];
+            this._providerModels[provider].push(m);
+        }
     }
 
     _inferProvider(modelId) {
@@ -1143,11 +1162,17 @@ class Dashboard {
         container.innerHTML = providers.map((provider) => {
             const models = this._providerModels[provider] || [];
             const active = this._providerPrefs.has(provider);
+            const settingsMeta = this._providerSettings?.[provider] || {};
+            const enabledModels = Array.isArray(settingsMeta.enabled_models) ? settingsMeta.enabled_models : models;
+            const enabledModelCopy = enabledModels.length
+                ? enabledModels.map((model) => this._escapeHtml(this._shortModel(model.id || model.label || ''))).join(' · ')
+                : 'No enabled models';
             return `
                 <div class="provider-option provider-option-readonly${active ? ' active' : ''}">
                     <span class="provider-option-copy">
                         <span class="provider-option-name">${this._escapeHtml(this._providerLabel(provider))}</span>
                         <span class="provider-option-meta">${active ? 'enabled' : 'disabled'} · ${models.length} model${models.length === 1 ? '' : 's'}</span>
+                        <span class="provider-option-meta">${enabledModelCopy}</span>
                     </span>
                     <span class="provider-state-pill${active ? ' provider-state-pill-active' : ''}">${active ? 'Enabled' : 'Disabled'}</span>
                 </div>

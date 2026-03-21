@@ -16,9 +16,57 @@ from orb.llm.types import (
     ANTHROPIC_SONNET_MODEL,
 )
 from orb.runtime import GraphRuntime
+from orb.runtime import graph_runtime as runtime_mod
 from orb.llm.types import CompletionResponse, ModelTier, ModelConfig
 from tests.test_claude_agent import MockLLMClient
 from orb.orchestrator.types import OrchestratorConfig
+
+
+def _all_anthropic_models_enabled():
+    return {
+        "anthropic": {
+            "enabled": True,
+            "models": {
+                ANTHROPIC_HAIKU_MODEL: {"enabled": True},
+                ANTHROPIC_SONNET_MODEL: {"enabled": True},
+                ANTHROPIC_OPUS_MODEL: {"enabled": True},
+            },
+        },
+    }
+
+
+def _openai_and_ollama_enabled():
+    return {
+        "anthropic": {
+            "enabled": False,
+            "models": {
+                ANTHROPIC_HAIKU_MODEL: {"enabled": False},
+                ANTHROPIC_SONNET_MODEL: {"enabled": False},
+                ANTHROPIC_OPUS_MODEL: {"enabled": False},
+            },
+        },
+        "openai-codex": {
+            "enabled": True,
+            "models": {},
+            "default_models": {
+                "cloud_lite": "gpt-5.4",
+                "cloud_fast": "gpt-5.4",
+                "cloud_strong": "gpt-5.4",
+            },
+        },
+        "ollama": {
+            "enabled": True,
+            "models": {
+                "qwen3.5:9b": {"enabled": True},
+                "qwen3.5:27b": {"enabled": True},
+            },
+            "default_models": {
+                "local_small": "qwen3.5:9b",
+                "local_medium": "qwen3.5:27b",
+                "local_large": "qwen3.5:27b",
+            },
+        },
+    }
 
 
 def _make_server() -> DashboardServer:
@@ -128,7 +176,31 @@ class TestServerAPI:
 
 
 class TestModelAllocation:
-    def test_triad_prefers_stronger_models_for_coder_and_reviewer(self):
+    def test_triad_balances_openai_and_ollama_by_complexity_when_both_are_enabled(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _openai_and_ollama_enabled() if key == "providers" else None)
+        runtime = GraphRuntime()
+        runtime._providers = {"openai-codex": object(), "ollama": object()}  # noqa: SLF001
+
+        model_map = runtime._build_agent_model_map(  # noqa: SLF001
+            complexity=40,
+            topology_id="triad",
+            agent_complexity={
+                "coordinator": 30,
+                "coder": 40,
+                "reviewer": 30,
+                "tester": 35,
+            },
+        )
+
+        assert model_map["coordinator"].provider == "ollama"
+        assert model_map["coordinator"].model_id == "qwen3.5:9b"
+        assert model_map["coder"].provider == "openai-codex"
+        assert model_map["reviewer"].provider == "openai-codex"
+        assert model_map["tester"].provider == "ollama"
+        assert model_map["tester"].model_id == "qwen3.5:27b"
+
+    def test_triad_prefers_stronger_models_for_coder_and_reviewer(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _all_anthropic_models_enabled() if key == "providers" else None)
         runtime = GraphRuntime()
         runtime._providers = {"anthropic": object()}  # noqa: SLF001
 
@@ -148,7 +220,8 @@ class TestModelAllocation:
         assert model_map["reviewer"].model_id == ANTHROPIC_SONNET_MODEL
         assert model_map["tester"].model_id == ANTHROPIC_HAIKU_MODEL
 
-    def test_hierarchy_prefers_stronger_models_for_research_and_code_roles(self):
+    def test_hierarchy_prefers_stronger_models_for_research_and_code_roles(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _all_anthropic_models_enabled() if key == "providers" else None)
         runtime = GraphRuntime()
         runtime._providers = {"anthropic": object()}  # noqa: SLF001
 
@@ -170,7 +243,8 @@ class TestModelAllocation:
         assert model_map["reviewer"].model_id == ANTHROPIC_SONNET_MODEL
 
     @pytest.mark.asyncio
-    async def test_llm_model_allocator_can_override_heuristic_assignments(self):
+    async def test_llm_model_allocator_can_override_heuristic_assignments(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _all_anthropic_models_enabled() if key == "providers" else None)
         runtime = GraphRuntime()
         allocator = MockLLMClient([
             CompletionResponse(
@@ -225,7 +299,8 @@ class TestModelAllocation:
         assert reasons["coder"] == "hard implementation"
 
     @pytest.mark.asyncio
-    async def test_predict_topology_uses_llm_allocator_for_agent_models(self):
+    async def test_predict_topology_uses_llm_allocator_for_agent_models(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _all_anthropic_models_enabled() if key == "providers" else None)
         runtime = GraphRuntime()
         predictor = MockLLMClient([
             CompletionResponse(
@@ -239,11 +314,6 @@ class TestModelAllocation:
                         "reviewer": 30,
                         "tester": 35,
                     },
-                }),
-                model=ANTHROPIC_SONNET_MODEL,
-            ),
-            CompletionResponse(
-                content=json.dumps({
                     "assignments": {
                         "coordinator": {"provider": "anthropic", "model": ANTHROPIC_HAIKU_MODEL, "reason": "routing"},
                         "coder": {"provider": "anthropic", "model": ANTHROPIC_OPUS_MODEL, "reason": "implementation"},

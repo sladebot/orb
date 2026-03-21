@@ -31,7 +31,45 @@ def tool_result_to_str(raw: object) -> str:
     return str(raw) if raw is not None else ""
 
 
-def to_openai_messages(messages: list[dict], system: str = "") -> list[dict]:
+def content_to_str(raw: object) -> str:
+    """Coerce arbitrary Anthropic/OpenAI-style content into plain text.
+
+    Ollama's native ``/api/chat`` endpoint expects each message ``content`` to be
+    a string. Passing through structured lists or dicts causes request parsing
+    failures, so unsupported blocks are flattened into a readable string.
+    """
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text:
+                        parts.append(text)
+                elif item.get("type") == "tool_result":
+                    text = tool_result_to_str(item.get("content", ""))
+                    if text:
+                        parts.append(text)
+                else:
+                    dumped = _json.dumps(item, ensure_ascii=True, sort_keys=True)
+                    if dumped:
+                        parts.append(dumped)
+            elif item is not None:
+                parts.append(str(item))
+        return " ".join(part for part in parts if part)
+    if isinstance(raw, dict):
+        return _json.dumps(raw, ensure_ascii=True, sort_keys=True)
+    return str(raw) if raw is not None else ""
+
+
+def to_openai_messages(
+    messages: list[dict],
+    system: str = "",
+    *,
+    tool_arguments_as_object: bool = False,
+) -> list[dict]:
     """Convert Anthropic-format conversation history to OpenAI/Ollama chat format.
 
     Anthropic stores:
@@ -58,12 +96,15 @@ def to_openai_messages(messages: list[dict], system: str = "") -> list[dict]:
                     if block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
                     elif block.get("type") == "tool_use":
+                        arguments = block.get("input", {})
+                        if not tool_arguments_as_object:
+                            arguments = _json.dumps(arguments)
                         tool_calls.append({
                             "id": block.get("id") or f"call_{block.get('name', '')}",
                             "type": "function",
                             "function": {
                                 "name": block.get("name", ""),
-                                "arguments": _json.dumps(block.get("input", {})),
+                                "arguments": arguments,
                             },
                         })
             # Ollama rejects assistant messages with empty content + tool_calls
@@ -90,10 +131,7 @@ def to_openai_messages(messages: list[dict], system: str = "") -> list[dict]:
                     "content": result_content,
                 })
 
-        elif isinstance(content, str):
-            converted.append({"role": role, "content": content})
-
         else:
-            converted.append(msg)
+            converted.append({"role": role, "content": content_to_str(content)})
 
     return converted

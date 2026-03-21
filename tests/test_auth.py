@@ -80,7 +80,7 @@ def test_auth_status_prints_model_matrix(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "Claude Haiku 4.5" in out
-    assert "Claude Sonnet 4.6" in out
-    assert "Claude Opus 4.6" in out
+    assert "Claude Sonnet 4" in out
+    assert "Claude Opus 4" in out
     assert "qwen3.5:9b" in out
     assert "qwen3.5:27b" in out

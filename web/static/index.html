@@ -96,6 +96,11 @@
                         </div>
                         <div id="composer-workdir" title="Current workspace">—</div>
                     </div>
+                    <div id="query-samples" aria-label="Sample prompts">
+                        <button class="query-sample" type="button" data-prompt="Inspect this repo and explain how auth works.">Explain auth flow</button>
+                        <button class="query-sample" type="button" data-prompt="Review the current changes for bugs, regressions, and missing tests.">Review changes</button>
+                        <button class="query-sample" type="button" data-prompt="Find the highest-impact next improvement for this project and implement it.">Next improvement</button>
+                    </div>
                     <div id="query-container">
                         <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
                         <div id="query-mentions" class="hidden"></div>

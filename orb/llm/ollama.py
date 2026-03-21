@@ -33,7 +33,11 @@ class OllamaProvider(LLMClient):
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
-        messages = to_openai_messages(request.messages, request.system)
+        messages = to_openai_messages(
+            request.messages,
+            request.system,
+            tool_arguments_as_object=True,
+        )
 
         payload: dict = {
             "model":    config.model_id if config else DEFAULT_MODEL,

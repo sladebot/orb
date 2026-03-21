@@ -917,6 +917,32 @@ body.is-resizing-panels {
     color: #697385;
 }
 
+#query-samples {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+    margin-bottom: 10px;
+}
+
+.query-sample {
+    padding: 7px 11px;
+    border-radius: 999px;
+    background: rgba(27, 32, 37, 0.9);
+    box-shadow: inset 0 0 0 1px rgba(65, 71, 84, 0.22);
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.query-sample:hover {
+    background: rgba(37, 42, 48, 0.96);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+}
+
 #query-mentions {
     position: absolute;
     left: 14px;

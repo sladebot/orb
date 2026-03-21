@@ -237,22 +237,16 @@ class GraphRuntime:
         self._config = config
         self._model_overrides = model_overrides
         self._tier_override = tier_override
-        provider_cfg = get_config("providers") or {}
         enabled = [
-            name for name, value in provider_cfg.items()
-            if isinstance(value, dict) and bool(value.get("enabled")) and name in self._all_providers
+            name for name in self._all_providers
+            if self._provider_enabled(name) and self._provider_has_enabled_models(name)
         ]
         self._enabled_providers = enabled
-        if enabled:
-            self._providers = {
-                name: client
-                for name, client in self._all_providers.items()
-                if name in set(enabled)
-            }
-            if not self._providers:
-                self._providers = dict(self._all_providers)
-        else:
-            self._providers = dict(self._all_providers)
+        self._providers = {
+            name: client
+            for name, client in self._all_providers.items()
+            if name in set(enabled)
+        }
 
     @staticmethod
     def _provider_config_entry(provider: str) -> dict:
@@ -261,15 +255,132 @@ class GraphRuntime:
         return entry if isinstance(entry, dict) else {}
 
     @classmethod
+    def _provider_enabled(cls, provider: str) -> bool:
+        return bool(cls._provider_config_entry(provider).get("enabled", True))
+
+    @classmethod
+    def _canonical_model_id(cls, provider: str, model_id: str) -> str:
+        if provider == "anthropic":
+            from orb.llm.anthropic import ANTHROPIC_MODEL_ALIASES
+
+            return ANTHROPIC_MODEL_ALIASES.get(model_id, model_id)
+        return model_id
+
+    @classmethod
+    def _provider_model_enabled(cls, provider: str, model_id: str) -> bool:
+        canonical_model_id = cls._canonical_model_id(provider, model_id)
+        models = cls._provider_config_entry(provider).get("models") or {}
+        if not isinstance(models, dict):
+            return True
+        entry = models.get(model_id)
+        if entry is None and canonical_model_id != model_id:
+            entry = models.get(canonical_model_id)
+        if entry is None:
+            return True
+        if isinstance(entry, bool):
+            return entry
+        if isinstance(entry, dict):
+            return bool(entry.get("enabled", True))
+        return True
+
+    @classmethod
+    def _provider_known_models(cls, provider: str) -> list[str]:
+        from orb.llm.types import (
+            ANTHROPIC_HAIKU_MODEL,
+            ANTHROPIC_OPUS_MODEL,
+            ANTHROPIC_SONNET_MODEL,
+        )
+
+        defaults = {
+            "anthropic": [
+                ANTHROPIC_HAIKU_MODEL,
+                ANTHROPIC_SONNET_MODEL,
+                ANTHROPIC_OPUS_MODEL,
+            ],
+            "openai-codex": ["gpt-5.4"],
+            "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
+        }
+        model_ids = list(defaults.get(provider, []))
+        for item in cls._provider_config_entry(provider).get("catalog") or []:
+            if isinstance(item, dict) and item.get("id"):
+                model_id = cls._canonical_model_id(provider, str(item["id"]))
+                if model_id not in model_ids:
+                    model_ids.append(model_id)
+        return model_ids
+
+    @classmethod
+    def _provider_has_enabled_models(cls, provider: str) -> bool:
+        if not cls._provider_enabled(provider):
+            return False
+        known = cls._provider_known_models(provider)
+        if not known:
+            return True
+        return any(cls._provider_model_enabled(provider, model_id) for model_id in known)
+
+    @classmethod
     def _provider_catalog(cls, provider: str) -> list[dict]:
         catalog = cls._provider_config_entry(provider).get("catalog") or []
-        return [item for item in catalog if isinstance(item, dict) and item.get("id")]
+        filtered: list[dict] = []
+        seen: set[str] = set()
+        for item in catalog:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            model_id = cls._canonical_model_id(provider, str(item["id"]))
+            if not cls._provider_model_enabled(provider, model_id) or model_id in seen:
+                continue
+            normalized = dict(item)
+            normalized["id"] = model_id
+            filtered.append(normalized)
+            seen.add(model_id)
+        return filtered
 
     @classmethod
     def _provider_default_model(cls, provider: str, key: str, fallback: str) -> str:
         defaults = cls._provider_config_entry(provider).get("default_models") or {}
         model_id = defaults.get(key) if isinstance(defaults, dict) else None
-        return str(model_id) if model_id else fallback
+        candidate = cls._canonical_model_id(provider, str(model_id) if model_id else fallback)
+        if cls._provider_model_enabled(provider, candidate):
+            return candidate
+
+        token_hints = {
+            "cloud_lite": ("haiku",),
+            "cloud_fast": ("sonnet", "gpt-5.4"),
+            "cloud_strong": ("opus", "gpt-5.4"),
+            "local_small": ("9b",),
+            "local_medium": ("27b",),
+            "local_large": ("27b",),
+        }
+        catalog = cls._provider_catalog(provider)
+        for token in token_hints.get(key, ()):
+            picked = next(
+                (str(item["id"]) for item in catalog if token in str(item.get("id", "")).lower()),
+                None,
+            )
+            if picked:
+                return picked
+
+        known_models = cls._provider_known_models(provider)
+        for token in token_hints.get(key, ()):
+            picked = next(
+                (
+                    model_id for model_id in known_models
+                    if token in model_id.lower() and cls._provider_model_enabled(provider, model_id)
+                ),
+                None,
+            )
+            if picked:
+                return picked
+
+        if cls._provider_model_enabled(provider, fallback):
+            return fallback
+        first_enabled = next((str(item["id"]) for item in catalog), None)
+        if first_enabled:
+            return first_enabled
+        first_known_enabled = next(
+            (model_id for model_id in known_models if cls._provider_model_enabled(provider, model_id)),
+            None,
+        )
+        return first_known_enabled or fallback
 
     @staticmethod
     def _anthropic_label_for_model(model_id: str) -> str:
@@ -386,10 +497,16 @@ class GraphRuntime:
             return [], {}
 
         catalog = []
+        seen: set[str] = set()
         for item in data:
             model_id = str(item.get("name") or "").strip()
             if not model_id:
                 continue
+            if model_id.endswith("-4k:latest"):
+                continue
+            if model_id in seen:
+                continue
+            seen.add(model_id)
             catalog.append({"id": model_id, "label": model_id, "local": True})
 
         defaults = {
@@ -401,18 +518,32 @@ class GraphRuntime:
 
     def settings_payload(self) -> dict:
         model_payload = self.models_payload()
+        models = model_payload.get("models", [])
         available = sorted(self._all_providers.keys())
         provider_config = get_config("providers") or {}
+        enabled_models_by_provider: dict[str, list[dict]] = {name: [] for name in available}
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            provider = str(item.get("provider") or "").strip()
+            if not provider or provider == "auto" or provider not in enabled_models_by_provider:
+                continue
+            enabled_models_by_provider[provider].append({
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or item.get("id") or ""),
+                "local": bool(item.get("local")),
+            })
         return {
             "available_providers": available,
             "providers": {
                 name: {
                     "enabled": bool((provider_config.get(name) or {}).get("enabled", True)),
                     "active": name in self._providers,
+                    "enabled_models": enabled_models_by_provider.get(name, []),
                 }
                 for name in available
             },
-            "models": model_payload.get("models", []),
+            "models": models,
         }
 
     def _dashboard_sessions_dir(self) -> Path:
@@ -783,23 +914,16 @@ class GraphRuntime:
         graph_view = self._topology_graph_view(selected_topology)
         agent_complexity = dict(predicted.get("agent_complexity") or {})
         overall_complexity = int(predicted.get("complexity", 50))
-        heuristic_model_map = self._build_agent_model_map(
+        fallback_model_map = self._build_agent_model_map(
             overall_complexity,
             model_pin=model_pin,
             agent_complexity=agent_complexity,
             topology_id=selected_topology,
         )
-        await self._record_plan_step(
-            "allocator",
-            "Built baseline model map",
-            ", ".join(f"{aid}={cfg.model_id}" for aid, cfg in heuristic_model_map.items()),
-        )
-        agent_model_map, _agent_model_reasons = await self._llm_assign_agent_models(
-            query,
+        agent_model_map, _agent_model_reasons = self._validate_agent_model_assignments(
             selected_topology,
-            overall_complexity,
-            agent_complexity,
-            heuristic_model_map,
+            predicted.get("agent_assignments") if isinstance(predicted.get("agent_assignments"), dict) else None,
+            fallback_model_map,
         )
         await self._record_plan_step(
             "allocator",
@@ -882,6 +1006,8 @@ class GraphRuntime:
                     })
             else:
                 for config in ANTHROPIC_MODELS.values():
+                    if not self._provider_model_enabled(ANTHROPIC_PROVIDER, config.model_id):
+                        continue
                     models.append({
                         "id": config.model_id,
                         "label": ANTHROPIC_MODEL_LABELS[config.model_id],
@@ -899,7 +1025,8 @@ class GraphRuntime:
                         "local": False,
                     })
             else:
-                models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
+                if self._provider_model_enabled("openai-codex", "gpt-5.4"):
+                    models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
         if "ollama" in self._providers:
             configured = self._provider_catalog("ollama")
             if configured:
@@ -911,10 +1038,10 @@ class GraphRuntime:
                         "local": True,
                     })
             else:
-                models += [
-                    {"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True},
-                    {"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True},
-                ]
+                if self._provider_model_enabled("ollama", "qwen3.5:9b"):
+                    models.append({"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True})
+                if self._provider_model_enabled("ollama", "qwen3.5:27b"):
+                    models.append({"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True})
         return {"models": models}
 
     def _pick_primary_result(self, completions: dict[str, str]) -> tuple[str | None, str]:
@@ -1011,10 +1138,10 @@ class GraphRuntime:
 
         def pick(score: int):
             if score <= 25:
-                return best(q9, q27, haiku, sonnet, opus)
-            if score <= 45:
-                return best(q27, sonnet, haiku, q9, opus)
-            if score <= 60:
+                return best(q9, haiku, q27, sonnet, opus)
+            if score <= 50:
+                return best(q27, haiku, sonnet, q9, opus)
+            if score <= 70:
                 return best(sonnet, haiku, q27, opus)
             if score <= 75:
                 return best(sonnet, haiku, opus)
@@ -1022,28 +1149,32 @@ class GraphRuntime:
 
         def pick_for_role(category: str, score: int):
             if category == "entry":
-                return best(q9, q27, haiku, sonnet, opus)
+                if score <= 35:
+                    return best(q9, haiku, q27, sonnet, opus)
+                return best(q27, haiku, sonnet, q9, opus)
             if category == "implementation":
-                if score <= 55:
-                    return best(sonnet, haiku, q27, opus)
-                if score <= 80:
-                    return best(sonnet, opus, haiku)
+                if score <= 35:
+                    return best(q27, sonnet, haiku, opus)
+                if score <= 70:
+                    return best(sonnet, q27, haiku, opus)
                 return best(opus, sonnet)
             if category == "review":
-                if score <= 50:
-                    return best(sonnet, haiku, q27, opus)
-                if score <= 80:
-                    return best(sonnet, opus, haiku)
+                if score <= 35:
+                    return best(q27, sonnet, haiku, opus)
+                if score <= 70:
+                    return best(sonnet, q27, haiku, opus)
                 return best(opus, sonnet)
             if category == "validation":
-                if score <= 35:
-                    return best(haiku, q27, q9, sonnet, opus)
-                return best(sonnet, haiku, q27, opus)
+                if score <= 30:
+                    return best(q9, haiku, q27, sonnet, opus)
+                if score <= 50:
+                    return best(q27, haiku, sonnet, q9, opus)
+                return best(sonnet, q27, haiku, opus)
             if category == "discovery":
-                if score <= 45:
-                    return best(sonnet, haiku, q27, opus)
-                if score <= 80:
-                    return best(sonnet, opus, haiku)
+                if score <= 40:
+                    return best(q27, sonnet, haiku, opus)
+                if score <= 75:
+                    return best(sonnet, q27, haiku, opus)
                 return best(opus, sonnet)
             return pick(score)
 
@@ -1102,44 +1233,41 @@ class GraphRuntime:
         return result
 
     def _allocator_model_config(self):
-        from orb.llm.types import ModelTier, ModelConfig, ANTHROPIC_MODELS, CODEX_MODELS
+        from orb.llm.types import ANTHROPIC_SONNET_MODEL, ModelTier, ModelConfig
 
         if "openai-codex" in self._providers:
-            return CODEX_MODELS.get(ModelTier.CLOUD_FAST) or CODEX_MODELS.get(ModelTier.CLOUD_STRONG)
+            model_id = self._provider_default_model("openai-codex", "cloud_fast", "gpt-5.4")
+            if self._provider_model_enabled("openai-codex", model_id):
+                return ModelConfig(ModelTier.CLOUD_FAST, model_id, "openai-codex")
         if "anthropic" in self._providers:
-            return ANTHROPIC_MODELS.get(ModelTier.CLOUD_FAST) or ANTHROPIC_MODELS.get(ModelTier.CLOUD_STRONG)
+            model_id = self._provider_default_model("anthropic", "cloud_fast", ANTHROPIC_SONNET_MODEL)
+            if self._provider_model_enabled("anthropic", model_id):
+                return ModelConfig(ModelTier.CLOUD_FAST, model_id, "anthropic")
         return None
 
     def _available_model_choices(self) -> list[dict]:
-        from orb.llm.types import ANTHROPIC_MODEL_DESCRIPTIONS, ANTHROPIC_MODELS
-
         choices: list[dict] = []
         seen: set[tuple[str, str]] = set()
-        for provider_name, configs in (
-            ("anthropic", [
-                (config.model_id, ANTHROPIC_MODEL_DESCRIPTIONS[config.model_id])
-                for config in ANTHROPIC_MODELS.values()
-            ]),
-            ("openai-codex", [
-                ("gpt-5.4", "strong coding and reasoning"),
-            ]),
-            ("ollama", [
-                ("qwen3.5:9b", "local small"),
-                ("qwen3.5:27b", "local larger"),
-            ]),
-        ):
-            if provider_name not in self._providers:
+        for item in self.models_payload().get("models", []):
+            if not isinstance(item, dict):
                 continue
-            for model_id, description in configs:
-                key = (provider_name, model_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                choices.append({
-                    "provider": provider_name,
-                    "model": model_id,
-                    "description": description,
-                })
+            provider_name = str(item.get("provider") or "")
+            model_id = str(item.get("id") or "")
+            if not provider_name or not model_id or provider_name == "auto" or provider_name not in self._providers:
+                continue
+            key = (provider_name, model_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = str(item.get("label") or model_id)
+            description = "enabled local model" if item.get("local") else "enabled cloud model"
+            choices.append({
+                "provider": provider_name,
+                "model": model_id,
+                "label": label,
+                "description": description,
+                "local": bool(item.get("local")),
+            })
         return choices
 
     def _validate_agent_model_assignments(
@@ -1252,7 +1380,12 @@ class GraphRuntime:
         return (validated or heuristic_map), reasons
 
     async def _llm_predict_topology(self, query: str, model_pin: str = "auto") -> dict:
-        from orb.llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, ANTHROPIC_MODELS, CODEX_MODELS
+        from orb.llm.types import (
+            ANTHROPIC_HAIKU_MODEL,
+            CompletionRequest,
+            ModelConfig,
+            ModelTier,
+        )
 
         def _default_result(complexity: int = 50, reason: str = "No cloud LLM provider available") -> dict:
             available_topologies = self._available_topologies()
@@ -1263,6 +1396,10 @@ class GraphRuntime:
             agent_models = {
                 role: cfg.model_id for role, cfg in agent_model_map.items()
             }
+            agent_assignments = {
+                role: {"provider": cfg.provider, "model": cfg.model_id}
+                for role, cfg in agent_model_map.items()
+            }
             return {
                 "topology": topology,
                 "label": topo.label,
@@ -1270,6 +1407,7 @@ class GraphRuntime:
                 "complexity": complexity,
                 "reason": reason,
                 "agent_models": agent_models,
+                "agent_assignments": agent_assignments,
                 "options": self._topology_options(topology),
             }
 
@@ -1285,42 +1423,74 @@ class GraphRuntime:
         using_ollama = "anthropic" not in self._providers and "openai-codex" not in self._providers
 
         available_topologies = self._available_topologies()
+        available_model_choices = self._available_model_choices()
+        if model_pin and model_pin != "auto":
+            filtered_choices = [item for item in available_model_choices if item.get("model") == model_pin]
+            available_model_choices = filtered_choices or available_model_choices
+        topology_payload = {
+            topology_id: {
+                "label": topo.label,
+                "description": topo.description,
+                "agents": {
+                    agent_id: {
+                        "role": agent.role,
+                        "category": agent.category,
+                        "description": agent.description,
+                    }
+                    for agent_id, agent in topo.agents.items()
+                },
+            }
+            for topology_id, topo in available_topologies.items()
+        }
         prompt = (
-            f"Analyze this software task and respond with JSON only.\n\n"
-            f"Task: {query}\n\n"
-            "Available topologies:\n"
-            + "\n".join(
-                f'- {topology_id}: {topo.label} — {topo.description}'
-                for topology_id, topo in available_topologies.items()
-            )
-            + "\n\nRespond with this exact JSON structure:\n"
+            "Plan the run for this software task and respond with JSON only.\n\n"
+            f"Task: {query}\n"
+            f"Requested model pin: {model_pin}\n\n"
+            "Choose the best topology and assign one enabled model to each agent.\n"
+            "Balance model size and task complexity across agents: small local models for lightweight work, "
+            "medium local models for moderate work, and cloud models for the hardest work.\n"
+            "Use only the listed topologies and enabled model choices.\n\n"
+            "Return JSON with this exact shape:\n"
             '{"complexity": <0-100 integer>, "reason": "<one sentence why>", '
-            '"topology": "<one topology id from the list above>", '
-            '"agent_complexity": {"<agent_id>": <0-100>, "...": <0-100>}}\n\n'
-            "complexity: overall task difficulty (0=trivial, 100=extremely complex/critical)\n"
-            "agent_complexity: per-agent difficulty scores for the selected topology\n"
+            '"topology": "<topology id>", '
+            '"agent_complexity": {"<agent_id>": <0-100>, "...": <0-100>}, '
+            '"assignments": {"<agent_id>": {"provider": "...", "model": "...", "reason": "..."}}}\n\n'
+            f"Available topologies: {json.dumps(topology_payload)}\n"
+            f"Enabled model choices: {json.dumps(available_model_choices)}\n"
         )
 
         if using_codex:
-            model_config = CODEX_MODELS.get(ModelTier.CLOUD_LITE) or CODEX_MODELS[ModelTier.CLOUD_FAST]
+            model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4")
+            model_config = ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")
         elif using_ollama:
-            model_config = DEFAULT_MODELS.get(ModelTier.LOCAL_SMALL) or DEFAULT_MODELS[ModelTier.LOCAL_MEDIUM]
+            model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
+            model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")
         else:
             cloud_overrides = {
                 t: cfg for t, cfg in (self._model_overrides or {}).items()
-                if getattr(cfg, "provider", None) == "anthropic"
+                if (
+                    getattr(cfg, "provider", None) == "anthropic"
+                    and self._provider_model_enabled("anthropic", getattr(cfg, "model_id", ""))
+                )
             }
             model_config = (
                 cloud_overrides.get(ModelTier.CLOUD_FAST)
                 or cloud_overrides.get(ModelTier.CLOUD_LITE)
-                or ANTHROPIC_MODELS.get(ModelTier.CLOUD_LITE)
-                or ANTHROPIC_MODELS[ModelTier.CLOUD_FAST]
+                or ModelConfig(
+                    ModelTier.CLOUD_LITE,
+                    self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL),
+                    "anthropic",
+                )
             )
 
         req = CompletionRequest(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
-            system="You are a task complexity analyzer. Reply with valid JSON only, no other text.",
+            system=(
+                "You are the coordinator model planner. "
+                "Choose topology and per-agent models for the whole run. "
+                "Return valid JSON only."
+            ),
             model_config=model_config,
         )
         try:
@@ -1354,21 +1524,23 @@ class GraphRuntime:
             for k, v in (parsed.get("agent_complexity") or {}).items()
             if k in topo.agents
         }
-        heuristic_model_map = self._build_agent_model_map(
+        fallback_model_map = self._build_agent_model_map(
             overall_complexity,
             model_pin,
             agent_complexity,
             topology_id=topology,
         )
-        agent_model_map, _agent_model_reasons = await self._llm_assign_agent_models(
-            query,
+        agent_model_map, _agent_model_reasons = self._validate_agent_model_assignments(
             topology,
-            overall_complexity,
-            agent_complexity,
-            heuristic_model_map,
+            parsed.get("assignments") if isinstance(parsed, dict) else None,
+            fallback_model_map,
         )
         agent_models = {
             role: cfg.model_id for role, cfg in agent_model_map.items()
+        }
+        agent_assignments = {
+            role: {"provider": cfg.provider, "model": cfg.model_id}
+            for role, cfg in agent_model_map.items()
         }
         return {
             "topology": topology,
@@ -1378,6 +1550,7 @@ class GraphRuntime:
             "reason": parsed.get("reason", ""),
             "agent_complexity": agent_complexity,
             "agent_models": agent_models,
+            "agent_assignments": agent_assignments,
             "options": self._topology_options(topology),
         }
 

@@ -14,9 +14,9 @@
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const NODE_W = 136;
-const NODE_H = 44;
+const NODE_H = 56;
 const CORE_NODE_W = 154;
-const CORE_NODE_H = 50;
+const CORE_NODE_H = 64;
 const NODE_RADIUS = 16;
 const PARTICLE_DURATION = 900; // ms
 
@@ -790,16 +790,26 @@ class GraphRenderer {
             ctx.restore();
         }
 
+        const modelLabel = node.model ? _shortModel(node.model) : 'pending';
+
         ctx.fillStyle = '#eef2f8';
         ctx.font = isCore ? '700 14px "Space Grotesk", sans-serif' : '700 12px "Space Grotesk", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(node.role || node.id, node.x, node.y + 0.5);
+        ctx.fillText(node.role || node.id, node.x, node.y - 7);
+
+        ctx.fillStyle = node.model ? 'rgba(172,199,255,0.95)' : 'rgba(142,151,168,0.92)';
+        ctx.font = '10px "JetBrains Mono", monospace';
+        let modelText = modelLabel;
+        const maxModelWidth = width - 28;
+        while (modelText.length && ctx.measureText(modelText).width > maxModelWidth) modelText = modelText.slice(0, -1);
+        if (modelText !== modelLabel) modelText += '…';
+        ctx.fillText(modelText, node.x, node.y + 10);
 
         if (isCore) {
-            ctx.fillStyle = 'rgba(142,151,168,0.92)';
-            ctx.font = '10px "JetBrains Mono", monospace';
-            ctx.fillText('ENTRY', node.x, y + height - 11);
+            ctx.fillStyle = 'rgba(142,151,168,0.78)';
+            ctx.font = '9px "JetBrains Mono", monospace';
+            ctx.fillText('ENTRY', node.x, y + height - 10);
         }
 
         if (isSelected || isHovered) this._drawNodeLabel(ctx, node, isCore, isSelected, isHovered);

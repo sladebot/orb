@@ -27,13 +27,13 @@ OPENAI_CODEX_PROVIDER = "openai-codex"
 OLLAMA_PROVIDER = "ollama"
 
 ANTHROPIC_HAIKU_MODEL = "claude-haiku-4-5-20251001"
-ANTHROPIC_SONNET_MODEL = "claude-sonnet-4-6"
-ANTHROPIC_OPUS_MODEL = "claude-opus-4-6"
+ANTHROPIC_SONNET_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_OPUS_MODEL = "claude-opus-4-20250514"
 
 ANTHROPIC_MODEL_LABELS: dict[str, str] = {
     ANTHROPIC_HAIKU_MODEL: "Claude Haiku 4.5",
-    ANTHROPIC_SONNET_MODEL: "Claude Sonnet 4.6",
-    ANTHROPIC_OPUS_MODEL: "Claude Opus 4.6",
+    ANTHROPIC_SONNET_MODEL: "Claude Sonnet 4",
+    ANTHROPIC_OPUS_MODEL: "Claude Opus 4",
 }
 
 ANTHROPIC_MODEL_DESCRIPTIONS: dict[str, str] = {
