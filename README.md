@@ -16,6 +16,9 @@ orb onboard   # first-time auth + settings
 ```
 
 Set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` env vars, or run `orb auth anthropic` / `orb auth openai` to configure interactively.
+OpenAI/Codex cloud models currently exposed by Orb are `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`.
+
+Provider enablement and defaults live in `~/.orb/config.json`.
 
 ---
 
@@ -26,6 +29,14 @@ orb daemon start                        # start background daemon
 orb tui                                 # attach terminal UI
 orb dashboard                           # open web dashboard at localhost:8080
 orb daemon stop
+```
+
+The daemon also supports provider filtering and remote binding:
+
+```bash
+orb daemon start --host 0.0.0.0
+orb daemon restart --local-only         # only local providers such as Ollama
+orb daemon restart --cloud-only         # only cloud providers
 ```
 
 ---
@@ -81,13 +92,14 @@ npx chromadb-admin   # open http://localhost:3000
 | Tier | Models |
 |------|--------|
 | Local | Ollama — Qwen, Llama, DeepSeek |
-| Cloud lite | Claude Haiku, GPT-4o-mini |
-| Cloud fast | Claude Sonnet, GPT-4o |
-| Cloud strong | Claude Opus, o3 |
+| Cloud lite | Claude Haiku, GPT-5.4 Nano |
+| Cloud fast | Claude Sonnet, GPT-5.4 Mini |
+| Cloud strong | Claude Opus, GPT-5.4 |
 
 ```bash
 orb --local-only "hello world"
 orb --cloud-only "complex refactor"
+orb --model gpt-5.4-mini "build a CLI"
 orb --model claude-opus-4-6 "..."
 ```
 
@@ -108,6 +120,7 @@ orb --model claude-opus-4-6 "..."
 
 ```bash
 pytest tests/ -v
+pytest -m scale                        # opt-in scale/perf tests
 ANTHROPIC_API_KEY=sk-ant-... pytest tests/integration/ -v
 ```
 
