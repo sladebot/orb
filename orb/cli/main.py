@@ -168,6 +168,18 @@ def parse_args() -> argparse.Namespace:
     daemon_common.add_argument("--host", default=None, help="Daemon bind host")
     daemon_common.add_argument("--port", type=int, default=None, help="Daemon bind port")
     daemon_common.add_argument("--workdir", type=str, help="Daemon workspace directory")
+    daemon_common.add_argument(
+        "--local-only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use only local models in the daemon",
+    )
+    daemon_common.add_argument(
+        "--cloud-only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Use only cloud models in the daemon",
+    )
     daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
     daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
     daemon_parser.add_argument("--port", type=int, default=8080, help="Daemon bind port (default: 8080)")
@@ -273,11 +285,24 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _daemon_command(host: str, port: int, workdir: Path) -> list[str]:
-    return [
+def _daemon_command(
+    host: str,
+    port: int,
+    workdir: Path,
+    *,
+    local_only: bool = False,
+    cloud_only: bool = False,
+) -> list[str]:
+    cmd = [
         sys.executable,
         "-m",
         "orb.cli.main",
+    ]
+    if local_only:
+        cmd.append("--local-only")
+    if cloud_only:
+        cmd.append("--cloud-only")
+    cmd.extend([
         "daemon",
         "run",
         "--host",
@@ -286,7 +311,8 @@ def _daemon_command(host: str, port: int, workdir: Path) -> list[str]:
         str(port),
         "--workdir",
         str(workdir),
-    ]
+    ])
+    return cmd
 
 
 def _port_in_use(host: str, port: int) -> bool:
@@ -329,7 +355,14 @@ def _port_looks_like_orb_daemon(host: str, port: int) -> bool:
     return body.get("type") == "init"
 
 
-def _start_managed_daemon(host: str, port: int, workdir: str | None) -> dict:
+def _start_managed_daemon(
+    host: str,
+    port: int,
+    workdir: str | None,
+    *,
+    local_only: bool = False,
+    cloud_only: bool = False,
+) -> dict:
     active = _load_daemon_state()
     if active and _pid_is_alive(int(active.get("pid", -1))):
         raise RuntimeError(f"Orb daemon already running (pid {active['pid']})")
@@ -342,7 +375,13 @@ def _start_managed_daemon(host: str, port: int, workdir: str | None) -> dict:
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     log_handle = open(LOG_FILE, "a", encoding="utf-8")
     proc = subprocess.Popen(
-        _daemon_command(host, port, resolved_workdir),
+        _daemon_command(
+            host,
+            port,
+            resolved_workdir,
+            local_only=local_only,
+            cloud_only=cloud_only,
+        ),
         stdin=subprocess.DEVNULL,
         stdout=log_handle,
         stderr=log_handle,
@@ -541,7 +580,13 @@ async def async_main() -> None:
             await _stop_managed_daemon(args.port or 8080)
             host = args.host or "127.0.0.1"
             port = args.port or 8080
-            info = _start_managed_daemon(host, port, args.workdir)
+            info = _start_managed_daemon(
+                host,
+                port,
+                args.workdir,
+                local_only=args.local_only,
+                cloud_only=args.cloud_only,
+            )
             print(f"  Restarted Orb daemon (pid {info['pid']})")
             print(f"  URL:       http://{info['host']}:{info['port']}")
             print(f"  Workspace: {info['workdir']}")
@@ -549,7 +594,13 @@ async def async_main() -> None:
         if daemon_action == "start":
             host = args.host or "127.0.0.1"
             port = args.port or 8080
-            info = _start_managed_daemon(host, port, args.workdir)
+            info = _start_managed_daemon(
+                host,
+                port,
+                args.workdir,
+                local_only=args.local_only,
+                cloud_only=args.cloud_only,
+            )
             print(f"  Started Orb daemon (pid {info['pid']})")
             print(f"  URL:       http://{info['host']}:{info['port']}")
             print(f"  Workspace: {info['workdir']}")
@@ -567,7 +618,10 @@ async def async_main() -> None:
         dash_state = DashboardState()
         dashboard_server = DashboardServer(dash_state, host=daemon_host, port=daemon_port)
         dashboard_server.set_providers(
-            providers=build_providers(local_only=False, cloud_only=False),
+            providers=build_providers(
+                local_only=args.local_only,
+                cloud_only=args.cloud_only,
+            ),
             config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
             model_overrides=None,
             tier_override=None,

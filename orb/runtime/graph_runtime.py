@@ -50,8 +50,11 @@ class GraphRuntime:
         self._model_overrides = None
         self._tier_override = None
         self._session_path = session_path
+        self._session_path_explicit = session_path is not None
         self._compactor = compactor or DEFAULT_COMPACTOR
         self._conversation_session = self._load_session()
+        if not self._session_path_explicit:
+            self._session_path = self._default_session_path(self._conversation_session.session_id)
         self._turn_count: int = 0
         self._last_result = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
@@ -297,7 +300,7 @@ class GraphRuntime:
                 ANTHROPIC_SONNET_MODEL,
                 ANTHROPIC_OPUS_MODEL,
             ],
-            "openai-codex": ["gpt-5.4"],
+            "openai-codex": ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"],
             "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
         }
         model_ids = list(defaults.get(provider, []))
@@ -344,7 +347,7 @@ class GraphRuntime:
 
         token_hints = {
             "cloud_lite": ("haiku",),
-            "cloud_fast": ("sonnet", "gpt-5.4"),
+            "cloud_fast": ("sonnet", "mini", "gpt-5.4"),
             "cloud_strong": ("opus", "gpt-5.4"),
             "local_small": ("9b",),
             "local_medium": ("27b",),
@@ -414,10 +417,14 @@ class GraphRuntime:
                     updated = True
 
         if "openai-codex" in self._all_providers:
-            catalog = [{"id": "gpt-5.4", "label": "GPT-5.4", "local": False}]
+            catalog = [
+                {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "local": False},
+                {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
+                {"id": "gpt-5.4", "label": "GPT-5.4", "local": False},
+            ]
             defaults = {
-                "cloud_lite": "gpt-5.4",
-                "cloud_fast": "gpt-5.4",
+                "cloud_lite": "gpt-5.4-nano",
+                "cloud_fast": "gpt-5.4-mini",
                 "cloud_strong": "gpt-5.4",
             }
             entry = dict(providers_cfg.get("openai-codex") or {})
@@ -699,10 +706,32 @@ class GraphRuntime:
             logger.warning("Failed to clear dashboard file changes: %s", exc)
 
     def _resolved_session_path(self) -> Path:
-        return self._session_path or (Path.cwd() / ".orb" / "session.json")
+        return self._session_path or self._default_session_path(self._conversation_session.session_id)
+
+    def _workspace_state_dir(self) -> Path:
+        return Path.cwd() / ".orb"
+
+    def _workspace_sessions_dir(self) -> Path:
+        return self._workspace_state_dir() / "sessions"
+
+    def _workspace_current_session_path(self) -> Path:
+        return self._workspace_state_dir() / "current_session"
+
+    def _default_session_path(self, session_id: str) -> Path:
+        return self._workspace_sessions_dir() / f"{session_id}.json"
 
     def _load_session(self) -> ConversationSession:
-        path = self._resolved_session_path()
+        if self._session_path_explicit:
+            path = self._resolved_session_path()
+        else:
+            current_path = self._workspace_current_session_path()
+            session_id = ""
+            try:
+                if current_path.exists():
+                    session_id = current_path.read_text().strip()
+            except OSError:
+                session_id = ""
+            path = self._default_session_path(session_id) if session_id else (Path.cwd() / ".orb" / "session.json")
         if not path.exists():
             return ConversationSession()
         try:
@@ -713,7 +742,12 @@ class GraphRuntime:
 
     def _persist_session(self) -> None:
         try:
-            self._conversation_session.save(self._resolved_session_path())
+            path = self._resolved_session_path()
+            self._conversation_session.save(path)
+            if not self._session_path_explicit:
+                current_path = self._workspace_current_session_path()
+                current_path.parent.mkdir(parents=True, exist_ok=True)
+                current_path.write_text(self._conversation_session.session_id)
         except OSError as exc:
             logger.warning("Failed to persist conversation session: %s", exc)
 
@@ -978,6 +1012,8 @@ class GraphRuntime:
         self._agents = {}
         self._last_result = None
         self._conversation_session = ConversationSession()
+        if not self._session_path_explicit:
+            self._session_path = self._default_session_path(self._conversation_session.session_id)
         self._run_transcript = RunTranscript(session=self._conversation_session)
         self._persist_session()
         self._sync_session_state()
@@ -1025,8 +1061,12 @@ class GraphRuntime:
                         "local": False,
                     })
             else:
+                if self._provider_model_enabled("openai-codex", "gpt-5.4-nano"):
+                    models.append({"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "provider": "openai-codex", "local": False})
+                if self._provider_model_enabled("openai-codex", "gpt-5.4-mini"):
+                    models.append({"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "provider": "openai-codex", "local": False})
                 if self._provider_model_enabled("openai-codex", "gpt-5.4"):
-                    models += [{"id": "gpt-5.4", "label": "GPT-5.4 (Codex)", "provider": "openai-codex", "local": False}]
+                    models.append({"id": "gpt-5.4", "label": "GPT-5.4", "provider": "openai-codex", "local": False})
         if "ollama" in self._providers:
             configured = self._provider_catalog("ollama")
             if configured:
@@ -1098,7 +1138,7 @@ class GraphRuntime:
         if model_pin and model_pin != "auto":
             if "claude" in model_pin:
                 force_provider = "anthropic"
-            elif model_pin == "gpt-5.4":
+            elif model_pin.startswith("gpt-5.4"):
                 force_provider = "openai-codex"
             elif "qwen" in model_pin or "llama" in model_pin:
                 force_provider = "ollama"

@@ -44,6 +44,27 @@ def _ollama_base_url() -> str:
     return "http://localhost:11434"
 
 
+def _ollama_keep_alive() -> str | None:
+    """Resolve Ollama keep-alive duration for resident models."""
+    env_value = os.environ.get("OLLAMA_KEEP_ALIVE")
+    if env_value is not None:
+        value = env_value.strip()
+        return value or None
+    try:
+        from ..cli.config import get as get_config
+        provider_cfg = get_config("providers") or {}
+        entry = provider_cfg.get("ollama") or {}
+        if isinstance(entry, dict):
+            value = entry.get("keep_alive")
+            if value is None:
+                return None
+            value = str(value).strip()
+            return value or None
+    except Exception:
+        return None
+    return None
+
+
 def _ollama_reachable() -> bool:
     global _ollama_reachable_cache
     # Config check always runs first — no caching for disabled state
@@ -66,6 +87,20 @@ def _ollama_reachable() -> bool:
         result = False
     _ollama_reachable_cache = (result, now)
     return result
+
+
+def _ollama_enabled() -> bool:
+    """True when local-model support is enabled in config.
+
+    Ollama provider registration should not depend on a startup-time liveness
+    probe; otherwise the daemon can come up with zero providers configured even
+    though Ollama is enabled and becomes reachable moments later.
+    """
+    try:
+        from ..cli.config import local_models_enabled
+        return bool(local_models_enabled())
+    except Exception:
+        return False
 
 
 def _real_openai_api_key() -> str | None:
@@ -168,8 +203,11 @@ def _build_registry() -> list[ProviderSpec]:
             name="ollama",
             is_cloud=False,
             env_vars=[],               # detected by liveness check, no env var required
-            check=_ollama_reachable,
-            factory=lambda: OllamaProvider(base_url=_ollama_base_url()),
+            check=_ollama_enabled,
+            factory=lambda: OllamaProvider(
+                base_url=_ollama_base_url(),
+                keep_alive=_ollama_keep_alive(),
+            ),
         ),
     ]
 

@@ -176,6 +176,32 @@ class TestServerAPI:
 
 
 class TestModelAllocation:
+    def test_models_payload_includes_openai_nano_and_mini(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: {
+            "openai-codex": {
+                "enabled": True,
+                "catalog": [
+                    {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "local": False},
+                    {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
+                    {"id": "gpt-5.4", "label": "GPT-5.4", "local": False},
+                ],
+                "default_models": {
+                    "cloud_lite": "gpt-5.4-nano",
+                    "cloud_fast": "gpt-5.4-mini",
+                    "cloud_strong": "gpt-5.4",
+                },
+            }
+        } if key == "providers" else None)
+        runtime = GraphRuntime()
+        runtime._providers = {"openai-codex": object()}  # noqa: SLF001
+
+        models = runtime.models_payload()["models"]
+        entries = {(item["provider"], item["id"]) for item in models}
+
+        assert ("openai-codex", "gpt-5.4-nano") in entries
+        assert ("openai-codex", "gpt-5.4-mini") in entries
+        assert ("openai-codex", "gpt-5.4") in entries
+
     def test_triad_balances_openai_and_ollama_by_complexity_when_both_are_enabled(self, monkeypatch):
         monkeypatch.setattr(runtime_mod, "get_config", lambda key: _openai_and_ollama_enabled() if key == "providers" else None)
         runtime = GraphRuntime()

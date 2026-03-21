@@ -15,6 +15,33 @@ def test_registry_uses_anthropic_setup_token_env(monkeypatch):
     assert registry._anthropic_api_key() == "sk-ant-oat01-from-env"
 
 
+def test_registry_uses_ollama_keep_alive_from_config(monkeypatch):
+    monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
+    monkeypatch.setattr(
+        "orb.cli.config.get",
+        lambda key: {"ollama": {"keep_alive": "-1"}} if key == "providers" else None,
+    )
+
+    assert registry._ollama_keep_alive() == "-1"
+
+
+def test_build_providers_local_only_keeps_ollama_without_startup_liveness(monkeypatch):
+    monkeypatch.setattr("orb.cli.config.local_models_enabled", lambda: True)
+    monkeypatch.setattr(registry, "_ollama_base_url", lambda: "http://localhost:11434")
+
+    class FakeOllamaProvider:
+        def __init__(self, base_url: str, keep_alive=None):
+            self.base_url = base_url
+            self.keep_alive = keep_alive
+
+    monkeypatch.setattr("orb.llm.registry.OllamaProvider", FakeOllamaProvider, raising=False)
+    monkeypatch.setattr("orb.llm.ollama.OllamaProvider", FakeOllamaProvider)
+
+    providers = registry.build_providers(local_only=True, cloud_only=False)
+
+    assert "ollama" in providers
+
+
 def test_anthropic_provider_reads_setup_token_env(monkeypatch):
     captured = {}
 
@@ -66,4 +93,3 @@ async def test_fetch_ollama_catalog_uses_registry_base_url(monkeypatch):
     assert requested["url"] == "http://remote-ollama.example:11434/api/tags"
     assert catalog == [{"id": "qwen3.5:27b", "label": "qwen3.5:27b", "local": True}]
     assert defaults["local_medium"] == "qwen3.5:27b"
-

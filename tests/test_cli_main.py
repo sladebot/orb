@@ -255,6 +255,41 @@ async def test_async_main_runs_daemon_server():
 
 
 @pytest.mark.asyncio
+async def test_async_main_runs_daemon_server_with_local_only():
+    args = _base_args(subcommand="daemon", host="127.0.0.1", port=9090, local_only=True)
+
+    class FakeEvent:
+        async def wait(self):
+            return None
+
+        def set(self):
+            return None
+
+    class FakeDashboardServer:
+        def __init__(self, *_args, **_kwargs):
+            self.set_providers = MagicMock()
+            self.start = AsyncMock()
+            self.stop = AsyncMock()
+
+    fake_loop = MagicMock()
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main.print_header"), \
+         patch("orb.cli.main.build_providers", return_value={"mock": object()}) as build_providers, \
+         patch("logging.basicConfig"), \
+         patch("orb.cli.main.tempfile.mkdtemp", return_value="/tmp/orb-daemon-test"), \
+         patch("orb.cli.main.os.chdir"), \
+         patch("orb.cli.main._save_daemon_state"), \
+         patch("orb.cli.main._clear_daemon_state"), \
+         patch("web.server.DashboardServer", FakeDashboardServer), \
+         patch("asyncio.Event", return_value=FakeEvent()), \
+         patch("asyncio.get_running_loop", return_value=fake_loop):
+        await async_main()
+
+    build_providers.assert_called_once_with(local_only=True, cloud_only=False)
+
+
+@pytest.mark.asyncio
 async def test_async_main_daemon_honors_explicit_workdir():
     args = _base_args(subcommand="daemon", host="127.0.0.1", port=9090, workdir="/tmp/orb-fixed")
 
@@ -304,7 +339,13 @@ async def test_async_main_daemon_start_starts_background_process():
          patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
         await async_main()
 
-    start_daemon.assert_called_once_with("0.0.0.0", 8080, None)
+    start_daemon.assert_called_once_with(
+        "0.0.0.0",
+        8080,
+        None,
+        local_only=False,
+        cloud_only=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -343,7 +384,63 @@ async def test_async_main_daemon_restart_restarts_background_process():
         await async_main()
 
     stop_daemon.assert_awaited_once()
-    start_daemon.assert_called_once_with("127.0.0.1", 8080, None)
+    start_daemon.assert_called_once_with(
+        "127.0.0.1",
+        8080,
+        None,
+        local_only=False,
+        cloud_only=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_main_daemon_restart_preserves_local_only():
+    args = _base_args(subcommand="daemon", daemon_action="restart", local_only=True, host="0.0.0.0")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon, \
+         patch("orb.cli.main._start_managed_daemon", return_value={
+             "pid": 5678,
+             "host": "0.0.0.0",
+             "port": 8080,
+             "workdir": "/tmp/orb-daemon-y",
+         }) as start_daemon:
+        await async_main()
+
+    stop_daemon.assert_awaited_once()
+    start_daemon.assert_called_once_with(
+        "0.0.0.0",
+        8080,
+        None,
+        local_only=True,
+        cloud_only=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_parse_args_accepts_daemon_local_only():
+    from orb.cli.main import parse_args
+
+    with patch("sys.argv", ["orb", "daemon", "restart", "--local-only", "--host", "0.0.0.0"]):
+        args = parse_args()
+
+    assert args.subcommand == "daemon"
+    assert args.daemon_action == "restart"
+    assert args.local_only is True
+    assert args.host == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_parse_args_preserves_root_local_only_for_daemon():
+    from orb.cli.main import parse_args
+
+    with patch("sys.argv", ["orb", "--local-only", "daemon", "run", "--host", "0.0.0.0"]):
+        args = parse_args()
+
+    assert args.subcommand == "daemon"
+    assert args.daemon_action == "run"
+    assert args.local_only is True
+    assert args.host == "0.0.0.0"
 
 
 @pytest.mark.asyncio

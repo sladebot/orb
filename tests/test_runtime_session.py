@@ -45,6 +45,35 @@ class TestConversationSession:
 
 
 class TestGraphRuntimeSession:
+    def test_runtime_default_session_paths_are_per_session(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        runtime = GraphRuntime()
+        first_path = runtime._resolved_session_path()  # noqa: SLF001
+        first_id = runtime._conversation_session.session_id  # noqa: SLF001
+        runtime._persist_session()  # noqa: SLF001
+
+        assert first_path == tmp_path / ".orb" / "sessions" / f"{first_id}.json"
+        assert first_path.exists()
+        assert (tmp_path / ".orb" / "current_session").read_text().strip() == first_id
+
+    @pytest.mark.asyncio
+    async def test_new_session_uses_new_session_file_by_default(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        runtime = GraphRuntime()
+        first_path = runtime._resolved_session_path()  # noqa: SLF001
+        runtime._persist_session()  # noqa: SLF001
+
+        status, payload = await runtime.new_session()
+
+        second_path = runtime._resolved_session_path()  # noqa: SLF001
+        assert status == 200
+        assert payload["ok"] is True
+        assert second_path != first_path
+        assert second_path.exists()
+        assert (tmp_path / ".orb" / "current_session").read_text().strip() == runtime._conversation_session.session_id  # noqa: SLF001
+
     def test_runtime_init_event_uses_persisted_user_turn_count(self, tmp_path: Path):
         path = tmp_path / "session.json"
         session = ConversationSession()
