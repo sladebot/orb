@@ -51,6 +51,10 @@ class Dashboard {
         this._mentionTargets = [];
         this._mentionSuggestions = [];
         this._mentionSelection = 0;
+        this._traceSessions = [];
+        this._traceRuns = [];
+        this._selectedTraceSession = '';
+        this._selectedTraceRun = '';
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -95,10 +99,14 @@ class Dashboard {
         document.getElementById('question-reply').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') this._sendQuestionReply();
         });
+        document.getElementById('theme-toggle')?.addEventListener('click', () => this._toggleTheme());
         document.getElementById('settings-button')?.addEventListener('click', () => this._openSettings());
         document.getElementById('new-session-button')?.addEventListener('click', () => this._createNewSession());
+        document.getElementById('traces-button')?.addEventListener('click', () => this._openTraceAdmin());
         document.getElementById('settings-close')?.addEventListener('click', () => this._closeSettings());
         document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
+        document.getElementById('trace-admin-close')?.addEventListener('click', () => this._closeTraceAdmin());
+        document.getElementById('trace-admin-backdrop')?.addEventListener('click', () => this._closeTraceAdmin());
 
         // Node detail panel
         document.getElementById('ndp-close').addEventListener('click', () => this._hideNodePanel());
@@ -138,6 +146,10 @@ class Dashboard {
         this._restorePanelState();
         this._restorePanelWidths();
         this.graph.setRunState('idle');
+
+        // Apply saved theme
+        const savedTheme = window.localStorage.getItem('orb:theme') || 'dark';
+        this._applyTheme(savedTheme);
 
         // Topology dropdown toggle
         document.getElementById('topology-trigger').addEventListener('click', (e) => {
@@ -383,6 +395,9 @@ class Dashboard {
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
         this._fileChanges = new Map();
         this._updateSessionUrl(data.session_id || '');
+        if (!document.getElementById('trace-admin-modal')?.classList.contains('hidden')) {
+            this._loadTraceSessions();
+        }
         if (this.changesLog) this.changesLog.innerHTML = '';
         this._setChangesEmptyState();
         this._renderPlanningState();
@@ -1192,6 +1207,20 @@ class Dashboard {
         this._setText('hero-model-label', this._modelLabels[this._selectedModel] || 'Auto');
     }
 
+    _applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        const btn = document.getElementById('theme-toggle');
+        if (btn) btn.textContent = theme === 'light' ? '🌙' : '☀';
+        if (this.graph) this.graph.setTheme(theme);
+    }
+
+    _toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') || 'dark';
+        const next = current === 'light' ? 'dark' : 'light';
+        window.localStorage.setItem('orb:theme', next);
+        this._applyTheme(next);
+    }
+
     _openSettings() {
         const modal = document.getElementById('settings-modal');
         if (!modal) return;
@@ -1204,6 +1233,244 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+    }
+
+    async _openTraceAdmin() {
+        const modal = document.getElementById('trace-admin-modal');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+        await this._loadTraceSessions();
+    }
+
+    _closeTraceAdmin() {
+        const modal = document.getElementById('trace-admin-modal');
+        if (!modal) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+
+    async _loadTraceSessions() {
+        const res = await fetch('/api/admin/traces/sessions');
+        const data = await res.json();
+        this._traceSessions = Array.isArray(data.sessions) ? data.sessions : [];
+        const preferredSession = this._selectedTraceSession || data.current_session_id || '';
+        const nextSession = this._traceSessions.find((item) => item.session_id === preferredSession)?.session_id
+            || this._traceSessions[0]?.session_id
+            || '';
+        this._selectedTraceSession = nextSession;
+        this._renderTraceSessions();
+        if (nextSession) {
+            await this._loadTraceRuns(nextSession);
+        } else {
+            this._traceRuns = [];
+            this._selectedTraceRun = '';
+            this._renderTraceRuns();
+            this._renderTraceDetail(null);
+        }
+    }
+
+    async _loadTraceRuns(sessionId) {
+        const res = await fetch(`/api/admin/traces/session/${encodeURIComponent(sessionId)}`);
+        const data = await res.json();
+        this._traceRuns = Array.isArray(data.runs) ? data.runs : [];
+        const nextRun = this._traceRuns.find((item) => item.run_id === this._selectedTraceRun)?.run_id
+            || this._traceRuns[0]?.run_id
+            || '';
+        this._selectedTraceRun = nextRun;
+        this._renderTraceRuns();
+        if (nextRun) {
+            await this._loadTraceDetail(nextRun);
+        } else {
+            this._renderTraceDetail(null);
+        }
+    }
+
+    async _loadTraceDetail(runId) {
+        const res = await fetch(`/api/admin/traces/run/${encodeURIComponent(runId)}`);
+        if (!res.ok) {
+            this._renderTraceDetail(null);
+            return;
+        }
+        const data = await res.json();
+        this._renderTraceDetail(data);
+    }
+
+    _renderTraceSessions() {
+        const container = document.getElementById('trace-session-list');
+        if (!container) return;
+        if (!this._traceSessions.length) {
+            container.innerHTML = '<div class="settings-empty">No traced sessions yet.</div>';
+            return;
+        }
+        container.innerHTML = this._traceSessions.map((session) => {
+            const active = session.session_id === this._selectedTraceSession;
+            const updated = session.updated_at ? new Date(session.updated_at * 1000).toLocaleString() : 'unknown';
+            return `
+                <button class="trace-admin-item${active ? ' is-active' : ''}" data-trace-session="${this._escapeHtml(session.session_id)}">
+                    <div class="trace-admin-item-title">${session.active ? 'Current' : 'Session'} ${this._escapeHtml((session.session_id || '').slice(0, 12) || 'unknown')}</div>
+                    <div class="trace-admin-item-copy">
+                        generation ${session.generation || 1} · turns ${session.user_turns || 0} · runs ${session.run_count || 0}<br>
+                        updated ${this._escapeHtml(updated)}
+                    </div>
+                </button>
+            `;
+        }).join('');
+        container.querySelectorAll('[data-trace-session]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                this._selectedTraceSession = button.dataset.traceSession || '';
+                this._selectedTraceRun = '';
+                this._renderTraceSessions();
+                await this._loadTraceRuns(this._selectedTraceSession);
+            });
+        });
+    }
+
+    _renderTraceRuns() {
+        const container = document.getElementById('trace-run-list');
+        if (!container) return;
+        if (!this._traceRuns.length) {
+            container.innerHTML = '<div class="settings-empty">No runs recorded for this session.</div>';
+            return;
+        }
+        container.innerHTML = this._traceRuns.map((run) => {
+            const active = run.run_id === this._selectedTraceRun;
+            const outcome = run.success === true ? 'success' : (run.success === false ? 'failure' : 'unknown');
+            return `
+                <button class="trace-admin-item${active ? ' is-active' : ''}" data-trace-run="${this._escapeHtml(run.run_id)}">
+                    <div class="trace-admin-item-title">${this._escapeHtml((run.topology_id || 'unknown').replaceAll('_', ' '))}</div>
+                    <div class="trace-admin-item-copy">
+                        run ${(run.run_id || '').slice(0, 12)} · ${outcome}<br>
+                        events ${run.event_count || 0} · agents ${run.agent_count || 0}
+                    </div>
+                </button>
+            `;
+        }).join('');
+        container.querySelectorAll('[data-trace-run]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                this._selectedTraceRun = button.dataset.traceRun || '';
+                this._renderTraceRuns();
+                await this._loadTraceDetail(this._selectedTraceRun);
+            });
+        });
+    }
+
+    _renderTraceDetail(payload) {
+        const summaryEl = document.getElementById('trace-detail-summary');
+        const eventsEl = document.getElementById('trace-detail-events');
+        const jsonEl = document.getElementById('trace-detail-json');
+        if (!summaryEl || !eventsEl || !jsonEl) return;
+        if (!payload || !payload.summary || !payload.trace) {
+            summaryEl.innerHTML = '<div class="settings-empty">Select a run to inspect its trace.</div>';
+            eventsEl.innerHTML = '';
+            jsonEl.textContent = '';
+            return;
+        }
+        const summary = payload.summary;
+        const outcome = summary.success === true ? 'success' : (summary.success === false ? 'failure' : 'unknown');
+        const agentPills = (summary.agent_ids || []).length
+            ? (summary.agent_ids || []).map((id) => `<span class="trace-detail-pill">${this._escapeHtml(id)}</span>`).join('')
+            : '<span class="trace-detail-pill">none</span>';
+        summaryEl.innerHTML = `
+            <div class="trace-detail-grid">
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Session</div>
+                    <div class="trace-detail-value"><code>${this._escapeHtml(summary.session_id || 'unknown')}</code></div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Run</div>
+                    <div class="trace-detail-value"><code>${this._escapeHtml(summary.run_id || 'unknown')}</code></div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Topology</div>
+                    <div class="trace-detail-value">${this._escapeHtml(summary.topology_id || 'unknown')}</div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Outcome</div>
+                    <div class="trace-detail-value">${this._escapeHtml(outcome)} · ${summary.event_count || 0} events · ${(summary.duration_s || 0).toFixed(2)}s</div>
+                </div>
+                <div class="trace-detail-card trace-detail-card-wide">
+                    <div class="trace-detail-label">Agents</div>
+                    <div class="trace-detail-value trace-detail-pills">${agentPills}</div>
+                </div>
+                <div class="trace-detail-card trace-detail-card-wide">
+                    <div class="trace-detail-label">Trace File</div>
+                    <div class="trace-detail-value"><code>${this._escapeHtml(payload.path || '')}</code></div>
+                </div>
+            </div>
+        `;
+        const stageLatencies = Object.entries(summary.stage_latencies || {});
+        const tokenUsage = Object.entries(summary.token_usage_by_agent || {});
+        const eventRows = Array.isArray(payload.trace.events) ? payload.trace.events : [];
+        eventsEl.innerHTML = `
+            <section class="trace-detail-section">
+                <div class="trace-detail-section-title">Stage Latencies</div>
+                <div class="trace-detail-stat-list">
+                    ${stageLatencies.length
+                        ? stageLatencies.map(([stage, value]) => `
+                            <div class="trace-detail-stat-row">
+                                <span class="trace-detail-stat-name">${this._escapeHtml(stage)}</span>
+                                <span class="trace-detail-stat-value">${Number(value || 0).toFixed(2)}s</span>
+                            </div>
+                        `).join('')
+                        : '<div class="trace-detail-empty">No stage timings recorded.</div>'}
+                </div>
+            </section>
+            <section class="trace-detail-section">
+                <div class="trace-detail-section-title">Token Usage</div>
+                <div class="trace-detail-stat-list">
+                    ${tokenUsage.length
+                        ? tokenUsage.map(([agent, usage]) => `
+                            <div class="trace-detail-stat-row">
+                                <span class="trace-detail-stat-name">${this._escapeHtml(agent)}</span>
+                                <span class="trace-detail-stat-value">${this._escapeHtml(Object.entries(usage || {}).map(([k, v]) => `${k}=${v}`).join(' · ') || 'none')}</span>
+                            </div>
+                        `).join('')
+                        : '<div class="trace-detail-empty">No token usage recorded.</div>'}
+                </div>
+            </section>
+            <section class="trace-detail-section">
+                <div class="trace-detail-section-title">Event Timeline</div>
+                <div class="trace-detail-event-list">
+                    ${eventRows.length
+                        ? eventRows.map((event) => this._renderTraceEventRow(event)).join('')
+                        : '<div class="trace-detail-empty">No events recorded.</div>'}
+                </div>
+            </section>
+        `;
+        jsonEl.textContent = JSON.stringify(payload.trace, null, 2);
+    }
+
+    _renderTraceEventRow(event) {
+        const kind = event?.kind || 'unknown';
+        const actor = event?.actor || '';
+        const target = event?.target || '';
+        const stage = event?.stage || '';
+        const status = event?.status || '';
+        const timestamp = event?.timestamp ? new Date(event.timestamp * 1000).toLocaleTimeString() : '';
+        const data = event?.data && typeof event.data === 'object' ? event.data : {};
+        const meta = [actor ? `actor=${actor}` : '', target ? `target=${target}` : '', stage ? `stage=${stage}` : '', status ? `status=${status}` : '']
+            .filter(Boolean)
+            .join(' · ');
+        const detailParts = [];
+        if (event?.message) detailParts.push(String(event.message));
+        if (Object.keys(data).length) {
+            const compact = Object.entries(data)
+                .slice(0, 4)
+                .map(([key, value]) => `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`)
+                .join(' · ');
+            if (compact) detailParts.push(compact);
+        }
+        return `
+            <div class="trace-detail-event">
+                <div class="trace-detail-event-main">
+                    <div class="trace-detail-event-kind">${this._escapeHtml(kind)}</div>
+                    ${meta ? `<div class="trace-detail-event-copy">${this._escapeHtml(meta)}</div>` : ''}
+                    ${detailParts.length ? `<div class="trace-detail-event-copy">${this._escapeHtml(detailParts.join(' | '))}</div>` : ''}
+                </div>
+                <div class="trace-detail-event-meta">${this._escapeHtml(timestamp)}</div>
+            </div>
+        `;
     }
 
     async _loadTopologyOptions() {

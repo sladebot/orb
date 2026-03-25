@@ -55,6 +55,9 @@ class DashboardServer:
         self._app.router.add_get("/api/models", self._models_handler)
         self._app.router.add_get("/api/settings", self._settings_get_handler)
         self._app.router.add_get("/api/topologies", self._topologies_handler)
+        self._app.router.add_get("/api/admin/traces/sessions", self._trace_sessions_handler)
+        self._app.router.add_get("/api/admin/traces/session/{session_id}", self._trace_session_runs_handler)
+        self._app.router.add_get("/api/admin/traces/run/{run_id}", self._trace_run_handler)
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
 
@@ -212,6 +215,24 @@ class DashboardServer:
                 "agents": list(topo.agents.keys()),
             })
         return web.json_response({"topologies": topologies})
+
+    async def _trace_sessions_handler(self, request: web.Request) -> web.Response:
+        return web.json_response(self.runtime.list_trace_sessions())
+
+    async def _trace_session_runs_handler(self, request: web.Request) -> web.Response:
+        session_id = request.match_info["session_id"].strip()
+        if not session_id:
+            return web.json_response({"error": "missing session id"}, status=400)
+        return web.json_response(self.runtime.list_session_traces(session_id))
+
+    async def _trace_run_handler(self, request: web.Request) -> web.Response:
+        run_id = request.match_info["run_id"].strip()
+        if not run_id:
+            return web.json_response({"error": "missing run id"}, status=400)
+        payload = self.runtime.get_trace_payload(run_id)
+        if payload is None:
+            return web.json_response({"error": "trace not found"}, status=404)
+        return web.json_response(payload)
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()

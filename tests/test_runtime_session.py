@@ -7,6 +7,7 @@ import pytest
 from orb.messaging.message import Message, MessageType
 from orb.runtime.graph_runtime import GraphRuntime
 from orb.runtime.transcript import ConversationSession
+from orb.tracing import RunTrace
 
 
 class _DummyTask:
@@ -120,3 +121,25 @@ class TestGraphRuntimeSession:
         loaded = ConversationSession.load(session_path)
         assert loaded.user_turn_count() == 1
         assert loaded.turns[-1].audience == "coder"
+
+    def test_trace_indexes_are_session_aware(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        runtime = GraphRuntime()
+        runtime._conversation_session = ConversationSession()
+        trace = RunTrace(session_id=runtime._conversation_session.session_id)
+        trace.record_topology_choice("triad", reason="test")
+        trace.record_final_outcome(success=True, result="ok")
+        runtime._last_trace = trace  # noqa: SLF001
+
+        runtime._persist_run_trace()  # noqa: SLF001
+
+        sessions = runtime.list_trace_sessions()
+        assert sessions["current_session_id"] == runtime._conversation_session.session_id
+        session_runs = runtime.list_session_traces(runtime._conversation_session.session_id)
+        assert len(session_runs["runs"]) == 1
+        assert session_runs["runs"][0]["run_id"] == trace.run_id
+
+        payload = runtime.get_trace_payload(trace.run_id)
+        assert payload is not None
+        assert payload["summary"]["session_id"] == runtime._conversation_session.session_id

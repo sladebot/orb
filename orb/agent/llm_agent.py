@@ -15,6 +15,7 @@ from ..memory.memory_node import MemoryEdge
 from ..messaging.bus import MessageBus
 from ..messaging.channel import AgentChannel, ChannelClosed
 from ..messaging.message import Message, MessageType
+from ..tracing.run_trace import RunTrace
 from .base import AgentNode
 from .conversation import ConversationHistory
 from .prompt_builder import build_system_prompt
@@ -44,6 +45,23 @@ def _display_model_name(model_id: str) -> str:
     return model_id
 
 
+def _normalize_usage(usage: object) -> dict[str, int]:
+    if isinstance(usage, dict):
+        items = usage.items()
+    elif hasattr(usage, "__dict__"):
+        items = vars(usage).items()
+    else:
+        return {}
+
+    normalized: dict[str, int] = {}
+    for key, value in items:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            normalized[str(key)] = int(value)
+    return normalized
+
+
 class LLMAgent(AgentNode):
     """Agent node that uses an LLM to process messages and communicate with neighbors."""
 
@@ -58,6 +76,7 @@ class LLMAgent(AgentNode):
         on_activity: ActivityCallback | None = None,
         on_heartbeat: HeartbeatCallback | None = None,
         tier_override: ModelTier | None = None,
+        trace: RunTrace | None = None,
     ) -> None:
         super().__init__(config, channel, bus)
         self._providers = providers
@@ -69,6 +88,7 @@ class LLMAgent(AgentNode):
         self._on_complete = on_complete
         self._on_activity = on_activity
         self._on_heartbeat = on_heartbeat
+        self._trace = trace
         self._on_file_write: Optional[Callable] = None  # (agent_id, path, content) -> None
         self._tier_override = tier_override
         self._system_prompt: str = ""
@@ -259,6 +279,17 @@ class LLMAgent(AgentNode):
                     break
                 except Exception as exc:
                     last_exc = exc
+                    if self._trace is not None:
+                        self._trace.record_retry(
+                            actor=self.node_id,
+                            stage="llm_call",
+                            attempt=attempt,
+                            message=str(exc),
+                            data={
+                                "provider": model_config.provider,
+                                "model": model_config.model_id,
+                            },
+                        )
                     logger.warning(
                         f"[{self.node_id}] LLM call failed "
                         f"({model_config.provider}/{model_config.model_id}) attempt {attempt}/{MAX_SAME_MODEL_RETRIES}: {exc}"
@@ -291,6 +322,15 @@ class LLMAgent(AgentNode):
 
             # _last_model is read by web/server.py and tui.py at completion time
             self._last_model = response.model
+            if self._trace is not None:
+                self._trace.record_llm_response(
+                    actor=self.node_id,
+                    model=response.model or model_config.model_id,
+                    provider=model_config.provider,
+                    usage=_normalize_usage(response.usage),
+                    stop_reason=response.stop_reason,
+                    tool_call_count=len(response.tool_calls),
+                )
             logger.info(
                 f"Agent {self.node_id} used model {response.model} "
                 f"(tier={model_config.tier.value}, tokens={response.usage})"
@@ -298,6 +338,16 @@ class LLMAgent(AgentNode):
             if response.content:
                 logger.debug(f"[{self.node_id}] response text: {response.content[:500]}")
             for tc in response.tool_calls:
+                if self._trace is not None:
+                    self._trace.record_tool_call(
+                        tc.name,
+                        actor=self.node_id,
+                        message=f"tool call {tc.name}",
+                        data={
+                            "tool_id": tc.id,
+                            "input": tc.input,
+                        },
+                    )
                 logger.debug(f"[{self.node_id}] tool_call: {tc.name}({tc.input})")
 
             # Build assistant message content for history

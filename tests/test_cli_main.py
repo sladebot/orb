@@ -7,15 +7,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from orb.cli.main import async_main
+from orb.tracing import RunTrace
 
 
 def _base_args(**overrides) -> Namespace:
     data = dict(
         subcommand=None,
+        trace_action=None,
+        run_id=None,
         query=None,
         interactive=False,
         trace=True,
         no_trace=False,
+        json=False,
+        path=False,
+        session=None,
+        current_session=False,
+        interval=0.5,
         budget=200,
         timeout=30.0,
         max_depth=10,
@@ -38,6 +46,81 @@ def _base_args(**overrides) -> Namespace:
     )
     data.update(overrides)
     return Namespace(**data)
+
+
+def test_cmd_trace_latest_and_list_are_session_aware(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    session_dir = tmp_path / ".orb"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "current_session").write_text("session-a")
+
+    trace = RunTrace(session_id="session-a")
+    trace.record_topology_choice("triad", reason="test")
+    trace.record_final_outcome(success=True, result="ok")
+    trace.save(tmp_path / ".orb" / "traces" / f"{trace.run_id}.json")
+    index_dir = tmp_path / ".orb" / "traces" / "by-session"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    index_dir.joinpath("session-a.json").write_text(
+        __import__("json").dumps({"session_id": "session-a", "runs": [trace.summary()]})
+    )
+
+    from orb.cli.main import _cmd_trace
+
+    _cmd_trace(_base_args(subcommand="trace", trace_action="latest", current_session=True))
+    latest_out = capsys.readouterr().out
+    assert "session-a" in latest_out
+    assert trace.run_id in latest_out
+
+    _cmd_trace(_base_args(subcommand="trace", trace_action="list", current_session=True))
+    list_out = capsys.readouterr().out
+    assert "Session session-a" in list_out
+    assert trace.run_id in list_out
+
+
+def test_cmd_trace_tail_streams_current_session_events(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    session_dir = tmp_path / ".orb"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "current_session").write_text("session-a")
+
+    trace = RunTrace(session_id="session-a")
+    trace.record_topology_choice("triad", reason="test")
+    trace.record_stage_start("planning", actor="router", message="planning started")
+    trace.save(tmp_path / ".orb" / "traces" / f"{trace.run_id}.json")
+    index_dir = tmp_path / ".orb" / "traces" / "by-session"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    index_dir.joinpath("session-a.json").write_text(
+        __import__("json").dumps({"session_id": "session-a", "runs": [trace.summary()]})
+    )
+
+    from orb.cli.main import _cmd_trace
+
+    def _stop(_seconds):
+        raise KeyboardInterrupt
+
+    with patch("orb.cli.main.time.sleep", side_effect=_stop):
+        _cmd_trace(_base_args(subcommand="trace", trace_action="tail", current_session=True, interval=0.01))
+
+    output = capsys.readouterr().out
+    assert "Following traces for session session-a" in output
+    assert trace.run_id in output
+    assert "topology_choice" in output
+
+
+def test_current_session_falls_back_to_managed_daemon_workdir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    daemon_workdir = tmp_path / "daemon-workdir"
+    daemon_state_dir = tmp_path / "home" / ".orb"
+    daemon_state_dir.mkdir(parents=True, exist_ok=True)
+    daemon_workdir.joinpath(".orb").mkdir(parents=True, exist_ok=True)
+    daemon_workdir.joinpath(".orb", "current_session").write_text("daemon-session")
+
+    with patch("orb.cli.main.DAEMON_STATE_FILE", str(daemon_state_dir / "daemon.json")):
+        (daemon_state_dir / "daemon.json").write_text(
+            __import__("json").dumps({"workdir": str(daemon_workdir)})
+        )
+        from orb.cli.main import _current_session_id
+        assert _current_session_id() == "daemon-session"
 
 
 @pytest.mark.asyncio

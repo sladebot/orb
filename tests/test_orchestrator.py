@@ -3,6 +3,7 @@ import pytest
 from orb.llm.types import ModelTier, ModelConfig, CompletionResponse, ToolCall
 from orb.orchestrator.types import OrchestratorConfig
 from orb.topologies import create_orchestrator
+from orb.tracing.run_trace import TraceEventKind
 from tests.test_claude_agent import MockLLMClient
 
 
@@ -121,3 +122,57 @@ class TestOrchestrator:
         result = await orchestrator.run("test")
         assert not result.success
         assert "not found" in result.error
+
+    async def test_trace_captures_core_run_events(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[
+                    ToolCall(id="t0", name="send_message", input={"to": "coder", "content": "Write hello world"}),
+                    ToolCall(id="t0b", name="complete_task", input={"result": "Task routed to coder"}),
+                ],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[
+                    ToolCall(id="t1", name="send_message", input={"to": "reviewer", "content": "code here"}),
+                    ToolCall(id="t2", name="send_message", input={"to": "tester", "content": "test this"}),
+                    ToolCall(id="t3", name="complete_task", input={"result": "Code written"}),
+                ],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="t4", name="complete_task", input={"result": "Reviewed"})],
+            ),
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="t5", name="complete_task", input={"result": "Tested"})],
+            ),
+        ])
+
+        mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
+        overrides = {t: mock_model for t in ModelTier}
+
+        orchestrator = create_orchestrator(
+            "triad",
+            providers={"mock": mock},
+            config=OrchestratorConfig(timeout=5.0, budget=50),
+            model_overrides=overrides,
+            trace=True,
+        )
+
+        result = await orchestrator.run("Write hello world")
+
+        assert result.success
+        assert orchestrator.trace is not None
+        kinds = [event.kind for event in orchestrator.trace.events]
+        assert TraceEventKind.TOPOLOGY_CHOICE in kinds
+        assert TraceEventKind.AGENT_SPAWN in kinds
+        assert TraceEventKind.INITIAL_INJECTION in kinds
+        assert TraceEventKind.MESSAGE_ROUTED in kinds
+        assert TraceEventKind.STAGE_FINISH in kinds
+        assert TraceEventKind.FINAL_OUTCOME in kinds

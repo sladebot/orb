@@ -105,6 +105,220 @@ def _cmd_logs(args: argparse.Namespace) -> None:
         pass
 
 
+def _managed_daemon_workdir() -> Path | None:
+    state = _load_daemon_state() or {}
+    workdir = str(state.get("workdir") or "").strip()
+    if not workdir:
+        return None
+    path = Path(workdir).expanduser()
+    return path if path.exists() else None
+
+
+def _trace_dir(workspace_root: Path | None = None) -> Path:
+    return (workspace_root or Path.cwd()) / ".orb" / "traces"
+
+
+def _trace_index_dir(workspace_root: Path | None = None) -> Path:
+    return _trace_dir(workspace_root) / "by-session"
+
+
+def _trace_roots() -> list[Path]:
+    roots = [Path.cwd()]
+    daemon_root = _managed_daemon_workdir()
+    if daemon_root is not None and daemon_root not in roots:
+        roots.append(daemon_root)
+    return roots
+
+
+def _current_session_id() -> str:
+    for root in _trace_roots():
+        path = root / ".orb" / "current_session"
+        try:
+            session_id = path.read_text().strip()
+        except OSError:
+            session_id = ""
+        if session_id:
+            return session_id
+    return ""
+
+
+def _latest_trace_path(session_id: str | None = None) -> Path | None:
+    candidates: list[Path] = []
+    for root in _trace_roots():
+        trace_dir = _trace_dir(root)
+        if session_id:
+            index_path = _trace_index_dir(root) / f"{session_id}.json"
+            if index_path.exists():
+                try:
+                    payload = json.loads(index_path.read_text())
+                except Exception:
+                    payload = {}
+                for item in payload.get("runs") or []:
+                    if isinstance(item, dict) and item.get("run_id"):
+                        candidate = trace_dir / f"{item['run_id']}.json"
+                        if candidate.is_file():
+                            candidates.append(candidate)
+        elif trace_dir.exists():
+            candidates.extend(path for path in trace_dir.glob("*.json") if path.is_file())
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def _list_session_runs(session_id: str) -> list[dict]:
+    for root in _trace_roots():
+        index_path = _trace_index_dir(root) / f"{session_id}.json"
+        if not index_path.exists():
+            continue
+        try:
+            payload = json.loads(index_path.read_text())
+        except Exception:
+            return []
+        runs = payload.get("runs") or []
+        return [item for item in runs if isinstance(item, dict)]
+    return []
+
+
+def _resolve_trace_session_arg(args: argparse.Namespace) -> str:
+    if getattr(args, "current_session", False):
+        return _current_session_id()
+    return (getattr(args, "session", None) or "").strip()
+
+
+def _format_trace_event_line(event: dict) -> str:
+    kind = str(event.get("kind") or "unknown")
+    actor = str(event.get("actor") or "")
+    target = str(event.get("target") or "")
+    stage = str(event.get("stage") or "")
+    status = str(event.get("status") or "")
+    message = str(event.get("message") or "").replace("\n", " ").strip()
+    parts = [kind]
+    if actor:
+        parts.append(f"actor={actor}")
+    if target:
+        parts.append(f"target={target}")
+    if stage:
+        parts.append(f"stage={stage}")
+    if status:
+        parts.append(f"status={status}")
+    line = " | ".join(parts)
+    if message:
+        line += f" | {message[:160]}"
+    return line
+
+
+def _cmd_trace(args: argparse.Namespace) -> None:
+    from orb.tracing import RunTrace
+
+    action = getattr(args, "trace_action", None) or "latest"
+    session_id = _resolve_trace_session_arg(args)
+
+    if action == "list":
+        if not session_id:
+            print("No session selected. Use --session <session_id> or --current-session.")
+            return
+        runs = _list_session_runs(session_id)
+        if not runs:
+            print(f"No traces recorded for session {session_id}.")
+            return
+        print(f"Session {session_id}")
+        for run in runs:
+            outcome = "unknown"
+            if run.get("success") is True:
+                outcome = "success"
+            elif run.get("success") is False:
+                outcome = "failure"
+            print(
+                f"{run.get('run_id', '')}  "
+                f"{run.get('topology_id', 'unknown')}  "
+                f"{outcome}  "
+                f"events={run.get('event_count', 0)}"
+            )
+        return
+
+    if action == "show":
+        run_id = (getattr(args, "run_id", None) or "").strip()
+        if not run_id:
+            print_error("Missing run id")
+            sys.exit(1)
+        path = next(
+            (_trace_dir(root) / f"{run_id}.json" for root in _trace_roots() if (_trace_dir(root) / f"{run_id}.json").exists()),
+            None,
+        )
+        if path is None or not path.exists():
+            print_error(f"Trace not found: {run_id}")
+            sys.exit(1)
+        trace = RunTrace.load(path)
+        if getattr(args, "path", False):
+            print(path)
+            return
+        if getattr(args, "json", False):
+            print(trace.to_json())
+            return
+        print(f"Trace: {path}")
+        print(trace.summary_text())
+        return
+
+    if action == "tail":
+        if not session_id:
+            print("No session selected. Use --session <session_id> or --current-session.")
+            return
+        print(f"Following traces for session {session_id}. Press Ctrl-C to stop.")
+        last_run_id = ""
+        seen_count = 0
+        try:
+            while True:
+                path = _latest_trace_path(session_id=session_id)
+                if path is not None:
+                    trace = RunTrace.load(path)
+                    if trace.run_id != last_run_id:
+                        last_run_id = trace.run_id
+                        seen_count = 0
+                        print(f"\nRun {trace.run_id} | topology={trace.topology_choice() or 'unknown'}")
+                    events = trace.to_dict().get("events") or []
+                    if len(events) > seen_count:
+                        for event in events[seen_count:]:
+                            if isinstance(event, dict):
+                                print(_format_trace_event_line(event))
+                        seen_count = len(events)
+                time.sleep(getattr(args, "interval", 0.5) or 0.5)
+        except KeyboardInterrupt:
+            return
+
+    if action != "latest":
+        print_error("Unknown trace command")
+        sys.exit(1)
+
+    path = _latest_trace_path(session_id=session_id or None)
+    if path is None:
+        print("No trace files found. Run Orb first. (.orb/traces)")
+        return
+
+    trace = RunTrace.load(path)
+    if getattr(args, "path", False):
+        print(path)
+        return
+    if getattr(args, "json", False):
+        print(trace.to_json())
+        return
+
+    summary = trace.summary()
+    print(f"Latest trace: {path}")
+    print(trace.summary_text())
+    if summary.get("agent_ids"):
+        print(f"Agents: {', '.join(summary['agent_ids'])}")
+    if summary.get("counts_by_kind"):
+        counts = ", ".join(f"{k}={v}" for k, v in sorted(summary["counts_by_kind"].items()))
+        print(f"Events: {counts}")
+    if summary.get("stage_latencies"):
+        latencies = ", ".join(
+            f"{stage}={duration:.2f}s"
+            for stage, duration in sorted(summary["stage_latencies"].items())
+        )
+        print(f"Stage Latencies: {latencies}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="orb",
@@ -146,6 +360,24 @@ def parse_args() -> argparse.Namespace:
     models_sub.add_parser("refresh", help="Fetch latest provider model catalogs into ~/.orb/config.json")
 
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+    trace_parser = subparsers.add_parser("trace", help="Inspect persisted run traces")
+    trace_sub = trace_parser.add_subparsers(dest="trace_action")
+    trace_latest = trace_sub.add_parser("latest", help="Show the latest trace")
+    trace_latest.add_argument("--json", action="store_true", help="Print the full trace JSON")
+    trace_latest.add_argument("--path", action="store_true", help="Print only the trace file path")
+    trace_latest.add_argument("--session", type=str, help="Restrict to a specific session id")
+    trace_latest.add_argument("--current-session", action="store_true", help="Restrict to the current workspace session")
+    trace_list = trace_sub.add_parser("list", help="List runs for a session")
+    trace_list.add_argument("--session", type=str, help="Session id to inspect")
+    trace_list.add_argument("--current-session", action="store_true", help="Use the current workspace session")
+    trace_tail = trace_sub.add_parser("tail", help="Tail trace events for a session")
+    trace_tail.add_argument("--session", type=str, help="Session id to inspect")
+    trace_tail.add_argument("--current-session", action="store_true", help="Use the current workspace session")
+    trace_tail.add_argument("--interval", type=float, default=0.5, help="Polling interval in seconds")
+    trace_show = trace_sub.add_parser("show", help="Show a specific run trace")
+    trace_show.add_argument("run_id", help="Run id")
+    trace_show.add_argument("--json", action="store_true", help="Print the full trace JSON")
+    trace_show.add_argument("--path", action="store_true", help="Print only the trace file path")
     topologies_parser = subparsers.add_parser("topologies", help="Manage user topology definitions")
     topologies_sub = topologies_parser.add_subparsers(dest="topologies_action")
     topologies_init = topologies_sub.add_parser("init", help="Create ~/.orb/topologies.yaml from the bundled sample")
@@ -538,6 +770,10 @@ async def async_main() -> None:
     if args.subcommand == "onboard":
         from .onboard import run_onboarding
         await run_onboarding()
+        return
+
+    if args.subcommand == "trace":
+        _cmd_trace(args)
         return
 
     if args.subcommand == "topologies":

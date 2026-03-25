@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.text import Text
 
 from ..messaging.message import Message, MessageType
+from .run_trace import RunTrace
 
 AGENT_COLORS = {
     "coder": "cyan",
@@ -17,17 +18,50 @@ AGENT_COLORS = {
 class EventLogger:
     """Real-time event logger for message routing."""
 
-    def __init__(self, enabled: bool = True) -> None:
+    def __init__(self, enabled: bool = True, trace: RunTrace | None = None) -> None:
         self.enabled = enabled
         self._start_time = time()
         self._console = Console()
         self._events: list[dict] = []
+        self.trace = trace
 
     def reset(self) -> None:
         self._start_time = time()
         self._events.clear()
+        if self.trace is not None:
+            self.trace.reset()
 
     def __call__(self, event: str, msg: Message) -> None:
+        if self.trace is not None:
+            if event == "injected":
+                self.trace.record_initial_injection(
+                    target=msg.to,
+                    message=msg.payload,
+                    data={
+                        "message_id": msg.id,
+                        "msg_type": msg.type.value,
+                        "depth": msg.depth,
+                        "chain_id": msg.chain_id,
+                        "model": msg.metadata.get("model", ""),
+                        "context_slice": list(msg.context_slice),
+                    },
+                )
+            else:
+                self.trace.record_message_routed(
+                    event,
+                    actor=msg.from_,
+                    target=msg.to,
+                    message=msg.payload,
+                    data={
+                        "message_id": msg.id,
+                        "msg_type": msg.type.value,
+                        "depth": msg.depth,
+                        "chain_id": msg.chain_id,
+                        "model": msg.metadata.get("model", ""),
+                        "context_slice": list(msg.context_slice),
+                    },
+                )
+
         if not self.enabled:
             return
 

@@ -145,3 +145,27 @@ async def test_no_clusters_skips_all_stores():
         await runtime._run_orchestrator("query", "triad")
 
     agent.set_subgraph_store.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_passes_trace_recorder():
+    runtime = _make_runtime()
+    agents = {"coordinator": MagicMock()}
+    mock_topo = _make_mock_topo(clusters={})
+    orc = _mock_orchestrator(agents)
+
+    from contextlib import ExitStack
+    patches = _patch_run_orchestrator_deps(runtime, mock_topo, orc)
+    create_orchestrator_mock = None
+    with ExitStack() as stack:
+        for idx, p in enumerate(patches):
+            current = stack.enter_context(p)
+            if idx == 0:
+                create_orchestrator_mock = current
+        await runtime._run_orchestrator("query", "triad")
+
+    assert create_orchestrator_mock is not None
+    create_orchestrator_mock.assert_called_once()
+    _, kwargs = create_orchestrator_mock.call_args
+    assert kwargs["trace"] is False
+    assert kwargs["trace_recorder"] is not None

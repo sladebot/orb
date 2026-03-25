@@ -55,6 +55,8 @@
                 <span id="connection-label">Daemon Offline</span>
             </div>
             <button id="new-session-button" type="button" title="Start a new session">New Session</button>
+            <button id="traces-button" type="button" title="Browse traces" aria-label="Browse traces">Traces</button>
+            <button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
             <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
         </header>
 
@@ -303,6 +305,38 @@
                         <div class="settings-section-copy">Provider enablement is read from <code>~/.orb/config.json</code>. Edit that file and restart the daemon to apply changes.</div>
                     </div>
                     <div id="provider-settings-list"></div>
+                </section>
+            </div>
+        </div>
+    </div>
+
+    <div id="trace-admin-modal" class="hidden" aria-hidden="true">
+        <div id="trace-admin-backdrop"></div>
+        <div id="trace-admin-panel" role="dialog" aria-modal="true" aria-labelledby="trace-admin-title">
+            <div id="trace-admin-header">
+                <div>
+                    <div class="settings-kicker">Admin</div>
+                    <h2 id="trace-admin-title">Trace Browser</h2>
+                </div>
+                <button id="trace-admin-close" type="button" title="Close trace browser">×</button>
+            </div>
+            <div id="trace-admin-body">
+                <section class="trace-admin-column">
+                    <div class="trace-admin-section-title">Sessions</div>
+                    <div id="trace-session-list" class="trace-admin-list"></div>
+                </section>
+                <section class="trace-admin-column">
+                    <div class="trace-admin-section-title">Runs</div>
+                    <div id="trace-run-list" class="trace-admin-list"></div>
+                </section>
+                <section class="trace-admin-column trace-admin-detail-column">
+                    <div class="trace-admin-section-title">Trace Detail</div>
+                    <div id="trace-detail-summary"></div>
+                    <div id="trace-detail-events"></div>
+                    <details id="trace-detail-raw">
+                        <summary>Raw JSON</summary>
+                        <pre id="trace-detail-json"></pre>
+                    </details>
                 </section>
             </div>
         </div>

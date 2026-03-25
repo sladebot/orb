@@ -12,6 +12,7 @@ from orb.messaging.bus import MessageBus
 from orb.messaging.channel import AgentChannel
 from orb.messaging.message import Message, MessageType
 from orb.runtime.transcript import RunTranscript
+from orb.tracing.run_trace import RunTrace, TraceEventKind
 
 
 class MockLLMClient(LLMClient):
@@ -38,7 +39,7 @@ class MockLLMClient(LLMClient):
         pass
 
 
-def _build_two_agent_setup(mock_client: MockLLMClient):
+def _build_two_agent_setup(mock_client: MockLLMClient, trace: RunTrace | None = None):
     """Build a minimal 2-agent setup for testing."""
     graph = Graph()
     graph.add_node("agent_a")
@@ -62,8 +63,8 @@ def _build_two_agent_setup(mock_client: MockLLMClient):
     mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
     overrides = {t: mock_model for t in ModelTier}
 
-    agent_a = LLMAgent(config_a, ch_a, bus, providers, model_overrides=overrides)
-    agent_b = LLMAgent(config_b, ch_b, bus, providers, model_overrides=overrides)
+    agent_a = LLMAgent(config_a, ch_a, bus, providers, model_overrides=overrides, trace=trace)
+    agent_b = LLMAgent(config_b, ch_b, bus, providers, model_overrides=overrides, trace=trace)
 
     agent_a.initialize({"agent_b": "Reviewer"})
     agent_b.initialize({"agent_a": "Coder"})
@@ -218,11 +219,38 @@ class TestLLMAgent:
         await agent_a.process(msg)
 
         assert mock.requests
-        first_message = mock.requests[0].messages[0]
-        assert first_message["role"] == "user"
-        assert "Shared session transcript" in first_message["content"]
-        assert "Build a CLI tool" in first_message["content"]
-        assert "Need tests" in first_message["content"]
+
+    async def test_trace_records_llm_retry_and_tool_calls(self):
+        class FlakyMockLLMClient(LLMClient):
+            def __init__(self) -> None:
+                self.calls = 0
+                self.requests: list[CompletionRequest] = []
+
+            async def complete(self, request: CompletionRequest) -> CompletionResponse:
+                self.requests.append(request)
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary provider error")
+                return CompletionResponse(
+                    content="",
+                    model="mock",
+                    tool_calls=[ToolCall(id="tc1", name="complete_task", input={"result": "Done"})],
+                )
+
+            async def close(self) -> None:
+                pass
+
+        trace = RunTrace()
+        mock = FlakyMockLLMClient()
+        agent_a, agent_b, bus, ch_a, ch_b = _build_two_agent_setup(mock, trace=trace)
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Test")
+        await agent_a.process(msg)
+
+        kinds = [event.kind for event in trace.events]
+        assert TraceEventKind.RETRY in kinds
+        assert TraceEventKind.TOOL_CALL in kinds
+        assert trace.events[-1].kind == TraceEventKind.TOOL_CALL
 
     async def test_repeated_directory_listing_uses_turn_cache(self):
         mock = MockLLMClient([

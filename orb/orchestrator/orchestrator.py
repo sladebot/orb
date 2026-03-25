@@ -9,6 +9,7 @@ from ..messaging.bus import MessageBus
 from ..messaging.channel import ChannelClosed
 from ..messaging.message import Message, MessageType
 from ..tracing.logger import EventLogger
+from ..tracing.run_trace import RunTrace
 from .types import OrchestratorConfig, RunResult
 
 try:
@@ -30,6 +31,8 @@ class Orchestrator:
         bus: MessageBus,
         config: OrchestratorConfig | None = None,
         event_logger: EventLogger | None = None,
+        trace: RunTrace | None = None,
+        topology_id: str = "",
         sandbox=None,
     ) -> None:
         self.agents = agents
@@ -37,6 +40,8 @@ class Orchestrator:
         self.config = config or OrchestratorConfig()
         self._completions: dict[str, str] = {}
         self._event_logger = event_logger
+        self._trace = trace or getattr(event_logger, "trace", None)
+        self._topology_id = topology_id
         self._completion_event = asyncio.Event()
         self._consensus_sent = False
         self._consensus_lock = asyncio.Lock()
@@ -45,11 +50,17 @@ class Orchestrator:
         if self._event_logger:
             self.bus.on_event(self._event_logger)
 
+    @property
+    def trace(self) -> RunTrace | None:
+        return self._trace
+
     async def _on_agent_complete(self, agent_id: str, result: str) -> None:
         self._completions[agent_id] = result
         transcript = getattr(self, "_transcript", None)
         if transcript is not None:
             transcript.add_completion(agent_id, result)
+        if self._trace is not None:
+            self._trace.record_completion(agent_id, result)
         logger.info(f"Agent {agent_id} completed ({len(self._completions)}/{len(self.agents)})")
 
         synthesis = self.config.synthesis_agent
@@ -127,10 +138,26 @@ class Orchestrator:
 
         if self._event_logger:
             self._event_logger.reset()
+        elif self._trace is not None:
+            self._trace.reset()
+
+        if self._trace is not None and self._topology_id:
+            self._trace.record_topology_choice(
+                self._topology_id,
+                reason="selected for orchestrated run",
+                task_type="software_task",
+                candidates=[self._topology_id],
+            )
 
         # Wire up completion callbacks
         for agent in self.agents.values():
             agent._on_complete = self._on_agent_complete
+            if self._trace is not None:
+                self._trace.record_agent_spawn(
+                    agent.node_id,
+                    role=agent.config.role,
+                    model=getattr(getattr(agent.config, "pinned_model", None), "model_id", ""),
+                )
 
         # Start all agents
         tasks = []
@@ -140,6 +167,13 @@ class Orchestrator:
         # Inject the initial task to the entry agent
         entry = entry_agent or self.config.entry_agent
         if entry not in self.agents:
+            if self._trace is not None:
+                self._trace.record_final_outcome(
+                    success=False,
+                    message="entry agent not found",
+                    error=f"Entry agent {entry!r} not found",
+                    data={"entry_agent": entry},
+                )
             return RunResult(success=False, error=f"Entry agent {entry!r} not found")
 
         initial_msg = Message(
@@ -188,6 +222,20 @@ class Orchestrator:
         # explicitly — callers that want to inspect outputs should do so before this)
         if self._sandbox:
             self._sandbox.cleanup()
+
+        if self._trace is not None:
+            self._trace.record_final_outcome(
+                success=len(self._completions) > 0,
+                message="timed out" if timed_out else "completed",
+                result=next(iter(self._completions.values()), ""),
+                error=None,
+                data={
+                    "timed_out": timed_out,
+                    "message_count": self.bus.message_count,
+                    "sandbox_dir": sandbox_dir,
+                    "completions": dict(self._completions),
+                },
+            )
 
         return RunResult(
             success=len(self._completions) > 0,

@@ -1,305 +1,484 @@
-# Sprint: Comprehensive Conversation Context
+# Sprint: Measurable, Controllable, Adaptive Orb
 
 ## Goal
 
-Upgrade Orb's agent conversation model from:
+Shift Orb improvement away from "make the agents smarter" in isolation and toward three system properties:
 
-- "append the latest incoming message and tool results"
+- more measurable
+- more controllable
+- more adaptive
 
-to:
+If Orb is a multi-agent runtime, the largest gains should come from better coordination, better runtime control, and better evidence about what actually worked.
 
-- "build and send a coherent, bounded conversation transcript that includes user turns, agent-to-agent turns, and relevant shared context"
+## Strategic Thesis
 
-so model requests behave more like Claude Code / Codex style session continuity.
+Most multi-agent failures are not raw model failures.
 
-## Current State
+They are usually one of:
 
-Today the main flow is:
+- the wrong topology for the task
+- too little runtime control over cost, latency, or fan-out
+- weak or missing verification
+- shared state that is too loose to trust
+- no telemetry to explain why a run succeeded or failed
 
-1. A `Message` is delivered to an agent.
-2. [`LLMAgent.process`](/Users/souranil/projects/orb/orb/agent/llm_agent.py) formats only that incoming message via `_format_incoming(...)`.
-3. That formatted string is appended into the agent's private [`ConversationHistory`](/Users/souranil/projects/orb/orb/agent/conversation.py).
-4. Tool results are appended as Anthropic-style `tool_result` user blocks.
-5. The next model call receives only that agent's local history plus tool traces.
+This sprint should therefore prioritize infrastructure that makes Orb observable and tunable before adding more agent complexity.
 
-This means Orb is missing a true session transcript model:
+## Current Gaps
 
-- user follow-ups are not represented as first-class session turns across the graph
-- agent-to-agent exchanges are not normalized into a reusable transcript object
-- the "conversation" sent to the model is mostly a local working log, not a shared session history
-- carryover is per-agent and lossy relative to the full collaboration
+Today Orb has the foundations for agent execution, routing, and UI visibility, but it is still missing the layers needed for systematic improvement:
+
+- topology choice is too static
+- runtime telemetry is not rich enough for comparison or replay
+- execution control is limited
+- verification is not first-class in planning or runtime policy
+- memory boundaries and access policy are not explicit enough
+- role definitions are still too generic
+- adaptation by budget, latency, and risk is under-specified
+- there is no strong replay/evaluation harness for configuration comparisons
+- safety constraints mostly live at the action level, not the topology layer
 
 ## Target End State
 
-Each agent model call should be built from three layers:
+Orb should be able to do all of the following:
 
-1. Local execution history
-- tool calls
-- tool results
-- the agent's own prior assistant outputs
+1. Choose an execution topology intentionally.
+- single agent when the task is simple
+- planner -> executor -> verifier when structure is needed
+- planner -> parallel workers -> judge when breadth is needed
+- escalate to stronger structures only when signals justify it
 
-2. Shared session transcript
-- user requests
-- direct user replies to agents
-- routed agent-to-agent messages
-- important completion/review/feedback turns
+2. Enforce runtime control.
+- caps on budget, latency, fan-out, and per-agent token spend
+- retries and kill policies for weak workers
+- early stopping when confidence is already high
 
-3. Structured runtime context
-- topology position
-- neighbor set
-- current task/run metadata
-- compacted prior-session summary when needed
+3. Verify important work deliberately.
+- contradiction checks
+- evidence-grounding checks
+- mandatory review for risky actions
+- synthesis scoring before final output
 
-The daemon/runtime should own transcript construction. Agents should consume a normalized transcript view, not invent it locally.
+4. Record enough telemetry to explain outcomes.
+- quality
+- cost
+- latency
+- retries
+- disagreement
+- verifier catches
+- human overrides
 
-## Architecture Direction
-
-### 1. Introduce a canonical conversation transcript model
-
-Add a runtime-owned transcript abstraction, for example:
-
-- `ConversationTurn`
-  - `id`
-  - `speaker`
-  - `audience`
-  - `kind` (`user_task`, `user_reply`, `agent_message`, `feedback`, `completion`, `system`)
-  - `content`
-  - `timestamp`
-  - `chain_id`
-  - `depth`
-  - `run_turn`
-  - `attachments/context_slice`
-
-- `RunTranscript`
-  - append turn
-  - query recent turns
-  - filter by audience/agent
-  - produce summarized windows
-
-This should live below the UI and above agent prompt assembly.
-
-### 2. Separate shared transcript from local agent history
-
-Keep local Anthropic/OpenAI tool-call formatting in [`ConversationHistory`](/Users/souranil/projects/orb/orb/agent/conversation.py), but stop treating it as the full session history.
-
-Instead:
-
-- `RunTranscript` = source of truth for multi-party conversation
-- `ConversationHistory` = provider-facing local working trace
-
-### 3. Build model requests from a composed context builder
-
-Introduce a request builder layer, for example:
-
-- `build_agent_request(agent, incoming_msg, transcript, local_history, topology_context, compaction_state)`
-
-This builder should assemble:
-
-- system prompt
-- shared transcript window
-- current local work state
-- provider-specific tool formatting
-
-That avoids pushing more transcript logic into `LLMAgent.process(...)`.
-
-### 4. Make transcript selection explicit
-
-Do not blindly dump every event forever.
-
-The context builder should include:
-
-- latest user task / follow-up
-- recent turns involving this agent
-- recent turns between this agent and its neighbors
-- notable upstream/downstream summaries
-- unresolved user questions or review feedback
-
-and exclude:
-
-- low-signal duplicate tool chatter
-- irrelevant branches from unrelated agent threads unless summarized
+5. Learn from prior runs.
+- compare topologies on the same tasks
+- detect regressions
+- produce routing data for future learned policies
 
 ## Phased Plan
 
-## Phase 1: Add Runtime Transcript Infrastructure
+## Phase 1: Instrument the Runtime
 
-Implement a daemon/runtime-owned transcript.
+Make every run measurable before changing routing behavior aggressively.
 
-Scope:
+Tasks:
 
-- add transcript models under `orb/runtime/` or `orb/conversation/`
-- append transcript turns whenever:
-  - orchestrator injects user task
-  - runtime injects user reply
-  - message bus routes agent messages
-  - agents complete
-  - consensus/system events matter for context
-- keep this independent of UI rendering
-
-Exit criteria:
-
-- one run produces a complete machine-readable transcript covering user and agent turns
-
-## Phase 2: Build a Conversation Context Composer
-
-Add a composer that converts transcript + local history into provider request messages.
+- define a canonical `RunTrace` schema for one Orb run
+- define event types for topology choice, agent spawn, stage start/finish, tool call, retry, verifier decision, human override, and final outcome
+- add trace collection hooks in orchestrator, runtime, message bus, and agent execution paths
+- attach per-agent model, role, token, and latency metadata to trace events
+- emit stable run IDs and trace IDs across logs and UI updates
+- add a trace export path for offline analysis and replay input generation
 
 Scope:
 
-- create a transcript windowing strategy per target agent
-- include:
-  - current user objective
-  - latest relevant transcript turns
-  - unresolved feedback/questions
-  - topology metadata
-- preserve tool-call compatibility for Anthropic/OpenAI
+- define a structured run trace schema
+- capture:
+  - chosen topology
+  - agent count
+  - per-agent model and role
+  - token usage by agent
+  - latency by stage
+  - tool calls
+  - retries
+  - verifier catches
+  - worker disagreement
+  - human override rate
+  - final success/failure
+- expose trace IDs and run summaries in daemon logs and UI surfaces
+- make telemetry exportable for offline analysis
 
 Exit criteria:
 
-- model calls are built from shared transcript plus local tool state, not just `_format_incoming(...)`
+- every non-trivial run emits a machine-readable trace that explains coordination, cost, and outcome
 
-## Phase 3: Refactor `LLMAgent.process(...)`
+## Phase 2: Build a Topology Library and Routing Heuristics
 
-Move request assembly out of the agent loop.
+Make topology selection explicit instead of implicit.
+
+Tasks:
+
+- define the first approved topology set Orb is allowed to use
+- encode each topology as an explicit runtime structure rather than ad hoc branching logic
+- define task categories that drive routing decisions
+- implement first-pass heuristic routing rules per task category
+- implement escalation rules for moving from simple to stronger topologies
+- implement early-stop rules for cases where extra coordination is unnecessary
+- record routing inputs and decisions into telemetry
 
 Scope:
 
-- reduce `LLMAgent.process(...)` responsibility to:
-  - receive message
-  - update local execution state
-  - ask composer for provider request
-  - execute tool loop
-- stop using `_format_incoming(...)` as the primary conversation model
-- keep provider-specific tool result handling in local history
+- define a small library of approved topologies
+  - single agent
+  - planner -> executor
+  - planner -> executor -> verifier
+  - planner -> parallel workers -> synthesizer
+  - planner -> parallel workers -> judge/verifier
+- add routing heuristics keyed by task shape
+  - simple direct task
+  - broad research
+  - coding task
+  - risky action task
+  - ambiguous task needing decomposition
+- add escalation and stop-early rules
+  - when to stay single-agent
+  - when to fan out
+  - when to escalate to a stronger topology
+  - when to stop after verifier confidence is high
+- store routing decisions in telemetry for later evaluation
 
 Exit criteria:
 
-- agent loop is thinner and conversation assembly is centralized
+- Orb can explain why it selected a topology and when it escalated or stopped
 
-## Phase 4: Add Transcript Compaction and Relevance Filtering
+## Phase 3: Add Execution Controller Policies
 
-A full transcript will grow quickly. Add bounded context management.
+Turn orchestration into active runtime control.
+
+Tasks:
+
+- add run-level budget configuration and enforcement
+- add per-agent token ceilings and overage handling
+- add max fan-out limits at topology execution time
+- add stage and worker timeout policies
+- add worker health checks and low-quality worker retry/kill rules
+- add fallback behavior when a chosen topology is too expensive or unstable
+- separate controller policy evaluation from topology selection logic
 
 Scope:
 
-- transcript compaction for older turns
-- per-agent relevance filters
-- preserve:
-  - decisions
-  - file/work summaries
-  - open questions
-  - latest user intent
-- avoid token blowups from raw multi-agent chatter
+- add run-level budget caps
+- add per-agent token limits
+- add max fan-out controls
+- enforce timeouts by stage and by worker
+- support early stopping on confidence and agreement signals
+- kill and retry failed or low-quality workers
+- fall back to simpler topologies when coordination cost exceeds value
+- add policy hooks so topology routing and controller decisions stay separate
 
 Exit criteria:
 
-- long sessions remain coherent without context overflow
+- runs respect explicit cost and latency budgets, and the runtime can cut off wasteful execution paths
 
-## Phase 5: Expose Transcript Semantics to UI and Debugging
+## Phase 4: Make Verification First-Class
 
-Once transcript is canonical, UIs should read from it.
+Treat verification as a role and policy decision, not a bolt-on.
+
+Tasks:
+
+- define explicit verifier and critic roles in the runtime
+- add contradiction-check workflows for multi-worker outputs
+- add evidence-grounding checks for research and synthesis tasks
+- define which task classes require mandatory review before completion
+- add a final synthesis scoring step before returning results
+- log verification cost, outcomes, and catches into run traces
 
 Scope:
 
-- dashboard/TUI can show transcript-derived conversation views
-- inspector can distinguish:
-  - shared transcript turn
-  - local tool trace
-  - user reply
-  - agent handoff
-- add debug visibility for the exact request context sent to each model
+- add explicit verifier and critic role families
+- support contradiction checks between workers
+- support evidence-grounding checks for research-style tasks
+- require stricter review for risky or destructive actions
+- add final synthesis scoring before completion
+- define policy for:
+  - when to verify
+  - what artifacts to verify
+  - when verification is worth the cost
 
 Exit criteria:
 
-- UIs reflect the same conversation model the daemon uses
+- risky or high-variance runs include structured verification rather than implicit trust in consensus
+
+## Phase 5: Make Roles and Memory Boundaries Explicit
+
+Reduce ambiguity in who does what and what state they can touch.
+
+Tasks:
+
+- define the initial role family catalog Orb will support
+- map existing agent behavior onto explicit role definitions
+- define memory layers for scratch, session, distilled, and human-approved state
+- implement read/write policy boundaries per memory layer
+- define persistence rules for what survives a run or session
+- add protections against stale shared state and cross-task contamination
+
+Scope:
+
+- formalize role families
+  - planner
+  - researcher
+  - coder
+  - critic
+  - verifier
+  - synthesizer
+  - router
+  - budget controller
+- define layered memory
+  - task-local scratchpad
+  - session memory
+  - long-term distilled memory
+  - human-approved critical memory
+- define explicit memory access policy
+  - who can read what
+  - who can write what
+  - what gets persisted
+- add guardrails against stale context, contamination, and error propagation
+
+Exit criteria:
+
+- Orb can measure role effectiveness and memory writes are policy-driven instead of ad hoc
+
+## Phase 6: Adapt Cost, Latency, and Risk at Runtime
+
+Use controller signals to adapt structure to real-world constraints.
+
+Tasks:
+
+- define adaptation inputs: difficulty, latency target, budget, risk, tools, and model availability
+- connect adaptation inputs to topology and model-tier selection
+- implement first-pass cost/performance adaptation rules
+- implement risk-based strengthening rules for high-stakes tasks
+- record adaptation decisions and outcomes for later analysis
+- keep the policy surface inspectable and overrideable by humans
+
+Scope:
+
+- choose topology and model tier based on:
+  - task difficulty
+  - latency requirement
+  - budget
+  - risk level
+  - tool availability
+  - model availability
+- define clear adaptation rules such as:
+  - simple task -> single cheaper agent
+  - broad research -> planner + parallel researchers + judge
+  - risky action -> planner + executor + strict verifier
+- capture adaptation outcomes in telemetry
+- keep heuristics simple and inspectable before moving to learned routing
+
+Exit criteria:
+
+- Orb no longer applies one coordination pattern to every task class
+
+## Phase 7: Build Replay and Evaluation Harness
+
+Create the system needed to compare Orb configurations systematically.
+
+Tasks:
+
+- define a benchmark task set representative of Orb’s target workloads
+- store replayable task inputs plus run traces needed to reproduce execution
+- add a harness that re-runs the same tasks across multiple configurations
+- compute comparable scorecards for quality, latency, cost, and verifier performance
+- add regression thresholds and automated diff reporting
+- expose outputs in a format usable for routing and controller tuning
+
+Scope:
+
+- define benchmark task sets
+- store replayable run inputs and traces
+- run the same tasks across multiple topology/controller configurations
+- compare:
+  - quality
+  - latency
+  - token usage
+  - total cost
+  - verifier catch rate
+  - human override rate
+- add scorecards and regression detection
+- make routing evaluation outputs usable for future learned policies
+
+Exit criteria:
+
+- any proposed coordination change can be compared against a baseline on the same task set
+
+## Phase 8: Add Topology-Level Safety Constraints
+
+Enforce safety in coordination structure, not only in individual agent actions.
+
+Tasks:
+
+- define the topology-level safety rules Orb must enforce
+- add communication constraints for unsafe or unnecessary all-to-all patterns
+- require verifier or human review before sensitive tool execution where policy demands it
+- cap tool classes by role and topology position
+- block unsafe delegation chains and recursive expansion patterns
+- record applied safety constraints and policy violations in run traces
+
+Scope:
+
+- limit unsafe all-to-all communication
+- require verifier review before sensitive tool execution where appropriate
+- require human approval for destructive actions
+- cap tool classes available to each role
+- prevent unsafe delegation chains or unbounded recursive delegation
+- make safety policy visible in run traces
+
+Exit criteria:
+
+- Orb can explain which topology-level constraints were applied to a run and why
+
+## Phase 9: Move from Heuristics to Learned Routing
+
+Only after telemetry and replay are solid, start learning from outcomes.
+
+Tasks:
+
+- define the training/evaluation dataset shape from replay and telemetry outputs
+- implement a lightweight learned routing policy candidate
+- compare learned routing against heuristic baselines on held-out tasks
+- keep heuristic fallback available for every learned-routing decision
+- define promotion thresholds for quality, cost, and latency before rollout
+- expose learned-routing decisions in an auditable way
+
+Scope:
+
+- use replay and telemetry data to evaluate routing quality
+- train or tune a lightweight topology-selection policy
+- keep learned routing auditable with fallback heuristics
+- gate learned routing behind evaluation thresholds
+- compare learned vs heuristic routing on held-out tasks
+
+Exit criteria:
+
+- learned routing beats or matches heuristic routing on benchmark quality/cost/latency without losing debuggability
 
 ## Key Design Decisions
 
-### A. Full conversation does not mean "everything verbatim forever"
+### A. Measure before optimizing
 
-Claude Code / Codex feel coherent because they preserve continuity, not because they resend unbounded raw logs.
+Without run traces, Orb cannot distinguish:
 
-Orb should aim for:
+- bad topology selection
+- weak verification
+- runtime budget failures
+- model-quality failures
 
-- authoritative transcript
-- relevance-filtered request windows
-- compaction for older context
+Telemetry is not a nice-to-have. It is the prerequisite for improvement.
+
+### B. Keep routing, control, and verification separate
+
+These are related but distinct layers:
+
+- router chooses structure
+- controller enforces runtime policy
+- verifier checks result quality and risk
+
+Separating them makes failures easier to debug and policies easier to evolve.
+
+### C. Prefer explicit heuristics before learned policies
+
+Orb should not jump straight to opaque learned routing.
+
+Start with:
+
+- approved topologies
+- clear routing heuristics
+- explicit controller rules
+- measurable evaluation
+
+Then learn from that data.
+
+### D. Shared memory must be policy-driven
+
+More shared context is not automatically better.
+
+Orb should optimize for:
+
+- relevant state
+- bounded persistence
+- role-appropriate access
+- human approval for critical facts
 
 not:
 
-- every message forever in every prompt
-
-### B. Shared transcript and local tool history should remain separate
-
-Tool traces are needed for provider protocol correctness.
-
-But:
-
-- shared collaboration transcript
-- local provider/tool transcript
-
-are different layers and should not be conflated.
-
-### C. Transcript ownership belongs in runtime, not in UIs
-
-The daemon must remain the source of truth so:
-
-- TUI/dashboard stay subscribers
-- attach/reconnect works
-- future API clients behave consistently
+- universal read/write access
+- unrestricted carryover across tasks
 
 ## Tests To Add
 
-### Transcript correctness
+### Telemetry and trace correctness
 
-- user task appears as first transcript turn
-- direct user reply to an agent is recorded distinctly from the original task
-- routed agent messages are recorded once with correct speaker/audience metadata
-- completion and feedback events are recorded as structured turns
+- topology choice is recorded for every routed run
+- per-agent token and latency accounting is stable
+- retries and verifier catches are logged correctly
+- human approval and override events are persisted distinctly
 
-### Context composer behavior
+### Routing and controller behavior
 
-- agent request includes latest user objective
-- agent request includes relevant neighbor turns
-- irrelevant branches are excluded
-- unresolved question from reviewer/tester is preserved until answered
+- simple tasks stay on simple topologies
+- risky tasks trigger stricter topologies
+- max fan-out and timeout policies are enforced
+- fallback to simpler topology works when workers fail or budgets are exceeded
 
-### Regression tests
+### Verification behavior
 
-- no consecutive invalid provider message roles
-- tool results still remain Anthropic-compatible
-- compaction preserves key decisions
-- follow-up tasks retain prior session continuity without replaying all raw chatter
+- contradiction checks catch divergent worker outputs
+- evidence-grounding checks fail unsupported claims
+- risky tasks require verifier completion before finalization
+
+### Replay and regression coverage
+
+- the same task set can be replayed across multiple configurations
+- scorecards are reproducible
+- regressions in quality/cost/latency are detected automatically
 
 ## Risks
 
-1. Token growth
-- A naive "full transcript" implementation will explode context size.
+1. Over-instrumentation
+- Telemetry that is too expensive or noisy can slow the runtime and obscure useful signals.
 
-2. Provider formatting conflicts
-- Anthropic/OpenAI tool-call message constraints still apply.
+2. Policy sprawl
+- If routing, verification, safety, and controller rules are added ad hoc, behavior will become hard to reason about.
 
-3. Duplicate information
-- If shared transcript and local history both restate the same turn, prompts will bloat and models may behave worse.
+3. False confidence from weak evaluation
+- A replay harness with poor benchmarks will optimize Orb for the wrong things.
 
-4. Cross-agent contamination
-- Every agent should not necessarily see every raw branch verbatim.
+4. Memory contamination
+- Shared state without strict write/read policy will amplify bad intermediate results.
+
+5. Coordination overhead
+- Stronger topologies can cost more than they help on ordinary tasks.
 
 ## Recommended Implementation Order
 
-1. Runtime transcript model
-2. Transcript append points in orchestrator/runtime/message bus
-3. Context composer
-4. `LLMAgent.process(...)` refactor
-5. Compaction/relevance filtering
-6. UI/debug surfaces
+1. Runtime telemetry and trace schema
+2. Approved topology library
+3. Routing heuristics
+4. Execution controller policies
+5. Verification roles and checks
+6. Explicit roles and memory policy
+7. Replay/evaluation harness
+8. Topology-level safety constraints
+9. Learned routing experiments
 
 ## Definition of Done
 
-This feature is done when:
+This sprint direction is successful when:
 
-- each model call is built from a structured shared transcript plus local execution state
-- user follow-ups and agent-to-agent discussion persist coherently across turns
-- long sessions compact safely
-- daemon remains the sole owner of transcript state
-- TUI/dashboard reflect transcript state without owning it
+- Orb can explain how a run was structured, controlled, and verified
+- topology choice is explicit and measurable
+- cost, latency, and fan-out are enforced by policy
+- risky tasks receive stronger verification and safety constraints
+- memory access is layered and intentional
+- configuration changes can be replayed and compared against baselines
+- learned routing is deferred until heuristic routing and evaluation are strong enough to trust

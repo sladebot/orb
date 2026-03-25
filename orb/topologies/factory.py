@@ -13,6 +13,7 @@ from ..orchestrator.orchestrator import Orchestrator
 from ..orchestrator.types import OrchestratorConfig
 from ..sandbox.sandbox import Sandbox
 from ..tracing.logger import EventLogger
+from ..tracing.run_trace import RunTrace
 from .context import build_topology_contexts
 from .loader import get_loader, normalize_topology_id
 from .schema import ModelSelectionSchema, TopologySchema
@@ -28,6 +29,7 @@ def create_orchestrator(
     config: OrchestratorConfig | None = None,
     model_overrides: dict["ModelTier", "ModelConfig"] | None = None,
     trace: bool = True,
+    trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
 ) -> Orchestrator:
@@ -47,6 +49,7 @@ def create_orchestrator(
         config=config,
         model_overrides=model_overrides,
         trace=trace,
+        trace_recorder=trace_recorder,
         tier_override=tier_override,
         agent_model_map=agent_model_map,
     )
@@ -63,6 +66,7 @@ def _build_from_schema(
     config: OrchestratorConfig | None = None,
     model_overrides: dict["ModelTier", "ModelConfig"] | None = None,
     trace: bool = True,
+    trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
 ) -> Orchestrator:
@@ -131,6 +135,7 @@ def _build_from_schema(
 
     # Shared sandbox
     sandbox = Sandbox(root=Path.cwd())
+    trace_recorder = trace_recorder or (RunTrace() if trace else None)
 
     # Build agents
     agents: dict[str, LLMAgent] = {}
@@ -146,6 +151,7 @@ def _build_from_schema(
             providers=providers,
             model_overrides=model_overrides,
             tier_override=tier_override,
+            trace=trace_recorder,
         )
 
     # Initialize agents with neighbor info
@@ -155,13 +161,15 @@ def _build_from_schema(
         }
         agent.initialize(neighbor_roles, topology_contexts[nid])
 
-    event_logger = EventLogger(enabled=trace)
+    event_logger = EventLogger(enabled=trace, trace=trace_recorder)
 
     return Orchestrator(
         agents=agents,
         bus=bus,
         config=config,
         event_logger=event_logger,
+        trace=trace_recorder,
+        topology_id=topo_def.id,
         sandbox=sandbox,
     )
 

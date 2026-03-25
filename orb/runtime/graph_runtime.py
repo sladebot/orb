@@ -15,6 +15,7 @@ from web.state import DashboardState
 from orb.cli.config import get as get_config, load_config, save_config
 from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
 from orb.messaging.channel import ChannelClosed
+from orb.tracing.run_trace import RunTrace
 from .transcript import ConversationSession, RunTranscript
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class GraphRuntime:
             self._session_path = self._default_session_path(self._conversation_session.session_id)
         self._turn_count: int = 0
         self._last_result = None
+        self._last_trace: RunTrace | None = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
 
     @staticmethod
@@ -300,7 +302,7 @@ class GraphRuntime:
                 ANTHROPIC_SONNET_MODEL,
                 ANTHROPIC_OPUS_MODEL,
             ],
-            "openai-codex": ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"],
+            "openai-codex": ["gpt-5.4-mini", "gpt-5.4"],
             "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
         }
         model_ids = list(defaults.get(provider, []))
@@ -418,12 +420,11 @@ class GraphRuntime:
 
         if "openai-codex" in self._all_providers:
             catalog = [
-                {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "local": False},
                 {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
                 {"id": "gpt-5.4", "label": "GPT-5.4", "local": False},
             ]
             defaults = {
-                "cloud_lite": "gpt-5.4-nano",
+                "cloud_lite": "gpt-5.4-mini",
                 "cloud_fast": "gpt-5.4-mini",
                 "cloud_strong": "gpt-5.4",
             }
@@ -588,6 +589,9 @@ class GraphRuntime:
         payload["session_id"] = resolved_session_id
         payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
         payload["run_active"] = self.running if run_active is None else bool(run_active)
+        if self._last_trace is not None:
+            payload["run_trace"] = self._last_trace.to_dict()
+            payload["run_trace_summary"] = self._last_trace.summary()
         return payload
 
     @staticmethod
@@ -664,6 +668,134 @@ class GraphRuntime:
             )
         except OSError as exc:
             logger.warning("Failed to persist dashboard snapshot: %s", exc)
+
+    def _trace_dir(self) -> Path:
+        return Path.cwd() / ".orb" / "traces"
+
+    def _trace_session_index_dir(self) -> Path:
+        return self._trace_dir() / "by-session"
+
+    def _trace_session_index_path(self, session_id: str) -> Path:
+        return self._trace_session_index_dir() / f"{session_id}.json"
+
+    def _load_trace_session_index(self, session_id: str) -> dict:
+        path = self._trace_session_index_path(session_id)
+        if not path.exists():
+            return {"session_id": session_id, "runs": []}
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, JSONDecodeError, ValueError, TypeError):
+            return {"session_id": session_id, "runs": []}
+        if not isinstance(payload, dict):
+            return {"session_id": session_id, "runs": []}
+        payload.setdefault("session_id", session_id)
+        payload.setdefault("runs", [])
+        return payload
+
+    def _persist_trace_session_index(self, trace: RunTrace) -> None:
+        session_id = trace.session_id or str(trace.metadata.get("session_id") or "")
+        if not session_id:
+            return
+        payload = self._load_trace_session_index(session_id)
+        runs = [
+            item for item in (payload.get("runs") or [])
+            if isinstance(item, dict) and item.get("run_id") != trace.run_id
+        ]
+        runs.append(trace.summary())
+        runs.sort(key=lambda item: float(item.get("last_event_at") or item.get("updated_at") or 0.0), reverse=True)
+        payload["runs"] = runs
+        payload["updated_at"] = time.time()
+        path = self._trace_session_index_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2))
+
+    def _persist_run_trace(self) -> None:
+        if self._last_trace is None:
+            return
+        try:
+            self._last_trace.save(self._trace_dir() / f"{self._last_trace.run_id}.json")
+            self._persist_trace_session_index(self._last_trace)
+        except OSError as exc:
+            logger.warning("Failed to persist run trace: %s", exc)
+
+    def list_trace_sessions(self) -> dict:
+        sessions_dir = self._workspace_sessions_dir()
+        summaries_by_id: dict[str, dict] = {}
+        session_paths = sorted(sessions_dir.glob("*.json")) if sessions_dir.exists() else []
+        for path in session_paths:
+            try:
+                session = ConversationSession.load(path)
+            except (OSError, JSONDecodeError, ValueError, TypeError):
+                continue
+            trace_index = self._load_trace_session_index(session.session_id)
+            runs = [
+                item for item in (trace_index.get("runs") or [])
+                if isinstance(item, dict)
+            ]
+            summaries_by_id[session.session_id] = {
+                "session_id": session.session_id,
+                "generation": session.generation,
+                "user_turns": session.user_turn_count(),
+                "updated_at": session.updated_at,
+                "run_count": len(runs),
+                "last_run_at": runs[0].get("last_event_at") if runs else None,
+                "active": session.session_id == self._conversation_session.session_id,
+            }
+        index_dir = self._trace_session_index_dir()
+        index_paths = sorted(index_dir.glob("*.json")) if index_dir.exists() else []
+        for path in index_paths:
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, JSONDecodeError, ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            session_id = str(payload.get("session_id") or path.stem)
+            if not session_id or session_id in summaries_by_id:
+                continue
+            runs = [item for item in (payload.get("runs") or []) if isinstance(item, dict)]
+            last_updated = max(
+                [float(item.get("last_event_at") or 0.0) for item in runs] or [0.0]
+            )
+            summaries_by_id[session_id] = {
+                "session_id": session_id,
+                "generation": 1,
+                "user_turns": 0,
+                "updated_at": last_updated,
+                "run_count": len(runs),
+                "last_run_at": runs[0].get("last_event_at") if runs else None,
+                "active": session_id == self._conversation_session.session_id,
+            }
+        summaries = list(summaries_by_id.values())
+        summaries.sort(key=lambda item: float(item.get("updated_at") or 0.0), reverse=True)
+        return {
+            "sessions": summaries,
+            "current_session_id": self._conversation_session.session_id,
+        }
+
+    def list_session_traces(self, session_id: str) -> dict:
+        trace_index = self._load_trace_session_index(session_id)
+        return {
+            "session_id": session_id,
+            "runs": [
+                item for item in (trace_index.get("runs") or [])
+                if isinstance(item, dict)
+            ],
+        }
+
+    def get_trace_payload(self, run_id: str) -> dict | None:
+        path = self._trace_dir() / f"{run_id}.json"
+        if not path.exists():
+            return None
+        try:
+            trace = RunTrace.load(path)
+        except (OSError, JSONDecodeError, ValueError, TypeError):
+            return None
+        return {
+            "trace": trace.to_dict(),
+            "summary": trace.summary(),
+            "path": str(path),
+        }
 
     def _persist_dashboard_file_change(self, *, path: str, agent: str, content: str, old_content: str = "") -> None:
         session_id = self._conversation_session.session_id
@@ -896,6 +1028,13 @@ class GraphRuntime:
             logger.exception("Failed to inject message")
             return 500, {"ok": False, "error": str(exc)}
         self._run_transcript.add_message(msg)
+        if self._last_trace is not None:
+            self._last_trace.record_human_override(
+                action="inject_message",
+                message=resolved_text,
+                data={"target": resolved_target, "message_id": msg.id},
+            )
+            self._persist_run_trace()
         self._persist_session()
         self._sync_session_state()
         self._persist_dashboard_snapshot()
@@ -930,15 +1069,30 @@ class GraphRuntime:
         self.state.reset()
         self._last_result = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
+        self._last_trace = RunTrace(
+            session_id=self._conversation_session.session_id,
+            metadata={"session_id": self._conversation_session.session_id},
+        )
         requested_target, query = self._resolve_conversation_target(
             query,
             default_target="coordinator",
         )
         self.state.run_query = query
         self._sync_session_state()
+        self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
         predicted = await self.predict_topology(query, model_pin=model_pin)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
+        self._last_trace.record_topology_choice(
+            selected_topology,
+            reason=str(predicted.get("reason") or predicted.get("description") or ""),
+            candidates=[option["topology"] for option in (predicted.get("options") or []) if isinstance(option, dict) and option.get("topology")],
+            data={
+                "complexity": int(predicted.get("complexity", 50)),
+                "requested_target": requested_target,
+            },
+        )
+        self._last_trace.record_stage_finish("planning", status="ok", message="run planning finished")
         await self._record_plan_step(
             "topology",
             "Selected topology",
@@ -959,10 +1113,17 @@ class GraphRuntime:
             predicted.get("agent_assignments") if isinstance(predicted.get("agent_assignments"), dict) else None,
             fallback_model_map,
         )
+        self._last_trace.record_stage_start("allocation", message="model allocation started")
         await self._record_plan_step(
             "allocator",
             "Pinned per-node models",
             ", ".join(f"{aid}={cfg.model_id}" for aid, cfg in agent_model_map.items()),
+        )
+        self._last_trace.record_stage_finish(
+            "allocation",
+            status="ok",
+            message="model allocation finished",
+            data={"agent_models": {aid: cfg.model_id for aid, cfg in agent_model_map.items()}},
         )
         agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
         self.state.topology_id = selected_topology
@@ -972,6 +1133,7 @@ class GraphRuntime:
         self.state.agent_models = agent_models
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
+        self._persist_run_trace()
         self._persist_dashboard_snapshot()
         self._clear_dashboard_file_changes()
         self._run_task = asyncio.create_task(
@@ -983,6 +1145,7 @@ class GraphRuntime:
                 complexity=overall_complexity,
                 agent_complexity=agent_complexity,
                 agent_model_map=agent_model_map,
+                trace_recorder=self._last_trace,
             )
         )
         self._run_task.add_done_callback(
@@ -998,6 +1161,12 @@ class GraphRuntime:
 
     async def stop_run(self) -> dict:
         if self.running:
+            if self._last_trace is not None:
+                self._last_trace.record_human_override(
+                    action="stop_run",
+                    message="run stopped by user",
+                )
+                self._persist_run_trace()
             self._run_task.cancel()
             self._persist_dashboard_snapshot(run_active=False)
             await self._broadcast(json.dumps({"type": "stopped"}))
@@ -1061,8 +1230,6 @@ class GraphRuntime:
                         "local": False,
                     })
             else:
-                if self._provider_model_enabled("openai-codex", "gpt-5.4-nano"):
-                    models.append({"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "provider": "openai-codex", "local": False})
                 if self._provider_model_enabled("openai-codex", "gpt-5.4-mini"):
                     models.append({"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "provider": "openai-codex", "local": False})
                 if self._provider_model_enabled("openai-codex", "gpt-5.4"):
@@ -1427,7 +1594,7 @@ class GraphRuntime:
             ModelTier,
         )
 
-        def _default_result(complexity: int = 50, reason: str = "No cloud LLM provider available") -> dict:
+        def _default_result(complexity: int = 50, reason: str = "Topology planner fell back to heuristic routing") -> dict:
             available_topologies = self._available_topologies()
             ranked = self._heuristic_topology_ranking(query, complexity)
             topology = ranked[0][0] if ranked else next(iter(available_topologies.keys()))
@@ -1454,13 +1621,16 @@ class GraphRuntime:
         predict_provider = (
             self._providers.get("anthropic")
             or self._providers.get("openai-codex")
+            or self._providers.get("openai")
             or self._providers.get("ollama")
         )
         if not predict_provider:
-            return _default_result()
+            return _default_result(reason="No topology planner provider available; using heuristic routing")
 
-        using_codex = "anthropic" not in self._providers and "openai-codex" in self._providers
-        using_ollama = "anthropic" not in self._providers and "openai-codex" not in self._providers
+        has_cloud = "anthropic" in self._providers or "openai-codex" in self._providers or "openai" in self._providers
+        using_codex = not has_cloud or ("openai-codex" in self._providers and "anthropic" not in self._providers and "openai" not in self._providers)
+        using_openai = "openai" in self._providers and "anthropic" not in self._providers and "openai-codex" not in self._providers
+        using_ollama = not has_cloud
 
         available_topologies = self._available_topologies()
         available_model_choices = self._available_model_choices()
@@ -1502,6 +1672,8 @@ class GraphRuntime:
         if using_codex:
             model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4")
             model_config = ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")
+        elif using_openai:
+            model_config = ModelConfig(ModelTier.CLOUD_LITE, "gpt-4o", "openai")
         elif using_ollama:
             model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
             model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")
@@ -1537,7 +1709,7 @@ class GraphRuntime:
             response = await predict_provider.complete(req)
         except Exception as exc:
             logger.warning("Topology prediction LLM call failed: %s", exc)
-            return _default_result()
+            return _default_result(reason=f"Topology planner call failed: {exc}")
 
         raw = (response.content or "").strip()
         if raw.startswith("```"):
@@ -1546,12 +1718,14 @@ class GraphRuntime:
                 raw = raw[4:]
         if len(raw) > 500_000:
             logger.warning("LLM response too large to parse (%d bytes), using default", len(raw))
-            return _default_result()
+            return _default_result(reason=f"Topology planner response too large to parse ({len(raw)} bytes)")
         try:
             parsed = json.loads(raw.strip())
         except JSONDecodeError:
             logger.warning("Failed to parse topology prediction response: %r", raw)
-            return _default_result()
+            preview = raw.strip().replace("\n", " ")[:160]
+            suffix = "…" if len(raw.strip()) > 160 else ""
+            return _default_result(reason=f"Topology planner response could not be parsed: {preview}{suffix}")
 
         topology = parsed.get("topology")
         if topology not in available_topologies:
@@ -1603,6 +1777,7 @@ class GraphRuntime:
         complexity: int = 50,
         agent_complexity: dict | None = None,
         agent_model_map: dict | None = None,
+        trace_recorder: RunTrace | None = None,
     ) -> None:
         from web.bridge import DashboardBridge
         from web.state import ActivityRecord
@@ -1612,6 +1787,10 @@ class GraphRuntime:
         effective_overrides = dict(self._model_overrides or {})
         agent_model_map = agent_model_map or self._build_agent_model_map(
             complexity, model_pin, agent_complexity, topology_id=topology
+        )
+        trace_recorder = trace_recorder or RunTrace(
+            session_id=self._conversation_session.session_id,
+            metadata={"session_id": self._conversation_session.session_id},
         )
         topology_label, topology_description, agent_positions = self._topology_meta(topology)
         graph_view = self._topology_graph_view(topology)
@@ -1623,9 +1802,17 @@ class GraphRuntime:
             config=self._config,
             model_overrides=effective_overrides or None,
             trace=False,
+            trace_recorder=trace_recorder,
             tier_override=self._tier_override,
             agent_model_map=agent_model_map or None,
         )
+        self._last_trace = trace_recorder
+        self._last_trace.record_stage_start(
+            "execution",
+            message="orchestrator execution started",
+            data={"topology_id": topology, "entry_agent": initial_target},
+        )
+        self._persist_run_trace()
 
         agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
         bridge.setup_agents(agent_roles)
@@ -1789,5 +1976,13 @@ class GraphRuntime:
                     "routed": self.state.message_count,
                 }))
 
+        if self._last_trace is not None:
+            self._last_trace.record_stage_finish(
+                "execution",
+                status="ok" if result else "error",
+                message="orchestrator execution finished",
+                data={"completed": bool(result), "message_count": self.state.message_count},
+            )
+            self._persist_run_trace()
         self._persist_dashboard_snapshot(run_active=False)
         self._last_result = result

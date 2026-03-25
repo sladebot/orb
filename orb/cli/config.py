@@ -26,7 +26,7 @@ _DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "models": {},
             "default_models": {
-                "cloud_lite": "gpt-5.4-nano",
+                "cloud_lite": "gpt-5.4-mini",
                 "cloud_fast": "gpt-5.4-mini",
                 "cloud_strong": "gpt-5.4",
             },

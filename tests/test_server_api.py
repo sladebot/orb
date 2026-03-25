@@ -72,6 +72,7 @@ def _openai_and_ollama_enabled():
 def _make_server() -> DashboardServer:
     state = DashboardState()
     server = DashboardServer(state, host="127.0.0.1", port=18099)
+    server._app["_test_server_ref"] = server
     mock_client = MockLLMClient([
         CompletionResponse(
             content="",
@@ -173,6 +174,33 @@ class TestServerAPI:
         data = await resp.json()
         assert data["ok"] is False
 
+    async def test_trace_admin_endpoints_return_session_and_run_data(self, client):
+        state_resp = await client.get("/api/state")
+        state_data = await state_resp.json()
+        session_id = state_data["session_id"]
+
+        runtime = client.server.app["_test_server_ref"].runtime  # type: ignore[index]
+        trace = runtime._last_trace = __import__("orb.tracing", fromlist=["RunTrace"]).RunTrace(session_id=session_id)  # noqa: SLF001
+        trace.record_topology_choice("triad", reason="test")
+        trace.record_final_outcome(success=True, result="done")
+        runtime._persist_run_trace()  # noqa: SLF001
+
+        sessions_resp = await client.get("/api/admin/traces/sessions")
+        assert sessions_resp.status == 200
+        sessions_data = await sessions_resp.json()
+        assert any(item["session_id"] == session_id for item in sessions_data["sessions"])
+
+        runs_resp = await client.get(f"/api/admin/traces/session/{session_id}")
+        assert runs_resp.status == 200
+        runs_data = await runs_resp.json()
+        assert runs_data["runs"][0]["session_id"] == session_id
+
+        run_id = runs_data["runs"][0]["run_id"]
+        trace_resp = await client.get(f"/api/admin/traces/run/{run_id}")
+        assert trace_resp.status == 200
+        trace_data = await trace_resp.json()
+        assert trace_data["summary"]["run_id"] == run_id
+
 
 
 class TestModelAllocation:
@@ -181,12 +209,11 @@ class TestModelAllocation:
             "openai-codex": {
                 "enabled": True,
                 "catalog": [
-                    {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano", "local": False},
                     {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
                     {"id": "gpt-5.4", "label": "GPT-5.4", "local": False},
                 ],
                 "default_models": {
-                    "cloud_lite": "gpt-5.4-nano",
+                    "cloud_lite": "gpt-5.4-mini",
                     "cloud_fast": "gpt-5.4-mini",
                     "cloud_strong": "gpt-5.4",
                 },
@@ -198,7 +225,6 @@ class TestModelAllocation:
         models = runtime.models_payload()["models"]
         entries = {(item["provider"], item["id"]) for item in models}
 
-        assert ("openai-codex", "gpt-5.4-nano") in entries
         assert ("openai-codex", "gpt-5.4-mini") in entries
         assert ("openai-codex", "gpt-5.4") in entries
 
@@ -355,3 +381,27 @@ class TestModelAllocation:
         predicted = await runtime.predict_topology("build a mobile app")
 
         assert predicted["agent_models"]["coder"] == ANTHROPIC_OPUS_MODEL
+
+    @pytest.mark.asyncio
+    async def test_predict_topology_uses_openai_provider(self, monkeypatch):
+        """openai provider (API key) should be used for topology prediction, not fall back to default."""
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: None)
+        runtime = GraphRuntime()
+        predictor = MockLLMClient([
+            CompletionResponse(
+                content=json.dumps({
+                    "complexity": 40,
+                    "reason": "Compact implementation task",
+                    "topology": "triad",
+                    "agent_complexity": {},
+                    "assignments": {},
+                }),
+                model="gpt-4o",
+            ),
+        ])
+        runtime._providers = {"openai": predictor}  # noqa: SLF001
+
+        predicted = await runtime.predict_topology("build a mobile app")
+
+        assert predicted.get("reason") != "No cloud LLM provider available"
+        assert predicted.get("topology") == "triad"
