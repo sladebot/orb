@@ -162,9 +162,15 @@ class GraphRenderer {
         this.runStateChangedAt = performance.now();
         this._layoutRows = [];
         this._layoutBands = [];
+        this.theme = 'dark';
 
         this._setupEvents();
         this._resize();
+    }
+
+    setTheme(theme) {
+        this.theme = theme;
+        this._gridCanvas = null; // invalidate cached grid
     }
 
     destroy() {
@@ -488,7 +494,7 @@ class GraphRenderer {
         if (this._gridCanvas) {
             ctx.drawImage(this._gridCanvas, -this.offsetX / this.zoom, -this.offsetY / this.zoom, W / this.zoom, H / this.zoom);
         } else {
-            ctx.fillStyle = '#0a0f13';
+            ctx.fillStyle = this.theme === 'light' ? '#eef1f6' : '#0a0f13';
             ctx.fillRect(-this.offsetX / this.zoom, -this.offsetY / this.zoom, W / this.zoom, H / this.zoom);
         }
 
@@ -512,7 +518,7 @@ class GraphRenderer {
     _drawGrid(ctx, W, H) {
         const spacing = 28;
         const r = 1;
-        ctx.fillStyle = 'rgba(65, 71, 84, 0.34)';
+        ctx.fillStyle = this.theme === 'light' ? 'rgba(140, 150, 175, 0.45)' : 'rgba(65, 71, 84, 0.34)';
         for (let x = spacing / 2; x < W; x += spacing) {
             for (let y = spacing / 2; y < H; y += spacing) {
                 ctx.beginPath();
@@ -524,31 +530,85 @@ class GraphRenderer {
 
     _drawEdges(ctx) {
         const isComplete = this.runState === 'completed';
+        const isLight = this.theme === 'light';
+        const now = performance.now();
+        // Animate dash offset for active edges — creates a "flow" direction cue
+        const flowOffset = -(now / 28) % 20;
+
         for (const edge of this.edges) {
             const src = this.nodes[edge.source];
             const tgt = this.nodes[edge.target];
             if (!src || !tgt) continue;
 
             const srcActive = src.status === 'running' || tgt.status === 'running';
-            const edgeColor = isComplete
-                ? 'rgba(125,226,167,0.34)'
-                : srcActive ? 'rgba(172,199,255,0.46)' : 'rgba(78,86,99,0.4)';
-            const arrowColor = isComplete ? '#7de2a7' : srcActive ? '#acc7ff' : '#6d7788';
+
+            let edgeColor, arrowColor, glowColor;
+            if (isComplete) {
+                edgeColor  = isLight ? 'rgba(22,163,74,0.55)'  : 'rgba(125,226,167,0.45)';
+                arrowColor = isLight ? '#16a34a'               : '#7de2a7';
+                glowColor  = isLight ? 'rgba(22,163,74,0.18)'  : 'rgba(125,226,167,0.18)';
+            } else if (srcActive) {
+                edgeColor  = isLight ? 'rgba(37,99,235,0.6)'   : 'rgba(172,199,255,0.56)';
+                arrowColor = isLight ? '#2563eb'               : '#acc7ff';
+                glowColor  = isLight ? 'rgba(37,99,235,0.18)'  : 'rgba(172,199,255,0.18)';
+            } else {
+                edgeColor  = isLight ? 'rgba(120,132,160,0.52)' : 'rgba(90,98,115,0.52)';
+                arrowColor = isLight ? '#8893a8'                : '#7a8499';
+                glowColor  = null;
+            }
 
             const route = this._edgeRoute(src, tgt);
             if (!route) continue;
 
             ctx.save();
+            ctx.lineCap  = 'round';
+            ctx.lineJoin = 'round';
+
+            // 1. Glow underpass (active / complete only)
+            if (glowColor) {
+                ctx.save();
+                ctx.strokeStyle = glowColor;
+                ctx.lineWidth   = srcActive ? 7 : 6;
+                ctx.shadowColor = arrowColor;
+                ctx.shadowBlur  = srcActive ? 12 : 8;
+                ctx.setLineDash([]);
+                this._traceRoute(ctx, route);
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // 2. Main edge line
+            const lineWidth = isComplete ? 1.6 : srcActive ? 1.9 : 1.4;
             ctx.strokeStyle = edgeColor;
-            ctx.lineWidth   = isComplete ? 1.5 : srcActive ? 1.8 : 1.35;
-            ctx.lineCap     = 'round';
-            ctx.lineJoin    = 'round';
-            ctx.setLineDash(isComplete ? [4, 8] : srcActive ? [8, 8] : [7, 10]);
+            ctx.lineWidth   = lineWidth;
+
+            if (isComplete) {
+                ctx.setLineDash([5, 9]);
+                ctx.lineDashOffset = 0;
+            } else if (srcActive) {
+                ctx.setLineDash([9, 9]);
+                ctx.lineDashOffset = flowOffset;
+            } else {
+                ctx.setLineDash([6, 11]);
+                ctx.lineDashOffset = 0;
+            }
+
             this._traceRoute(ctx, route);
             ctx.stroke();
             ctx.setLineDash([]);
+            ctx.lineDashOffset = 0;
 
-            this._drawArrow(ctx, route[route.length - 2], route[route.length - 1], arrowColor);
+            // 3. Arrow head with subtle glow when active
+            if ((srcActive || isComplete) && glowColor) {
+                ctx.save();
+                ctx.shadowColor = arrowColor;
+                ctx.shadowBlur  = srcActive ? 8 : 5;
+                this._drawArrow(ctx, route[route.length - 2], route[route.length - 1], arrowColor, srcActive ? 11 : 9, srcActive ? 6 : 5);
+                ctx.restore();
+            } else {
+                this._drawArrow(ctx, route[route.length - 2], route[route.length - 1], arrowColor, 9, 5);
+            }
+
             ctx.restore();
         }
     }
@@ -596,21 +656,22 @@ class GraphRenderer {
 
     _drawNetworkStatus(ctx, W, H) {
         let label = 'Idle';
-        let accent = 'rgba(193, 198, 214, 0.82)';
-        let fill = 'rgba(27, 32, 37, 0.82)';
+        let accent = this.theme === 'light' ? 'rgba(107,118,148,0.9)' : 'rgba(193, 198, 214, 0.82)';
+        let fill = this.theme === 'light' ? 'rgba(255,255,255,0.88)' : 'rgba(27, 32, 37, 0.82)';
+        let textColor = this.theme === 'light' ? '#3a4055' : null; // null = use accent
 
         if (this.runState === 'running') {
             label = 'Network Running';
-            accent = '#acc7ff';
-            fill = 'rgba(18, 30, 44, 0.86)';
+            accent = this.theme === 'light' ? '#2563eb' : '#acc7ff';
+            fill = this.theme === 'light' ? 'rgba(239,246,255,0.92)' : 'rgba(18, 30, 44, 0.86)';
         } else if (this.runState === 'completed') {
             label = 'Network Complete';
-            accent = '#7de2a7';
-            fill = 'rgba(18, 39, 31, 0.9)';
+            accent = this.theme === 'light' ? '#16a34a' : '#7de2a7';
+            fill = this.theme === 'light' ? 'rgba(240,253,244,0.92)' : 'rgba(18, 39, 31, 0.9)';
         } else if (this.runState === 'stopped') {
             label = 'Network Stopped';
-            accent = '#ffb4ab';
-            fill = 'rgba(42, 23, 23, 0.86)';
+            accent = this.theme === 'light' ? '#dc2626' : '#ffb4ab';
+            fill = this.theme === 'light' ? 'rgba(254,242,242,0.92)' : 'rgba(42, 23, 23, 0.86)';
         }
 
         const boxW = 172;
@@ -643,19 +704,18 @@ class GraphRenderer {
         ctx.font = '700 11px "Space Grotesk", sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
+        ctx.fillStyle = textColor || accent;
         ctx.fillText(label, x + 28, y + boxH / 2 + 0.5);
         ctx.restore();
     }
 
-    _drawArrow(ctx, from, to, color) {
+    _drawArrow(ctx, from, to, color, arrowLen = 9, arrowWid = 5) {
         const dx = to.x - from.x;
         const dy = to.y - from.y;
         const len = Math.hypot(dx, dy);
         if (len < 1) return;
         const ux = dx / len;
         const uy = dy / len;
-        const arrowLen = 9;
-        const arrowWid = 5;
         const base = { x: to.x - ux * arrowLen, y: to.y - uy * arrowLen };
         ctx.fillStyle = color;
         ctx.beginPath();
@@ -751,9 +811,16 @@ class GraphRenderer {
 
         ctx.lineWidth = isCore ? 1.6 : 1.2;
         ctx.strokeStyle = isSelected ? accent : isComplete && node.status === 'completed' ? 'rgba(125,226,167,0.38)' : 'rgba(65,71,84,0.44)';
-        ctx.fillStyle = isComplete && node.status === 'completed'
-            ? (isCore ? 'rgba(22,38,31,0.94)' : 'rgba(18,34,28,0.96)')
-            : isCore ? 'rgba(21,27,32,0.92)' : 'rgba(18,23,29,0.96)';
+        if (this.theme === 'light') {
+            ctx.fillStyle = isComplete && node.status === 'completed'
+                ? (isCore ? 'rgba(220,252,231,0.96)' : 'rgba(230,255,240,0.97)')
+                : isCore ? 'rgba(255,255,255,0.96)' : 'rgba(248,250,252,0.97)';
+            ctx.strokeStyle = isSelected ? accent : isComplete && node.status === 'completed' ? 'rgba(22,163,74,0.4)' : 'rgba(140,150,175,0.5)';
+        } else {
+            ctx.fillStyle = isComplete && node.status === 'completed'
+                ? (isCore ? 'rgba(22,38,31,0.94)' : 'rgba(18,34,28,0.96)')
+                : isCore ? 'rgba(21,27,32,0.92)' : 'rgba(18,23,29,0.96)';
+        }
         roundRect(ctx, x, y, width, height, 18);
         ctx.fill();
         ctx.stroke();
@@ -792,13 +859,15 @@ class GraphRenderer {
 
         const modelLabel = node.model ? _shortModel(node.model) : 'pending';
 
-        ctx.fillStyle = '#eef2f8';
+        ctx.fillStyle = this.theme === 'light' ? '#1a1f2e' : '#eef2f8';
         ctx.font = isCore ? '700 14px "Space Grotesk", sans-serif' : '700 12px "Space Grotesk", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(node.role || node.id, node.x, node.y - 7);
 
-        ctx.fillStyle = node.model ? 'rgba(172,199,255,0.95)' : 'rgba(142,151,168,0.92)';
+        ctx.fillStyle = this.theme === 'light'
+            ? (node.model ? 'rgba(37,99,235,0.9)' : 'rgba(107,118,148,0.9)')
+            : (node.model ? 'rgba(172,199,255,0.95)' : 'rgba(142,151,168,0.92)');
         ctx.font = '10px "JetBrains Mono", monospace';
         let modelText = modelLabel;
         const maxModelWidth = width - 28;
@@ -927,13 +996,14 @@ class GraphRenderer {
         ]);
     }
 
-    _traceRoute(ctx, route) {
+    _traceRoute(ctx, route, cornerRadius = 12) {
         if (!route?.length) return;
         ctx.beginPath();
         ctx.moveTo(route[0].x, route[0].y);
-        for (let i = 1; i < route.length; i++) {
-            ctx.lineTo(route[i].x, route[i].y);
+        for (let i = 1; i < route.length - 1; i++) {
+            ctx.arcTo(route[i].x, route[i].y, route[i + 1].x, route[i + 1].y, cornerRadius);
         }
+        ctx.lineTo(route[route.length - 1].x, route[route.length - 1].y);
     }
 
     _pointAlongRoute(route, t) {
@@ -1065,10 +1135,10 @@ class GraphRenderer {
         offscreen.height = h * this._dpr;
         const ctx = offscreen.getContext('2d');
         ctx.scale(this._dpr, this._dpr);
-        ctx.fillStyle = '#0a0f13';
+        ctx.fillStyle = this.theme === 'light' ? '#eef1f6' : '#0a0f13';
         ctx.fillRect(0, 0, w, h);
         const spacing = 26;
-        ctx.fillStyle = 'rgba(65,71,84,0.32)';
+        ctx.fillStyle = this.theme === 'light' ? 'rgba(140,150,175,0.42)' : 'rgba(65,71,84,0.32)';
         for (let x = spacing / 2; x < w; x += spacing) {
             for (let y = spacing / 2; y < h; y += spacing) {
                 ctx.beginPath();
