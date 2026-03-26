@@ -46,13 +46,13 @@ orb daemon restart --cloud-only         # only cloud providers
 Orb automatically selects the agent topology based on task complexity. Topologies range from a lightweight triad (coordinator, coder, reviewer) to a full hierarchy with a dedicated researcher and multiple reviewers.
 
 **Triad** — general coding tasks
-![Triad topology](docs/triad.png)
+![Triad topology](docs/triad.gif)
 
 **Dual Review** — high-correctness tasks
-![Dual Review topology](docs/dual-review.png)
+![Dual Review topology](docs/dual-review.gif)
 
 **Hierarchy** — complex planning + implementation
-![Hierarchy topology](docs/hierarchy.png)
+![Hierarchy topology](docs/hierarchy.gif)
 
 **Custom topologies**
 
