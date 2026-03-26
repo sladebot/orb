@@ -55,6 +55,8 @@ class Dashboard {
         this._traceRuns = [];
         this._selectedTraceSession = '';
         this._selectedTraceRun = '';
+        this._demoMode = new URL(window.location.href).searchParams.get('demo') || '';
+        this._traceDemoStarted = false;
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -1241,6 +1243,47 @@ class Dashboard {
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
         await this._loadTraceSessions();
+    }
+
+    _maybeStartDemo() {
+        if (this._demoMode !== 'traces' || this._traceDemoStarted) return;
+        this._traceDemoStarted = true;
+        window.setTimeout(() => {
+            this._runTraceDemo().catch((err) => console.error('trace demo failed', err));
+        }, 900);
+    }
+
+    async _runTraceDemo() {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            await this._openTraceAdmin();
+            if (this._traceSessions.length) break;
+            await this._sleep(400);
+        }
+        if (!this._traceSessions.length) return;
+        await this._sleep(700);
+
+        const sessions = this._traceSessions.slice(0, 3);
+        for (const session of sessions) {
+            this._selectedTraceSession = session.session_id || '';
+            this._selectedTraceRun = '';
+            this._renderTraceSessions();
+            await this._loadTraceRuns(this._selectedTraceSession);
+            await this._sleep(1200);
+
+            if (this._traceRuns.length > 1) {
+                this._selectedTraceRun = this._traceRuns[1].run_id || '';
+                this._renderTraceRuns();
+                await this._loadTraceDetail(this._selectedTraceRun);
+                await this._sleep(1000);
+            }
+        }
+
+        const rawEl = document.getElementById('trace-detail-raw');
+        if (rawEl) rawEl.open = true;
+        await this._sleep(1400);
+        const eventsEl = document.getElementById('trace-detail-events');
+        if (eventsEl) eventsEl.scrollTop = Math.min(360, eventsEl.scrollHeight);
+        await this._sleep(1000);
     }
 
     _closeTraceAdmin() {
@@ -2526,11 +2569,16 @@ class Dashboard {
         const el = document.getElementById(id);
         if (el) el.textContent = value;
     }
+
+    _sleep(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
 }
 
 // Initialize on load
 window.addEventListener('DOMContentLoaded', () => {
     window.dashboard = new Dashboard();
+    window.dashboard?._maybeStartDemo();
 
     // Mobile: graph toggle button
     const graphToggleBtn = document.getElementById('graph-toggle-btn');
