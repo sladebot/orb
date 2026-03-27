@@ -556,15 +556,19 @@ def _daemon_command(
     return cmd
 
 
-def _port_in_use(host: str, port: int) -> bool:
+def _port_bind_error(host: str, port: int) -> OSError | None:
     probe_host = "" if host == "0.0.0.0" else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((probe_host, port))
-        except OSError:
-            return True
-    return False
+        except OSError as exc:
+            return exc
+    return None
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    return _port_bind_error(host, port) is not None
 
 
 def _find_listening_pid(port: int) -> int | None:
@@ -607,10 +611,16 @@ def _start_managed_daemon(
     active = _load_daemon_state()
     if active and _pid_is_alive(int(active.get("pid", -1))):
         raise RuntimeError(f"Orb daemon already running (pid {active['pid']})")
-    if _port_in_use(host, port):
+    bind_error = _port_bind_error(host, port)
+    if bind_error is not None:
+        if getattr(bind_error, "errno", None) in {13, 48, 98}:
+            if bind_error.errno == 13:
+                raise RuntimeError(
+                    f"Port {port} requires elevated privileges or additional permissions."
+                ) from bind_error
         raise RuntimeError(
             f"Port {port} is already in use. Stop the existing daemon or choose a different --port."
-        )
+        ) from bind_error
 
     resolved_workdir = _resolve_daemon_workdir(workdir)
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

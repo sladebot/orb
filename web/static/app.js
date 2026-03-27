@@ -402,7 +402,6 @@ class Dashboard {
         }
         if (this.changesLog) this.changesLog.innerHTML = '';
         this._setChangesEmptyState();
-        this._renderPlanningState();
         this._updateWorkdir(
             data.workdir || this._plan?.workdir || '',
             data.session_id || '',
@@ -461,6 +460,7 @@ class Dashboard {
         for (const msg of data.messages) {
             this._addMessageEntry(msg);
         }
+        this._renderPlanningState();
         this._updateStatusIndicator();
 
         if (data.stats) this._handleStats(data.stats);
@@ -688,7 +688,25 @@ class Dashboard {
         `;
     }
 
-    _renderPlanningState() {}
+    _renderPlanningState() {
+        if (!this.messageLog) return;
+        const existing = this.messageLog.querySelector('.prediction-card');
+        if (existing) existing.remove();
+        if (!this._plan?.topology?.id) return;
+        const routing = this._plan.routing || {};
+        this._addPredictionCard({
+            topology: this._plan.topology,
+            task_type: routing.task_type || '',
+            routing_mode: routing.routing_mode || '',
+            reason: routing.reason || '',
+            summary: routing.summary || '',
+            classifier_model: routing.classifier_model || '',
+            classifier_provider: routing.classifier_provider || '',
+            complexity: Math.max(...Object.values(this._plan.agent_complexity || {}), 0),
+            agent_complexity: this._plan.agent_complexity || {},
+            agent_models: this._plan.agent_models || {},
+        });
+    }
 
     _addPlanStepEntry(step) {
         const empty = this.messageLog.querySelector('.empty-state');
@@ -1433,9 +1451,25 @@ class Dashboard {
                     <div class="trace-detail-label">Outcome</div>
                     <div class="trace-detail-value">${this._escapeHtml(outcome)} · ${summary.event_count || 0} events · ${(summary.duration_s || 0).toFixed(2)}s</div>
                 </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Task Type</div>
+                    <div class="trace-detail-value">${this._escapeHtml(summary.task_type || 'unknown')}</div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Routing</div>
+                    <div class="trace-detail-value">${this._escapeHtml(summary.routing_mode || 'unknown')}</div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Classifier Model</div>
+                    <div class="trace-detail-value">${this._escapeHtml(this._shortModel(summary.classifier_model || '') || 'unknown')}</div>
+                </div>
                 <div class="trace-detail-card trace-detail-card-wide">
                     <div class="trace-detail-label">Agents</div>
                     <div class="trace-detail-value trace-detail-pills">${agentPills}</div>
+                </div>
+                <div class="trace-detail-card trace-detail-card-wide">
+                    <div class="trace-detail-label">Routing Reason</div>
+                    <div class="trace-detail-value">${this._escapeHtml(summary.routing_reason || 'n/a')}</div>
                 </div>
                 <div class="trace-detail-card trace-detail-card-wide">
                     <div class="trace-detail-label">Trace File</div>
@@ -2413,6 +2447,10 @@ class Dashboard {
         const complexity = pred.complexity ?? Math.max(...Object.values(pred.agent_complexity || {}), 0);
         const barColor = complexity >= 75 ? '#cf222e' : complexity >= 50 ? '#9a6700' : '#1a7f37';
         const topology = pred.topology || {};
+        const routingMeta = [pred.task_type || '', pred.routing_mode || ''].filter(Boolean).join(' · ');
+        const classifierModel = pred.classifier_model || '';
+        const classifierProvider = pred.classifier_provider || this._inferProvider(classifierModel);
+        const classifierShort = this._shortModel(classifierModel);
         const optionsHtml = topology.id ? `
             <div class="pred-option chosen">
                 <span class="pred-option-label">${this._escapeHtml(topology.label || topology.id)}</span>
@@ -2424,6 +2462,13 @@ class Dashboard {
         const agentComplexity = pred.agent_complexity || {};
         // Show role → model, with complexity score as a small annotation.
         // These are the exact same values _build_agent_model_map will use at run-start.
+        const plannerRows = classifierModel ? `
+            <div class="pred-agent-model pred-agent-model-classifier">
+                <span class="pred-agent-role">classification</span>
+                ${classifierProvider ? `<span class="pred-agent-score">${this._escapeHtml(classifierProvider)}</span>` : ''}
+                <span class="pred-agent-model-name">${this._escapeHtml(classifierShort || classifierModel)}</span>
+            </div>` : '';
+
         const agentRows = Object.entries(agentModels).map(([role, model]) => {
             const short   = this._shortModel(model);
             const isLocal = model.includes('qwen') || model.includes('llama');
@@ -2446,9 +2491,10 @@ class Dashboard {
             <div class="pred-bar-wrap">
                 <div class="pred-bar" style="width:${complexity}%;background:${barColor}"></div>
             </div>
+            ${routingMeta ? `<div class="pred-reason">${this._escapeHtml(routingMeta)}</div>` : ''}
             <div class="pred-reason">${this._escapeHtml(topology.description || pred.reason || '')}</div>
             <div class="pred-options">${optionsHtml}</div>
-            ${agentRows ? `<div class="pred-agent-models">${agentRows}</div>` : ''}
+            ${(plannerRows || agentRows) ? `<div class="pred-agent-models">${plannerRows}${agentRows}</div>` : ''}
         `;
         this.messageLog.appendChild(el);
         this.messageLog.scrollTop = this.messageLog.scrollHeight;

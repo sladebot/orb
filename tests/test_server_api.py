@@ -17,6 +17,7 @@ from orb.llm.types import (
 )
 from orb.runtime import GraphRuntime
 from orb.runtime import graph_runtime as runtime_mod
+from orb.runtime.topology_classifier import TopologyClassification
 from orb.llm.types import CompletionResponse, ModelTier, ModelConfig
 from tests.test_claude_agent import MockLLMClient
 from orb.orchestrator.types import OrchestratorConfig
@@ -74,6 +75,19 @@ def _make_server() -> DashboardServer:
     server = DashboardServer(state, host="127.0.0.1", port=18099)
     server._app["_test_server_ref"] = server
     mock_client = MockLLMClient([
+        CompletionResponse(
+            content=json.dumps({
+                "task_type": "coding",
+                "summary": "Compact implementation task",
+                "complexity": 30,
+                "reason": "Small coding task",
+                "topology": "triad",
+                "candidates": [{"topology": "triad", "score": 0.9, "reason": "best fit"}],
+                "escalation_allowed": False,
+                "stop_early_allowed": True,
+            }),
+            model="mock",
+        ),
         CompletionResponse(
             content="",
             model="mock",
@@ -357,15 +371,19 @@ class TestModelAllocation:
         predictor = MockLLMClient([
             CompletionResponse(
                 content=json.dumps({
+                    "task_type": "coding",
+                    "summary": "Compact implementation task",
                     "complexity": 40,
                     "reason": "Compact implementation task",
                     "topology": "triad",
-                    "agent_complexity": {
-                        "coordinator": 30,
-                        "coder": 40,
-                        "reviewer": 30,
-                        "tester": 35,
-                    },
+                    "candidates": [{"topology": "triad", "score": 0.95, "reason": "best fit"}],
+                    "escalation_allowed": False,
+                    "stop_early_allowed": True,
+                }),
+                model=ANTHROPIC_HAIKU_MODEL,
+            ),
+            CompletionResponse(
+                content=json.dumps({
                     "assignments": {
                         "coordinator": {"provider": "anthropic", "model": ANTHROPIC_HAIKU_MODEL, "reason": "routing"},
                         "coder": {"provider": "anthropic", "model": ANTHROPIC_OPUS_MODEL, "reason": "implementation"},
@@ -381,6 +399,10 @@ class TestModelAllocation:
         predicted = await runtime.predict_topology("build a mobile app")
 
         assert predicted["agent_models"]["coder"] == ANTHROPIC_OPUS_MODEL
+        assert predicted["task_type"] == "coding"
+        assert predicted["routing_mode"] == "llm"
+        assert predicted["classifier_model"] == ANTHROPIC_HAIKU_MODEL
+        assert predicted["classifier_provider"] == "anthropic"
 
     @pytest.mark.asyncio
     async def test_predict_topology_uses_openai_provider(self, monkeypatch):
@@ -390,12 +412,19 @@ class TestModelAllocation:
         predictor = MockLLMClient([
             CompletionResponse(
                 content=json.dumps({
+                    "task_type": "coding",
+                    "summary": "Compact implementation task",
                     "complexity": 40,
                     "reason": "Compact implementation task",
                     "topology": "triad",
-                    "agent_complexity": {},
-                    "assignments": {},
+                    "candidates": [],
+                    "escalation_allowed": False,
+                    "stop_early_allowed": True,
                 }),
+                model="gpt-4o",
+            ),
+            CompletionResponse(
+                content=json.dumps({"assignments": {}}),
                 model="gpt-4o",
             ),
         ])
@@ -403,5 +432,49 @@ class TestModelAllocation:
 
         predicted = await runtime.predict_topology("build a mobile app")
 
-        assert predicted.get("reason") != "No cloud LLM provider available"
         assert predicted.get("topology") == "triad"
+        assert predicted.get("routing_mode") == "llm"
+        assert predicted.get("classifier_model") == "gpt-4o"
+        assert predicted.get("classifier_provider") == "openai"
+
+    @pytest.mark.asyncio
+    async def test_predict_topology_errors_when_no_provider_is_available(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: None)
+        runtime = GraphRuntime()
+        runtime._providers = {}  # noqa: SLF001
+
+        with pytest.raises(RuntimeError, match="No providers available for task classification"):
+            await runtime.predict_topology("build a mobile app")
+
+    @pytest.mark.asyncio
+    async def test_predict_topology_accepts_custom_classifier(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: None)
+        runtime = GraphRuntime()
+        runtime._providers = {}  # noqa: SLF001
+
+        class FakeClassifier:
+            async def classify(self, *, query, requested_topology, model_pin, topologies):
+                topo = topologies["triad"]
+                return TopologyClassification(
+                    topology_id="triad",
+                    label=topo.label,
+                    description=topo.description,
+                    task_type="coding",
+                    summary="Custom classifier result",
+                    complexity=33,
+                    reason=f"custom:{query}",
+                    requested_topology=requested_topology,
+                    routing_mode="custom",
+                    classifier_model="orb-lite-routing",
+                    classifier_provider="orb",
+                )
+
+        runtime.set_topology_classifier(FakeClassifier())
+
+        predicted = await runtime.predict_topology("build a mobile app")
+
+        assert predicted["topology"] == "triad"
+        assert predicted["routing_mode"] == "custom"
+        assert predicted["reason"] == "custom:build a mobile app"
+        assert predicted["classifier_model"] == "orb-lite-routing"
+        assert predicted["classifier_provider"] == "orb"

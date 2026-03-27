@@ -401,6 +401,10 @@ class RunTrace:
         event_count = len(self.events)
         first_ts = self.events[0].timestamp if self.events else None
         last_ts = self.events[-1].timestamp if self.events else None
+        topology_event = next(
+            (event for event in self.events if event.kind == TraceEventKind.TOPOLOGY_CHOICE),
+            None,
+        )
         final_event = next(
             (event for event in reversed(self.events) if event.kind == TraceEventKind.FINAL_OUTCOME),
             None,
@@ -418,6 +422,12 @@ class RunTrace:
             "first_event_at": first_ts,
             "last_event_at": last_ts,
             "duration_s": (last_ts - first_ts) if first_ts is not None and last_ts is not None else 0.0,
+            "task_type": str((topology_event.data.get("task_type") if topology_event else "") or ""),
+            "routing_reason": str((topology_event.message if topology_event else "") or ""),
+            "routing_mode": str((topology_event.data.get("routing_mode") if topology_event else "") or ""),
+            "classifier_model": str((topology_event.data.get("classifier_model") if topology_event else "") or ""),
+            "classifier_provider": str((topology_event.data.get("classifier_provider") if topology_event else "") or ""),
+            "routing_candidates": list((topology_event.data.get("candidate_details") if topology_event else []) or []),
         }
         if final_event is not None:
             summary["success"] = bool(final_event.data.get("success"))

@@ -11,7 +11,10 @@ Pass persist_path=<directory> to enable persistence.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -19,6 +22,7 @@ import uuid
 
 import chromadb
 import networkx as nx
+from chromadb.api.types import Documents, Embeddings
 
 from orb.memory.subgraph_store import Fact, SubgraphStore
 
@@ -26,6 +30,67 @@ from orb.memory.subgraph_store import Fact, SubgraphStore
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chroma")
 
 _COLLECTION_NAME = "orb_facts"
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_EMBED_DIM = 64
+
+
+class _HashEmbeddingFunction:
+    """Cheap local embedder for short fact triples and queries.
+
+    The default Chroma embedding path pulls in a heavier sentence-transformer
+    model, which dominates write latency for the tiny strings we store here.
+    A hashed bag-of-words vector keeps writes predictable and is sufficient for
+    the lexical query patterns Orb currently uses in tests and runtime flows.
+    """
+
+    def __call__(self, input: Documents) -> Embeddings:
+        return [self._embed_one(text) for text in input]
+
+    def embed_query(self, input: Documents) -> Embeddings:
+        return self.__call__(input)
+
+    @staticmethod
+    def name() -> str:
+        return "orb_hash_v1"
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> "_HashEmbeddingFunction":
+        return _HashEmbeddingFunction()
+
+    def get_config(self) -> dict[str, Any]:
+        return {"dim": _EMBED_DIM}
+
+    def is_legacy(self) -> bool:
+        return False
+
+    def default_space(self) -> str:
+        return "cosine"
+
+    def supported_spaces(self) -> list[str]:
+        return ["cosine", "l2", "ip"]
+
+    def _embed_one(self, text: str) -> list[float]:
+        vector = [0.0] * _EMBED_DIM
+        tokens = _TOKEN_RE.findall(text.lower())
+        if not tokens:
+            return vector
+
+        for token in tokens:
+            bucket = self._stable_int(token) % _EMBED_DIM
+            sign = 1.0 if self._stable_int(f"{token}:sign") % 2 == 0 else -1.0
+            vector[bucket] += sign
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm > 0:
+            vector = [value / norm for value in vector]
+        return vector
+
+    @staticmethod
+    def _stable_int(text: str) -> int:
+        return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
+
+
+_EMBEDDING_FUNCTION = _HashEmbeddingFunction()
 
 
 def _fact_to_document(fact: Fact) -> str:
@@ -72,15 +137,17 @@ class ChromaDBNetworkXStore(SubgraphStore):
             self._client = chromadb.PersistentClient(path=persist_path)
             # Persistent stores use a stable collection name by default.
             effective_name = collection_name or _COLLECTION_NAME
+            collection_kwargs: dict[str, Any] = {}
         else:
             self._client = chromadb.EphemeralClient()
             # Each ephemeral store gets a unique collection so test instances
             # don't share state even when running in the same process.
             effective_name = collection_name or f"{_COLLECTION_NAME}_{uuid.uuid4().hex[:8]}"
+            collection_kwargs = {"embedding_function": _EMBEDDING_FUNCTION}
 
         self._collection = self._client.get_or_create_collection(
             name=effective_name,
-            # Default embedding function (all-MiniLM-L6-v2) is used automatically.
+            **collection_kwargs,
         )
         self._graph: nx.DiGraph = nx.DiGraph()
 

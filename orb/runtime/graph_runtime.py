@@ -5,17 +5,18 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from json import JSONDecodeError
-from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from web.state import DashboardState
-from orb.cli.config import get as get_config, load_config, save_config
 from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
+from orb.cli.config import get as get_config, load_config, save_config
 from orb.messaging.channel import ChannelClosed
 from orb.tracing.run_trace import RunTrace
+from web.state import DashboardState
+from .topology_classifier import ProviderBackedTopologyClassifier, TopologyClassifier
 from .transcript import ConversationSession, RunTranscript
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,10 @@ class GraphRuntime:
         self._last_result = None
         self._last_trace: RunTrace | None = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
+        self._topology_classifier: TopologyClassifier = ProviderBackedTopologyClassifier(
+            self._planner_model_config,
+            lambda provider_name: self._providers.get(provider_name),
+        )
 
     @staticmethod
     def _available_topologies() -> dict:
@@ -173,45 +178,24 @@ class GraphRuntime:
         return {"rows": rows, "order": order}
 
     @staticmethod
-    def _topology_options(selected_id: str) -> list[dict]:
+    def _topology_options(selected_id: str, candidates: list[dict] | None = None) -> list[dict]:
+        candidate_map = {
+            str(item.get("topology")): item
+            for item in (candidates or [])
+            if isinstance(item, dict) and item.get("topology")
+        }
         options = []
         for topology_id, topo in GraphRuntime._available_topologies().items():
+            candidate = candidate_map.get(topology_id, {})
             options.append({
                 "topology": topology_id,
                 "label": topo.label,
                 "description": topo.description,
                 "chosen": topology_id == selected_id,
+                "score": candidate.get("score"),
+                "reason": candidate.get("reason", ""),
             })
         return options
-
-    @staticmethod
-    def _heuristic_topology_ranking(query: str, complexity: int) -> list[tuple[str, float]]:
-        query_l = query.lower()
-        scores: list[tuple[str, float]] = []
-        for topology_id, topo in GraphRuntime._available_topologies().items():
-            score = 0.0
-            hints = topo.selection_hints
-            if hints is not None:
-                if hints.min_complexity <= complexity <= hints.max_complexity:
-                    score += 2.0
-                else:
-                    score -= 0.5
-                for keyword in hints.keywords:
-                    if keyword.lower() in query_l:
-                        score += 1.0
-                for phrase in hints.ideal_for:
-                    if any(token in query_l for token in phrase.lower().split()):
-                        score += 0.2
-            categories = {agent.category for agent in topo.agents.values()}
-            if "discovery" in categories and any(token in query_l for token in ("research", "explore", "understand", "investigate", "plan")):
-                score += 1.0
-            if sum(1 for agent in topo.agents.values() if agent.category == "review") >= 2 and complexity >= 65:
-                score += 1.0
-            if sum(1 for agent in topo.agents.values() if agent.category == "review") == 1 and complexity < 65:
-                score += 0.5
-            scores.append((topology_id, score))
-        scores.sort(key=lambda item: item[1], reverse=True)
-        return scores
 
     @property
     def running(self) -> bool:
@@ -252,6 +236,9 @@ class GraphRuntime:
             for name, client in self._all_providers.items()
             if name in set(enabled)
         }
+
+    def set_topology_classifier(self, classifier: TopologyClassifier) -> None:
+        self._topology_classifier = classifier
 
     @staticmethod
     def _provider_config_entry(provider: str) -> dict:
@@ -672,7 +659,7 @@ class GraphRuntime:
         snapshot_plan = snapshot.get("plan") or {}
         merged_plan = dict(snapshot_plan)
         merged_plan.update(live_plan)
-        for key in ("query", "agent_complexity", "agent_models", "neighbors", "positions", "graph_view", "workdir"):
+        for key in ("query", "agent_complexity", "agent_models", "neighbors", "positions", "graph_view", "routing", "workdir"):
             live_value = live_plan.get(key)
             if live_value not in ("", None, [], {}):
                 merged_plan[key] = live_value
@@ -1133,18 +1120,45 @@ class GraphRuntime:
         self._sync_session_state()
         self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
-        predicted = await self.predict_topology(query, model_pin=model_pin)
+        predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
+        routing_payload = {
+            "task_type": str(predicted.get("task_type") or ""),
+            "reason": str(predicted.get("reason") or ""),
+            "summary": str(predicted.get("summary") or ""),
+            "routing_mode": str(predicted.get("routing_mode") or ""),
+            "classifier_model": str(predicted.get("classifier_model") or ""),
+            "classifier_provider": str(predicted.get("classifier_provider") or ""),
+            "signals": dict(predicted.get("signals") or {}),
+            "candidates": list(predicted.get("candidates") or []),
+            "escalation_allowed": bool(predicted.get("escalation_allowed")),
+            "stop_early_allowed": bool(predicted.get("stop_early_allowed")),
+            "requested_topology": str(predicted.get("requested_topology") or topology or "auto"),
+        }
         self._last_trace.record_topology_choice(
             selected_topology,
             reason=str(predicted.get("reason") or predicted.get("description") or ""),
+            task_type=str(predicted.get("task_type") or ""),
             candidates=[option["topology"] for option in (predicted.get("options") or []) if isinstance(option, dict) and option.get("topology")],
             data={
                 "complexity": int(predicted.get("complexity", 50)),
                 "requested_target": requested_target,
+                "routing_mode": str(predicted.get("routing_mode") or ""),
+                "classifier_model": str(predicted.get("classifier_model") or ""),
+                "classifier_provider": str(predicted.get("classifier_provider") or ""),
+                "signals": dict(predicted.get("signals") or {}),
+                "candidate_details": list(predicted.get("candidates") or []),
+                "escalation_allowed": bool(predicted.get("escalation_allowed")),
+                "stop_early_allowed": bool(predicted.get("stop_early_allowed")),
+                "summary": str(predicted.get("summary") or ""),
             },
         )
         self._last_trace.record_stage_finish("planning", status="ok", message="run planning finished")
+        await self._record_plan_step(
+            "routing",
+            "Classified task",
+            f"{predicted.get('task_type') or 'unknown'} · {predicted.get('summary') or predicted.get('reason') or ''}".strip(),
+        )
         await self._record_plan_step(
             "topology",
             "Selected topology",
@@ -1185,6 +1199,7 @@ class GraphRuntime:
         self.state.agent_models = agent_models
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
+        self.state.routing = routing_payload
         self._persist_run_trace()
         self._persist_dashboard_snapshot()
         self._clear_dashboard_file_changes()
@@ -1323,16 +1338,111 @@ class GraphRuntime:
                 return agent_id, result
         return None, ""
 
-    async def predict_topology(self, query: str, model_pin: str = "auto") -> dict:
+    async def predict_topology(
+        self,
+        query: str,
+        model_pin: str = "auto",
+        requested_topology: str = "auto",
+    ) -> dict:
+        available_topologies = self._available_topologies()
         if not query:
-            first_id, topo = next(iter(self._available_topologies().items()))
+            first_id, topo = next(iter(available_topologies.items()))
             return {
                 "topology": first_id,
                 "label": topo.label,
                 "description": topo.description,
                 "options": self._topology_options(first_id),
+                "task_type": "simple_direct",
+                "reason": "Empty query defaults to the first approved topology.",
+                "summary": "No task provided yet",
+                "signals": {"word_count": 0},
+                "candidates": [],
+                "escalation_allowed": False,
+                "stop_early_allowed": True,
+                "requested_topology": requested_topology,
+                "routing_mode": "default",
+                "classifier_model": "",
+                "classifier_provider": "",
+                "complexity": 0,
+                "agent_complexity": {},
+                "agent_models": {},
+                "agent_assignments": {},
             }
-        return await self._llm_predict_topology(query, model_pin=model_pin)
+
+        classification = await self._topology_classifier.classify(
+            query=query,
+            requested_topology=requested_topology,
+            model_pin=model_pin,
+            topologies=available_topologies,
+        )
+        topology_id = classification.topology_id
+        complexity = classification.complexity
+        agent_complexity = self._derive_agent_complexity(topology_id, complexity)
+        heuristic_map = self._build_agent_model_map(
+            complexity,
+            model_pin=model_pin,
+            agent_complexity=agent_complexity,
+            topology_id=topology_id,
+        )
+        agent_model_map, _agent_model_reasons = await self._llm_assign_agent_models(
+            query,
+            topology_id,
+            complexity,
+            agent_complexity,
+            heuristic_map,
+        )
+        options = self._topology_options(
+            topology_id,
+            candidates=[
+                {
+                    "topology": candidate.topology_id,
+                    "score": candidate.score,
+                    "reason": candidate.reason,
+                }
+                for candidate in classification.candidates
+            ],
+        )
+        return {
+            "topology": topology_id,
+            "label": classification.label,
+            "description": classification.description,
+            "options": options,
+            "task_type": classification.task_type,
+            "reason": classification.reason,
+            "summary": classification.summary,
+            "signals": dict(classification.signals),
+            "candidates": [
+                {
+                    "topology": candidate.topology_id,
+                    "score": candidate.score,
+                    "reason": candidate.reason,
+                }
+                for candidate in classification.candidates
+            ],
+            "escalation_allowed": classification.escalation_allowed,
+            "stop_early_allowed": classification.stop_early_allowed,
+            "requested_topology": classification.requested_topology,
+            "routing_mode": classification.routing_mode,
+            "classifier_model": classification.classifier_model,
+            "classifier_provider": classification.classifier_provider,
+            "complexity": complexity,
+            "agent_complexity": agent_complexity,
+            "agent_models": {role: cfg.model_id for role, cfg in agent_model_map.items()},
+            "agent_assignments": {
+                role: {"provider": cfg.provider, "model": cfg.model_id}
+                for role, cfg in agent_model_map.items()
+            },
+        }
+
+    def _derive_agent_complexity(self, topology_id: str, complexity: int) -> dict[str, int]:
+        topo = self._available_topologies().get(topology_id)
+        if topo is None:
+            return {}
+        derived: dict[str, int] = {}
+        for agent_id, agent in topo.agents.items():
+            blended = int(round((int(agent.base_complexity) * 0.55) + (int(complexity) * 0.45)))
+            derived[agent_id] = max(0, min(100, blended))
+        return derived
 
     def _build_agent_model_map(
         self,
@@ -1520,6 +1630,48 @@ class GraphRuntime:
                 return ModelConfig(ModelTier.CLOUD_FAST, model_id, "anthropic")
         return None
 
+    def _planner_model_config(self):
+        from orb.llm.types import ANTHROPIC_HAIKU_MODEL, DEFAULT_MODELS, ModelConfig, ModelTier
+
+        candidates: list[tuple[int, int, ModelConfig]] = []
+        if "vmlx" in self._providers:
+            model_id = self._provider_default_model("vmlx", "local_small", "qwen")
+            if self._provider_model_enabled("vmlx", model_id):
+                candidates.append((0, 0, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")))
+        if "ollama" in self._providers:
+            model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
+            if self._provider_model_enabled("ollama", model_id):
+                candidates.append((0, 1, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")))
+        if "openai-codex" in self._providers:
+            model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4-mini")
+            if self._provider_model_enabled("openai-codex", model_id):
+                candidates.append((1, 0, ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")))
+        if "anthropic" in self._providers:
+            model_id = self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL)
+            if self._provider_model_enabled("anthropic", model_id):
+                candidates.append((1, 1, ModelConfig(ModelTier.CLOUD_LITE, model_id, "anthropic")))
+        if "openai" in self._providers:
+            candidates.append((1, 2, ModelConfig(ModelTier.CLOUD_LITE, "gpt-4o", "openai")))
+        override_candidates = [
+            cfg for cfg in (
+                (self._model_overrides or {}).get(ModelTier.LOCAL_SMALL),
+                (self._model_overrides or {}).get(ModelTier.CLOUD_LITE),
+                (self._model_overrides or {}).get(ModelTier.CLOUD_FAST),
+                DEFAULT_MODELS.get(ModelTier.LOCAL_SMALL),
+                DEFAULT_MODELS.get(ModelTier.CLOUD_LITE),
+                DEFAULT_MODELS.get(ModelTier.CLOUD_FAST),
+            )
+            if cfg is not None and getattr(cfg, "provider", None) in self._providers
+        ]
+        for cfg in override_candidates:
+            tier = getattr(cfg, "tier", ModelTier.CLOUD_LITE)
+            bucket = 0 if tier == ModelTier.LOCAL_SMALL else 1
+            candidates.append((bucket, 99, cfg))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates[0][2]
+
     def _available_model_choices(self) -> list[dict]:
         choices: list[dict] = []
         seen: set[tuple[str, str]] = set()
@@ -1653,193 +1805,6 @@ class GraphRuntime:
             heuristic_map,
         )
         return (validated or heuristic_map), reasons
-
-    async def _llm_predict_topology(self, query: str, model_pin: str = "auto") -> dict:
-        from orb.llm.types import (
-            ANTHROPIC_HAIKU_MODEL,
-            CompletionRequest,
-            ModelConfig,
-            ModelTier,
-        )
-
-        def _default_result(complexity: int = 50, reason: str = "Topology planner fell back to heuristic routing") -> dict:
-            available_topologies = self._available_topologies()
-            ranked = self._heuristic_topology_ranking(query, complexity)
-            topology = ranked[0][0] if ranked else next(iter(available_topologies.keys()))
-            topo = available_topologies[topology]
-            agent_model_map = self._build_agent_model_map(complexity, model_pin, topology_id=topology)
-            agent_models = {
-                role: cfg.model_id for role, cfg in agent_model_map.items()
-            }
-            agent_assignments = {
-                role: {"provider": cfg.provider, "model": cfg.model_id}
-                for role, cfg in agent_model_map.items()
-            }
-            return {
-                "topology": topology,
-                "label": topo.label,
-                "description": topo.description,
-                "complexity": complexity,
-                "reason": reason,
-                "agent_models": agent_models,
-                "agent_assignments": agent_assignments,
-                "options": self._topology_options(topology),
-            }
-
-        predict_provider = (
-            self._providers.get("anthropic")
-            or self._providers.get("openai-codex")
-            or self._providers.get("openai")
-            or self._providers.get("ollama")
-            or self._providers.get("vmlx")
-        )
-        if not predict_provider:
-            return _default_result(reason="No topology planner provider available; using heuristic routing")
-
-        has_cloud = "anthropic" in self._providers or "openai-codex" in self._providers or "openai" in self._providers
-        using_codex = not has_cloud or ("openai-codex" in self._providers and "anthropic" not in self._providers and "openai" not in self._providers)
-        using_openai = "openai" in self._providers and "anthropic" not in self._providers and "openai-codex" not in self._providers
-        using_ollama = "ollama" in self._providers and not has_cloud
-        using_vmlx = "vmlx" in self._providers and not has_cloud and "ollama" not in self._providers
-
-        available_topologies = self._available_topologies()
-        available_model_choices = self._available_model_choices()
-        if model_pin and model_pin != "auto":
-            filtered_choices = [item for item in available_model_choices if item.get("model") == model_pin]
-            available_model_choices = filtered_choices or available_model_choices
-        topology_payload = {
-            topology_id: {
-                "label": topo.label,
-                "description": topo.description,
-                "agents": {
-                    agent_id: {
-                        "role": agent.role,
-                        "category": agent.category,
-                        "description": agent.description,
-                    }
-                    for agent_id, agent in topo.agents.items()
-                },
-            }
-            for topology_id, topo in available_topologies.items()
-        }
-        prompt = (
-            "Plan the run for this software task and respond with JSON only.\n\n"
-            f"Task: {query}\n"
-            f"Requested model pin: {model_pin}\n\n"
-            "Choose the best topology and assign one enabled model to each agent.\n"
-            "Balance model size and task complexity across agents: small local models for lightweight work, "
-            "medium local models for moderate work, and cloud models for the hardest work.\n"
-            "Use only the listed topologies and enabled model choices.\n\n"
-            "Return JSON with this exact shape:\n"
-            '{"complexity": <0-100 integer>, "reason": "<one sentence why>", '
-            '"topology": "<topology id>", '
-            '"agent_complexity": {"<agent_id>": <0-100>, "...": <0-100>}, '
-            '"assignments": {"<agent_id>": {"provider": "...", "model": "...", "reason": "..."}}}\n\n'
-            f"Available topologies: {json.dumps(topology_payload)}\n"
-            f"Enabled model choices: {json.dumps(available_model_choices)}\n"
-        )
-
-        if using_codex:
-            model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4")
-            model_config = ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")
-        elif using_openai:
-            model_config = ModelConfig(ModelTier.CLOUD_LITE, "gpt-4o", "openai")
-        elif using_ollama:
-            model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
-            model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")
-        elif using_vmlx:
-            model_id = self._provider_default_model("vmlx", "local_small", "qwen")
-            model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")
-        else:
-            cloud_overrides = {
-                t: cfg for t, cfg in (self._model_overrides or {}).items()
-                if (
-                    getattr(cfg, "provider", None) == "anthropic"
-                    and self._provider_model_enabled("anthropic", getattr(cfg, "model_id", ""))
-                )
-            }
-            model_config = (
-                cloud_overrides.get(ModelTier.CLOUD_FAST)
-                or cloud_overrides.get(ModelTier.CLOUD_LITE)
-                or ModelConfig(
-                    ModelTier.CLOUD_LITE,
-                    self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL),
-                    "anthropic",
-                )
-            )
-
-        req = CompletionRequest(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-            system=(
-                "You are the coordinator model planner. "
-                "Choose topology and per-agent models for the whole run. "
-                "Return valid JSON only."
-            ),
-            model_config=model_config,
-        )
-        try:
-            response = await predict_provider.complete(req)
-        except Exception as exc:
-            logger.warning("Topology prediction LLM call failed: %s", exc)
-            return _default_result(reason=f"Topology planner call failed: {exc}")
-
-        raw = (response.content or "").strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        if len(raw) > 500_000:
-            logger.warning("LLM response too large to parse (%d bytes), using default", len(raw))
-            return _default_result(reason=f"Topology planner response too large to parse ({len(raw)} bytes)")
-        try:
-            parsed = json.loads(raw.strip())
-        except JSONDecodeError:
-            logger.warning("Failed to parse topology prediction response: %r", raw)
-            preview = raw.strip().replace("\n", " ")[:160]
-            suffix = "…" if len(raw.strip()) > 160 else ""
-            return _default_result(reason=f"Topology planner response could not be parsed: {preview}{suffix}")
-
-        topology = parsed.get("topology")
-        if topology not in available_topologies:
-            ranked = self._heuristic_topology_ranking(query, int(parsed.get("complexity", 50)))
-            topology = ranked[0][0] if ranked else next(iter(available_topologies.keys()))
-        topo = available_topologies[topology]
-        overall_complexity = int(parsed.get("complexity", 50))
-        agent_complexity = {
-            k: max(0, min(100, int(v)))
-            for k, v in (parsed.get("agent_complexity") or {}).items()
-            if k in topo.agents
-        }
-        fallback_model_map = self._build_agent_model_map(
-            overall_complexity,
-            model_pin,
-            agent_complexity,
-            topology_id=topology,
-        )
-        agent_model_map, _agent_model_reasons = self._validate_agent_model_assignments(
-            topology,
-            parsed.get("assignments") if isinstance(parsed, dict) else None,
-            fallback_model_map,
-        )
-        agent_models = {
-            role: cfg.model_id for role, cfg in agent_model_map.items()
-        }
-        agent_assignments = {
-            role: {"provider": cfg.provider, "model": cfg.model_id}
-            for role, cfg in agent_model_map.items()
-        }
-        return {
-            "topology": topology,
-            "label": topo.label,
-            "description": topo.description,
-            "complexity": overall_complexity,
-            "reason": parsed.get("reason", ""),
-            "agent_complexity": agent_complexity,
-            "agent_models": agent_models,
-            "agent_assignments": agent_assignments,
-            "options": self._topology_options(topology),
-        }
 
     async def _run_orchestrator(
         self,

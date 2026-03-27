@@ -84,10 +84,12 @@ class TestGraphRuntimeSession:
         session.save(path)
 
         runtime = GraphRuntime(session_path=path)
+        runtime.state.routing = {"task_type": "review", "reason": "qa run"}
         event = runtime.current_init_event()
 
         assert event["session_turn"] == 2
         assert event["workdir"] == str(Path.cwd())
+        assert event["plan"]["routing"]["task_type"] == "review"
 
     def test_runtime_resolves_mentions_server_side(self, tmp_path: Path):
         runtime = GraphRuntime(session_path=tmp_path / "session.json")
@@ -143,3 +145,4 @@ class TestGraphRuntimeSession:
         payload = runtime.get_trace_payload(trace.run_id)
         assert payload is not None
         assert payload["summary"]["session_id"] == runtime._conversation_session.session_id
+        assert payload["summary"]["routing_reason"] == "test"

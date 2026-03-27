@@ -13,6 +13,7 @@ class TestRunTrace:
             reason="risky task",
             task_type="coding",
             candidates=["single_agent", "planner_executor_verifier"],
+            data={"routing_mode": "llm", "classifier_model": "gpt-5.4-mini", "classifier_provider": "openai-codex"},
         )
         trace.record_initial_injection(target="coordinator", message="Build a CLI tool")
         trace.record_message_routed(
@@ -54,6 +55,11 @@ class TestRunTrace:
         assert trace.events[8].data["action"] == "approve"
         assert trace.summary()["topology_id"] == "planner_executor_verifier"
         assert trace.summary()["agent_ids"] == ["planner"]
+        assert trace.summary()["task_type"] == "coding"
+        assert trace.summary()["routing_reason"] == "risky task"
+        assert trace.summary()["routing_mode"] == "llm"
+        assert trace.summary()["classifier_model"] == "gpt-5.4-mini"
+        assert trace.summary()["classifier_provider"] == "openai-codex"
         assert trace.summary()["success"] is True
 
     def test_trace_json_round_trip_preserves_events(self):

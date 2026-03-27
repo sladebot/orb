@@ -83,6 +83,7 @@ class DashboardState:
     agent_neighbors: dict[str, list[str]] = field(default_factory=dict)
     agent_positions: dict[str, str] = field(default_factory=dict)
     graph_view: dict = field(default_factory=dict)
+    routing: dict = field(default_factory=dict)
     final_result: str = ""
     final_agent: str = ""
     final_diff: str = ""
@@ -112,6 +113,7 @@ class DashboardState:
         self.agent_neighbors = {}
         self.agent_positions = {}
         self.graph_view = {}
+        self.routing = {}
         self.final_result = ""
         self.final_agent = ""
         self.final_diff = ""
@@ -136,6 +138,7 @@ class DashboardState:
                 "neighbors": self.agent_neighbors,
                 "positions": self.agent_positions,
                 "graph_view": self.graph_view,
+                "routing": self.routing,
                 "workdir": self.workdir,
             },
             "agents": [

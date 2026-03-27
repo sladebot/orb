@@ -465,9 +465,19 @@ async def test_start_managed_daemon_fails_fast_when_port_in_use():
     from orb.cli.main import _start_managed_daemon
 
     with patch("orb.cli.main._load_daemon_state", return_value=None), \
-         patch("orb.cli.main._port_in_use", return_value=True):
+         patch("orb.cli.main._port_bind_error", return_value=OSError(98, "Address already in use")):
         with pytest.raises(RuntimeError, match="Port 8080 is already in use"):
             _start_managed_daemon("0.0.0.0", 8080, None)
+
+
+@pytest.mark.asyncio
+async def test_start_managed_daemon_reports_permission_error_for_privileged_port():
+    from orb.cli.main import _start_managed_daemon
+
+    with patch("orb.cli.main._load_daemon_state", return_value=None), \
+         patch("orb.cli.main._port_bind_error", return_value=PermissionError(13, "Permission denied")):
+        with pytest.raises(RuntimeError, match="Port 80 requires elevated privileges or additional permissions"):
+            _start_managed_daemon("0.0.0.0", 80, None)
 
 
 @pytest.mark.asyncio
