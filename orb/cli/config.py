@@ -10,7 +10,7 @@ _DEFAULTS: dict[str, Any] = {
     "local_models": True,
     "providers": {
         "anthropic": {
-            "enabled": True,
+            "enabled": False,
             "models": {
                 "claude-haiku-4-5-20251001": {"enabled": True},
                 "claude-sonnet-4-20250514": {"enabled": False},
@@ -32,11 +32,11 @@ _DEFAULTS: dict[str, Any] = {
             },
         },
         "ollama": {
-            "enabled": True,
+            "enabled": False,
             "models": {},
         },
         "vmlx": {
-            "enabled": False,
+            "enabled": True,
             "models": {},
             "base_url": "http://localhost:1234/v1",
         },

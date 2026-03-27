@@ -29,7 +29,8 @@ def test_load_config_normalizes_model_entries(tmp_path, monkeypatch):
     assert cfg["providers"]["anthropic"]["models"][ANTHROPIC_OPUS_MODEL]["enabled"] is True
     assert cfg["providers"]["openai-codex"]["enabled"] is True
     assert cfg["providers"]["ollama"]["models"] == {}
-    assert cfg["providers"]["vmlx"]["enabled"] is False
+    assert cfg["providers"]["ollama"]["enabled"] is False
+    assert cfg["providers"]["vmlx"]["enabled"] is True
 
 
 def test_load_config_canonicalizes_stale_model_aliases(tmp_path, monkeypatch):
@@ -84,9 +85,10 @@ def test_default_config_matches_seeded_user_defaults(tmp_path, monkeypatch):
     assert cfg["providers"]["anthropic"]["models"][ANTHROPIC_SONNET_MODEL]["enabled"] is False
     assert cfg["providers"]["anthropic"]["models"][ANTHROPIC_OPUS_MODEL]["enabled"] is False
     assert cfg["providers"]["anthropic"]["default_models"]["cloud_fast"] == ANTHROPIC_HAIKU_MODEL
+    assert cfg["providers"]["anthropic"]["enabled"] is False
     assert cfg["providers"]["openai-codex"]["enabled"] is True
-    assert cfg["providers"]["ollama"]["enabled"] is True
-    assert cfg["providers"]["vmlx"]["enabled"] is False
+    assert cfg["providers"]["ollama"]["enabled"] is False
+    assert cfg["providers"]["vmlx"]["enabled"] is True
 
 
 def test_runtime_configure_drops_provider_with_no_enabled_models(monkeypatch):
