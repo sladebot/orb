@@ -17,7 +17,7 @@ class ModelTier(Enum):
 class ModelConfig:
     tier: ModelTier
     model_id: str
-    provider: str  # "anthropic", "openai-codex", "ollama"
+    provider: str  # "anthropic", "openai-codex", "ollama", "vmlx"
     max_tokens: int = 8192
     temperature: float = 0.7
 
@@ -25,6 +25,7 @@ class ModelConfig:
 ANTHROPIC_PROVIDER = "anthropic"
 OPENAI_CODEX_PROVIDER = "openai-codex"
 OLLAMA_PROVIDER = "ollama"
+VMLX_PROVIDER = "vmlx"
 OPENAI_MINI_MODEL = "gpt-5.4-mini"
 OPENAI_STRONG_MODEL = "gpt-5.4"
 

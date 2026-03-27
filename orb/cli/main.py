@@ -752,7 +752,7 @@ async def async_main() -> None:
             cfg = load_config()
             providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
             print("Updated provider catalogs in ~/.orb/config.json")
-            for provider_name in ("anthropic", "openai-codex", "ollama"):
+            for provider_name in ("anthropic", "openai-codex", "ollama", "vmlx"):
                 entry = providers_cfg.get(provider_name) if isinstance(providers_cfg, dict) else None
                 if not isinstance(entry, dict):
                     continue
@@ -953,7 +953,7 @@ async def async_main() -> None:
     if not providers:
         print_error(
             "No LLM providers available. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
-            "or ensure Ollama is running locally."
+            "or ensure Ollama/VMLX is running locally."
         )
         sys.exit(1)
 
@@ -976,7 +976,7 @@ async def async_main() -> None:
         elif "gpt" in args.model:
             provider = "openai-codex"
         else:
-            provider = "ollama"
+            provider = "ollama" if "ollama" in providers else "vmlx" if "vmlx" in providers else "ollama"
         override_config = ModelConfig(
             tier=ModelTier.CLOUD_FAST,
             model_id=args.model,

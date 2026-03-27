@@ -65,6 +65,43 @@ def _ollama_keep_alive() -> str | None:
     return None
 
 
+def _vmlx_base_url() -> str:
+    """Resolve VMLX base URL for its OpenAI-compatible API."""
+    env_value = os.environ.get("VMLX_BASE_URL")
+    if env_value:
+        base_url = env_value.rstrip("/")
+    else:
+        try:
+            from ..cli.config import get as get_config
+            provider_cfg = get_config("providers") or {}
+            entry = provider_cfg.get("vmlx") or {}
+            base_url = str(entry.get("base_url") or "").rstrip("/") if isinstance(entry, dict) else ""
+        except Exception:
+            base_url = ""
+    if not base_url:
+        base_url = "http://localhost:1234/v1"
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _vmlx_api_key() -> str | None:
+    value = os.environ.get("VMLX_API_KEY")
+    if value is None:
+        try:
+            from ..cli.config import get as get_config
+            provider_cfg = get_config("providers") or {}
+            entry = provider_cfg.get("vmlx") or {}
+            if isinstance(entry, dict):
+                value = entry.get("api_key")
+        except Exception:
+            value = None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
 def _ollama_reachable() -> bool:
     global _ollama_reachable_cache
     # Config check always runs first — no caching for disabled state
@@ -99,6 +136,19 @@ def _ollama_enabled() -> bool:
     try:
         from ..cli.config import local_models_enabled
         return bool(local_models_enabled())
+    except Exception:
+        return False
+
+
+def _vmlx_enabled() -> bool:
+    """True when VMLX local-model support is explicitly enabled in config."""
+    try:
+        from ..cli.config import local_models_enabled, get as get_config
+        if not local_models_enabled():
+            return False
+        providers = get_config("providers") or {}
+        entry = providers.get("vmlx") or {}
+        return bool(entry.get("enabled", False)) if isinstance(entry, dict) else False
     except Exception:
         return False
 
@@ -177,6 +227,7 @@ def _anthropic_factory() -> "LLMClient":
 
 def _build_registry() -> list[ProviderSpec]:
     from .ollama import OllamaProvider
+    from .vmlx import VmlxProvider
     return [
         ProviderSpec(
             name="anthropic",
@@ -207,6 +258,16 @@ def _build_registry() -> list[ProviderSpec]:
             factory=lambda: OllamaProvider(
                 base_url=_ollama_base_url(),
                 keep_alive=_ollama_keep_alive(),
+            ),
+        ),
+        ProviderSpec(
+            name="vmlx",
+            is_cloud=False,
+            env_vars=[],
+            check=_vmlx_enabled,
+            factory=lambda: VmlxProvider(
+                base_url=_vmlx_base_url(),
+                api_key=_vmlx_api_key(),
             ),
         ),
     ]

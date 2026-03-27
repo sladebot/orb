@@ -1155,6 +1155,7 @@ class Dashboard {
         if (!modelId) return 'unknown';
         if (modelId.startsWith('claude')) return 'anthropic';
         if (modelId.startsWith('gpt') || modelId.startsWith('o1') || modelId.startsWith('o3')) return 'openai-codex';
+        if (modelId.includes('/') || modelId.includes('-instruct')) return 'vmlx';
         if (modelId.includes('qwen') || modelId.includes('llama') || modelId.includes(':')) return 'ollama';
         return 'other';
     }

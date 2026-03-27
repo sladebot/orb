@@ -4,10 +4,11 @@ from .model_selector import ModelSelector
 from .anthropic import AnthropicProvider
 from .openai import OpenAIProvider
 from .ollama import OllamaProvider
+from .vmlx import VmlxProvider
 from .codex import OpenAICodexProvider
 
 __all__ = [
     "ModelTier", "ModelConfig", "CompletionRequest", "CompletionResponse",
     "LLMClient", "ModelSelector",
-    "AnthropicProvider", "OpenAIProvider", "OllamaProvider", "OpenAICodexProvider",
+    "AnthropicProvider", "OpenAIProvider", "OllamaProvider", "VmlxProvider", "OpenAICodexProvider",
 ]

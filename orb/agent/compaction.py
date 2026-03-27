@@ -86,6 +86,7 @@ async def _llm_summary(prompt: str, providers: dict) -> str:
         providers.get("anthropic")
         or providers.get("openai-codex")
         or providers.get("ollama")
+        or providers.get("vmlx")
     )
     if not provider:
         logger.debug("compaction: no provider available, using fallback summary")

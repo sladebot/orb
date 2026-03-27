@@ -304,6 +304,7 @@ class GraphRuntime:
             ],
             "openai-codex": ["gpt-5.4-mini", "gpt-5.4"],
             "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
+            "vmlx": [],
         }
         model_ids = list(defaults.get(provider, []))
         for item in cls._provider_config_entry(provider).get("catalog") or []:
@@ -396,9 +397,10 @@ class GraphRuntime:
 
     @staticmethod
     def _pick_catalog_model(catalog: list[dict], token: str, fallback: str) -> str:
+        needle = token.lower()
         for item in catalog:
             model_id = str(item.get("id", ""))
-            if token in model_id:
+            if needle in model_id.lower():
                 return model_id
         return fallback
 
@@ -445,6 +447,17 @@ class GraphRuntime:
                     entry["default_models"] = defaults
                     entry["refreshed_at"] = int(time.time())
                     providers_cfg["ollama"] = entry
+                    updated = True
+
+        if "vmlx" in self._all_providers:
+            catalog, defaults = await self._fetch_vmlx_catalog()
+            if catalog:
+                entry = dict(providers_cfg.get("vmlx") or {})
+                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+                    entry["catalog"] = catalog
+                    entry["default_models"] = defaults
+                    entry["refreshed_at"] = int(time.time())
+                    providers_cfg["vmlx"] = entry
                     updated = True
 
         if updated:
@@ -522,6 +535,45 @@ class GraphRuntime:
             "local_medium": self._pick_catalog_model(catalog, "27b", "qwen3.5:27b"),
             "local_large": self._pick_catalog_model(catalog, "27b", "qwen3.5:27b"),
         }
+        return catalog, defaults
+
+    async def _fetch_vmlx_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        from orb.llm.registry import _vmlx_base_url
+
+        provider_cfg = self._provider_config_entry("vmlx")
+        endpoint = str(provider_cfg.get("base_url") or _vmlx_base_url()).rstrip("/")
+        if not endpoint.endswith("/v1"):
+            endpoint = f"{endpoint}/v1"
+        headers = {}
+        api_key = provider_cfg.get("api_key")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{endpoint}/models", timeout=5.0, headers=headers or None)
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+        except Exception:
+            return [], {}
+
+        catalog = []
+        seen: set[str] = set()
+        for item in data:
+            model_id = str(item.get("id") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            catalog.append({"id": model_id, "label": model_id, "local": True})
+
+        defaults = {
+            "local_small": self._pick_catalog_model(catalog, "7b", catalog[0]["id"] if catalog else "qwen"),
+            "local_medium": self._pick_catalog_model(catalog, "14b", catalog[0]["id"] if catalog else "qwen"),
+            "local_large": self._pick_catalog_model(catalog, "32b", catalog[-1]["id"] if catalog else "qwen"),
+        }
+        if catalog:
+            defaults["local_small"] = self._pick_catalog_model(catalog, "7b", catalog[0]["id"])
+            defaults["local_medium"] = self._pick_catalog_model(catalog, "14b", catalog[min(1, len(catalog) - 1)]["id"])
+            defaults["local_large"] = self._pick_catalog_model(catalog, "32b", catalog[-1]["id"])
         return catalog, defaults
 
     def settings_payload(self) -> dict:
@@ -1249,6 +1301,15 @@ class GraphRuntime:
                     models.append({"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True})
                 if self._provider_model_enabled("ollama", "qwen3.5:27b"):
                     models.append({"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True})
+        if "vmlx" in self._providers:
+            configured = self._provider_catalog("vmlx")
+            for item in configured:
+                models.append({
+                    "id": item["id"],
+                    "label": item.get("label") or item["id"],
+                    "provider": "vmlx",
+                    "local": True,
+                })
         return {"models": models}
 
     def _pick_primary_result(self, completions: dict[str, str]) -> tuple[str | None, str]:
@@ -1289,14 +1350,16 @@ class GraphRuntime:
             ModelTier,
             OPENAI_CODEX_PROVIDER,
             OLLAMA_PROVIDER,
+            VMLX_PROVIDER,
         )
 
         has_ollama = "ollama" in self._providers
+        has_vmlx = "vmlx" in self._providers
         has_anthropic = "anthropic" in self._providers
         has_codex = "openai-codex" in self._providers
 
-        def ollama(model_id: str) -> ModelConfig:
-            return ModelConfig(tier=ModelTier.LOCAL_LARGE, model_id=model_id, provider=OLLAMA_PROVIDER)
+        def local(provider: str, tier: ModelTier, model_id: str) -> ModelConfig:
+            return ModelConfig(tier=tier, model_id=model_id, provider=provider)
 
         def ant(tier: ModelTier, model_id: str) -> ModelConfig:
             return ModelConfig(tier=tier, model_id=model_id, provider=ANTHROPIC_PROVIDER)
@@ -1308,12 +1371,13 @@ class GraphRuntime:
             elif model_pin.startswith("gpt-5.4"):
                 force_provider = "openai-codex"
             elif "qwen" in model_pin or "llama" in model_pin:
-                force_provider = "ollama"
+                force_provider = "ollama" if has_ollama else "vmlx" if has_vmlx else "ollama"
 
         provider_available = {
             "anthropic": has_anthropic,
             "openai-codex": has_codex,
             "ollama": has_ollama,
+            "vmlx": has_vmlx,
         }
         if force_provider and not provider_available.get(force_provider):
             logger.warning("Forced provider '%s' not available; falling back to auto", force_provider)
@@ -1325,10 +1389,14 @@ class GraphRuntime:
         codex_default = self._provider_default_model("openai-codex", "cloud_fast", "gpt-5.4")
         ollama_small = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
         ollama_medium = self._provider_default_model("ollama", "local_medium", "qwen3.5:27b")
+        vmlx_small = self._provider_default_model("vmlx", "local_small", "qwen")
+        vmlx_medium = self._provider_default_model("vmlx", "local_medium", "qwen")
         use_ant = has_anthropic and force_provider in (None, "anthropic")
         use_codex = has_codex and force_provider in (None, "openai-codex")
-        q9 = ollama(ollama_small) if has_ollama and force_provider in (None, "ollama") else None
-        q27 = ollama(ollama_medium) if has_ollama and force_provider in (None, "ollama") else None
+        q9 = local(OLLAMA_PROVIDER, ModelTier.LOCAL_SMALL, ollama_small) if has_ollama and force_provider in (None, "ollama") else None
+        q27 = local(OLLAMA_PROVIDER, ModelTier.LOCAL_MEDIUM, ollama_medium) if has_ollama and force_provider in (None, "ollama") else None
+        vsmall = local(VMLX_PROVIDER, ModelTier.LOCAL_SMALL, vmlx_small) if has_vmlx and force_provider in (None, "vmlx") else None
+        vmedium = local(VMLX_PROVIDER, ModelTier.LOCAL_MEDIUM, vmlx_medium) if has_vmlx and force_provider in (None, "vmlx") else None
 
         def codex(tier: ModelTier) -> ModelConfig:
             return ModelConfig(tier=tier, model_id=codex_default, provider=OPENAI_CODEX_PROVIDER)
@@ -1345,11 +1413,11 @@ class GraphRuntime:
 
         def pick(score: int):
             if score <= 25:
-                return best(q9, haiku, q27, sonnet, opus)
+                return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
             if score <= 50:
-                return best(q27, haiku, sonnet, q9, opus)
+                return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
             if score <= 70:
-                return best(sonnet, haiku, q27, opus)
+                return best(sonnet, haiku, q27, vmedium, opus)
             if score <= 75:
                 return best(sonnet, haiku, opus)
             return best(opus, sonnet)
@@ -1357,31 +1425,31 @@ class GraphRuntime:
         def pick_for_role(category: str, score: int):
             if category == "entry":
                 if score <= 35:
-                    return best(q9, haiku, q27, sonnet, opus)
-                return best(q27, haiku, sonnet, q9, opus)
+                    return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
+                return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
             if category == "implementation":
                 if score <= 35:
-                    return best(q27, sonnet, haiku, opus)
+                    return best(q27, vmedium, sonnet, haiku, opus)
                 if score <= 70:
-                    return best(sonnet, q27, haiku, opus)
+                    return best(sonnet, q27, vmedium, haiku, opus)
                 return best(opus, sonnet)
             if category == "review":
                 if score <= 35:
-                    return best(q27, sonnet, haiku, opus)
+                    return best(q27, vmedium, sonnet, haiku, opus)
                 if score <= 70:
-                    return best(sonnet, q27, haiku, opus)
+                    return best(sonnet, q27, vmedium, haiku, opus)
                 return best(opus, sonnet)
             if category == "validation":
                 if score <= 30:
-                    return best(q9, haiku, q27, sonnet, opus)
+                    return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
                 if score <= 50:
-                    return best(q27, haiku, sonnet, q9, opus)
-                return best(sonnet, q27, haiku, opus)
+                    return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
+                return best(sonnet, q27, vmedium, haiku, opus)
             if category == "discovery":
                 if score <= 40:
-                    return best(q27, sonnet, haiku, opus)
+                    return best(q27, vmedium, sonnet, haiku, opus)
                 if score <= 75:
-                    return best(sonnet, q27, haiku, opus)
+                    return best(sonnet, q27, vmedium, haiku, opus)
                 return best(opus, sonnet)
             return pick(score)
 
@@ -1420,7 +1488,7 @@ class GraphRuntime:
                 logger.warning("Failed to build reviewer model config, proceeding without model hints")
                 return {}
             if len(reviewer_ids) >= 2 and force_provider is None:
-                alt_candidates = [c for c in [opus, sonnet, haiku, q27, q9] if c is not None]
+                alt_candidates = [c for c in [opus, sonnet, haiku, q27, vmedium, q9, vsmall] if c is not None]
                 result[reviewer_ids[0]] = reviewer_cfg
                 result[reviewer_ids[1]] = next((c for c in alt_candidates if c.provider != reviewer_cfg.provider), reviewer_cfg)
                 for reviewer_id in reviewer_ids[2:]:
@@ -1623,6 +1691,7 @@ class GraphRuntime:
             or self._providers.get("openai-codex")
             or self._providers.get("openai")
             or self._providers.get("ollama")
+            or self._providers.get("vmlx")
         )
         if not predict_provider:
             return _default_result(reason="No topology planner provider available; using heuristic routing")
@@ -1630,7 +1699,8 @@ class GraphRuntime:
         has_cloud = "anthropic" in self._providers or "openai-codex" in self._providers or "openai" in self._providers
         using_codex = not has_cloud or ("openai-codex" in self._providers and "anthropic" not in self._providers and "openai" not in self._providers)
         using_openai = "openai" in self._providers and "anthropic" not in self._providers and "openai-codex" not in self._providers
-        using_ollama = not has_cloud
+        using_ollama = "ollama" in self._providers and not has_cloud
+        using_vmlx = "vmlx" in self._providers and not has_cloud and "ollama" not in self._providers
 
         available_topologies = self._available_topologies()
         available_model_choices = self._available_model_choices()
@@ -1677,6 +1747,9 @@ class GraphRuntime:
         elif using_ollama:
             model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
             model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")
+        elif using_vmlx:
+            model_id = self._provider_default_model("vmlx", "local_small", "qwen")
+            model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")
         else:
             cloud_overrides = {
                 t: cfg for t, cfg in (self._model_overrides or {}).items()

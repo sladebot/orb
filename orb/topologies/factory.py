@@ -186,6 +186,7 @@ def _resolve_model_selection(
         "anthropic": ANTHROPIC_MODELS[ModelTier.CLOUD_STRONG],
         "openai-codex": CODEX_MODELS[ModelTier.CLOUD_STRONG],
         "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
+        "vmlx": ModelConfig(ModelTier.LOCAL_LARGE, "qwen", "vmlx"),
     }
 
     available = [p for p in provider_models if p in providers]

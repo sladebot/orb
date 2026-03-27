@@ -29,6 +29,7 @@ def test_load_config_normalizes_model_entries(tmp_path, monkeypatch):
     assert cfg["providers"]["anthropic"]["models"][ANTHROPIC_OPUS_MODEL]["enabled"] is True
     assert cfg["providers"]["openai-codex"]["enabled"] is True
     assert cfg["providers"]["ollama"]["models"] == {}
+    assert cfg["providers"]["vmlx"]["enabled"] is False
 
 
 def test_load_config_canonicalizes_stale_model_aliases(tmp_path, monkeypatch):
@@ -85,6 +86,7 @@ def test_default_config_matches_seeded_user_defaults(tmp_path, monkeypatch):
     assert cfg["providers"]["anthropic"]["default_models"]["cloud_fast"] == ANTHROPIC_HAIKU_MODEL
     assert cfg["providers"]["openai-codex"]["enabled"] is True
     assert cfg["providers"]["ollama"]["enabled"] is True
+    assert cfg["providers"]["vmlx"]["enabled"] is False
 
 
 def test_runtime_configure_drops_provider_with_no_enabled_models(monkeypatch):
@@ -169,3 +171,64 @@ def test_build_agent_model_map_falls_back_when_default_model_is_disabled(monkeyp
 
     assert model_map["coder"].model_id != ANTHROPIC_SONNET_MODEL
     assert model_map["reviewer"].model_id != ANTHROPIC_SONNET_MODEL
+
+
+def test_models_payload_includes_vmlx_catalog_models(monkeypatch):
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_config",
+        lambda key: {
+            "vmlx": {
+                "enabled": True,
+                "catalog": [
+                    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "label": "Qwen 2.5 Coder 7B", "local": True},
+                ],
+            },
+        } if key == "providers" else None,
+    )
+
+    runtime = GraphRuntime()
+    runtime._providers = {"vmlx": object()}  # noqa: SLF001
+
+    payload = runtime.models_payload()
+    entries = {(item["provider"], item["id"]) for item in payload["models"]}
+
+    assert ("vmlx", "Qwen/Qwen2.5-Coder-7B-Instruct") in entries
+
+
+def test_build_agent_model_map_uses_vmlx_when_it_is_the_only_local_provider(monkeypatch):
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_config",
+        lambda key: {
+            "vmlx": {
+                "enabled": True,
+                "catalog": [
+                    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "label": "Qwen 2.5 Coder 7B", "local": True},
+                    {"id": "Qwen/Qwen2.5-Coder-14B-Instruct", "label": "Qwen 2.5 Coder 14B", "local": True},
+                ],
+                "default_models": {
+                    "local_small": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                    "local_medium": "Qwen/Qwen2.5-Coder-14B-Instruct",
+                    "local_large": "Qwen/Qwen2.5-Coder-14B-Instruct",
+                },
+            },
+        } if key == "providers" else None,
+    )
+
+    runtime = GraphRuntime()
+    runtime._providers = {"vmlx": object()}  # noqa: SLF001
+
+    model_map = runtime._build_agent_model_map(  # noqa: SLF001
+        complexity=30,
+        topology_id="triad",
+        agent_complexity={
+            "coordinator": 20,
+            "coder": 30,
+            "reviewer": 30,
+            "tester": 25,
+        },
+    )
+
+    assert model_map["coordinator"].provider == "vmlx"
+    assert model_map["coder"].provider == "vmlx"
