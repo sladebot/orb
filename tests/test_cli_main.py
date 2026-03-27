@@ -168,6 +168,35 @@ async def test_async_main_connects_tui_to_existing_daemon():
 
 
 @pytest.mark.asyncio
+async def test_async_main_tui_accepts_port_shorthand():
+    args = _base_args(subcommand="tui", port=9091, query="hello")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock) as attach_tui:
+        await async_main()
+
+    attach_tui.assert_awaited_once()
+    _, kwargs = attach_tui.call_args
+    assert kwargs["connect_url"] == "http://127.0.0.1:9091"
+    assert kwargs["initial_query"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_async_main_tui_prefers_explicit_connect_over_port():
+    args = _base_args(subcommand="tui", connect="http://127.0.0.1:9090", port=9091, query="hello")
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock) as attach_tui:
+        await async_main()
+
+    attach_tui.assert_awaited_once()
+    _, kwargs = attach_tui.call_args
+    assert kwargs["connect_url"] == "http://127.0.0.1:9090"
+
+
+@pytest.mark.asyncio
 async def test_async_main_tui_subcommand_defaults_to_local_daemon():
     args = _base_args(subcommand="tui", query="hello")
 

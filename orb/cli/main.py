@@ -386,14 +386,15 @@ def parse_args() -> argparse.Namespace:
 
     tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
-    tui_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    tui_parser.add_argument("--connect", type=str, default=None, help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    tui_parser.add_argument("--port", type=int, default=None, help="Orb daemon port shorthand for localhost connects")
     tui_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
     tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
-    dashboard_parser.add_argument("--connect", type=str, default="http://127.0.0.1:8080", help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    dashboard_parser.add_argument("--connect", type=str, default=None, help="Orb daemon URL (default: http://127.0.0.1:8080)")
     dashboard_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
@@ -447,6 +448,14 @@ def _normalize_connect_url(url: str | None, default: str = "http://127.0.0.1:808
     if "://" not in base:
         base = f"http://{base}"
     return base
+
+
+def _resolve_connect_url(url: str | None, port: int | None = None) -> str:
+    if url:
+        return _normalize_connect_url(url)
+    if port is not None:
+        return _normalize_connect_url(f"http://127.0.0.1:{port}")
+    return _normalize_connect_url(None)
 
 
 def _init_topologies_file(force: bool = False) -> Path:
@@ -913,7 +922,7 @@ async def async_main() -> None:
         from .tui import attach_tui
 
         await attach_tui(
-            connect_url=_normalize_connect_url(args.connect),
+            connect_url=_resolve_connect_url(args.connect, getattr(args, "port", None)),
             topology=args.topology,
             budget=args.budget,
             show_logs=args.logs,
@@ -926,7 +935,7 @@ async def async_main() -> None:
         import aiohttp
         import webbrowser
 
-        base = _normalize_connect_url(args.connect)
+        base = _resolve_connect_url(args.connect)
 
         if args.query:
             async with aiohttp.ClientSession() as session:
