@@ -28,8 +28,9 @@ This sprint should therefore prioritize infrastructure that makes Orb observable
 
 - Phase 1 is complete.
 - Phase 2 is complete.
+- Phase 3 is complete.
 - The original heuristic-routing plan has been superseded by a pluggable classifier interface with a lightweight provider-backed classifier, so future learned routing can replace the backend without changing runtime orchestration.
-- The next phase should focus on execution controller policies rather than adding more topology complexity first.
+- The next phase should focus on verification policy and explicit verifier behavior.
 
 ## Current Gaps
 
@@ -200,16 +201,20 @@ Exit criteria:
 
 Status:
 
-- Not started.
-- This should be the next implementation phase.
+- Complete.
+- Orb now has a dedicated `ExecutionController` seam with a default controller implementation that stays separate from topology classification.
+- Planning-time controller policy can now override a pinned topology when fan-out limits are exceeded or when routing recommends escalation to a stronger topology.
+- Execution-time controller policy now treats timeout and budget exhaustion as explicit controller outcomes and can stop a run early after the first satisfactory completion when stop-early policy allows it.
+- Controller decisions and interventions are persisted into runtime state, run traces, and dashboard/trace summaries, so policy behavior is inspectable after a run.
+- CLI/runtime config now includes `max_fanout` as an explicit policy surface in addition to budget, timeout, depth, and cooldown controls.
 
 ## Next Phase Plan
 
-1. Add an explicit execution-controller layer that is separate from topology classification.
-2. Enforce run-level budget, per-agent token, timeout, and max fan-out policies in the runtime.
-3. Turn `escalation_allowed` and `stop_early_allowed` from trace metadata into actual controller decisions.
-4. Record controller interventions in `RunTrace` so replay and evaluation can compare policy behavior.
-5. Add policy-focused tests for timeout, fallback, retry/kill, and budget exhaustion paths.
+1. Add explicit verifier and critic roles as first-class runtime policy targets.
+2. Define which task classes require mandatory review before completion.
+3. Add contradiction and evidence-grounding checks for multi-worker and research-heavy runs.
+4. Record verifier catches and synthesis scoring in `RunTrace` for replay/eval.
+5. Use those verification signals as future controller inputs rather than relying only on routing heuristics and run-shape metadata.
 
 ## Phase 4: Make Verification First-Class
 

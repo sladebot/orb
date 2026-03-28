@@ -2,7 +2,7 @@
 
 Orb is a multi-agent coding runtime with a daemon, terminal UI, browser dashboard, persisted run traces, topology selection, and per-node model allocation.
 
-It is built around a simple idea: treat coordination as a runtime problem, not just a prompt problem. Orb chooses a topology, classifies the task, assigns models per node, runs the graph, and records enough telemetry to inspect what happened afterward.
+It is built around a simple idea: treat coordination as a runtime problem, not just a prompt problem. Orb chooses a topology, classifies the task, assigns models per node, applies execution policy, runs the graph, and records enough telemetry to inspect what happened afterward.
 
 ![Orb TUI](docs/orb-tui.png)
 
@@ -17,6 +17,7 @@ It is built around a simple idea: treat coordination as a runtime problem, not j
 - Runs coding tasks through explicit topologies such as `triad`, `dual-review`, and `hierarchy`
 - Classifies tasks before execution and records the chosen topology, routing reason, and classifier model
 - Assigns models per node instead of forcing one model across the whole run
+- Applies execution-controller policy for budget, timeout, early-stop, and topology fallback decisions
 - Exposes a live TUI and dashboard backed by the same daemon
 - Persists session-aware traces for replay, inspection, and future routing work
 - Supports local and cloud providers, including `vmlx`, `openai-codex`, `ollama`, and `anthropic`
@@ -176,6 +177,7 @@ Useful global flags:
 - `--cloud-only`: restrict to cloud providers
 - `--budget N`: set a global message budget
 - `--timeout N`: set timeout in seconds
+- `--max-fanout N`: cap worker fan-out before the controller falls back to a more compact topology
 - `--connect URL`: attach TUI or dashboard to an existing daemon
 
 ## Topologies
@@ -222,6 +224,18 @@ In the UI you can now see:
 - the chosen topology
 - the planned model for each agent card/node
 - routing metadata in trace detail views
+
+## Execution Controller Policies
+
+After routing, Orb runs an execution-controller layer that stays separate from topology classification.
+
+The current controller handles:
+
+- timeout and budget exhaustion as explicit controller outcomes
+- fallback from a pinned topology when it exceeds configured `max_fanout` policy
+- escalation to a stronger topology when routing recommends it and the pinned topology is too weak
+- early stop after the first satisfactory completion when the task is marked as stop-early eligible
+- controller decision/intervention logging in runtime state and run traces
 
 ## Per-Node Model Allocation
 
@@ -380,11 +394,12 @@ Orb currently has:
 - persisted session-aware traces
 - explicit topologies
 - provider-backed topology classification
+- an execution-controller layer for budget, timeout, early-stop, and fan-out fallback policy
 - per-node model allocation
 - configurable provider catalogs/defaults
 - dashboard visibility into routing and model choices
 
-The next major layer is execution control: budget enforcement, timeout/fan-out policy, and controller-driven early stop/escalation.
+The next major layer is verification policy: explicit verifier roles, contradiction checks, evidence-grounding, and synthesis scoring.
 
 ## License
 
