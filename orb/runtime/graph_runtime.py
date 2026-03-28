@@ -16,6 +16,13 @@ from orb.cli.config import get as get_config, load_config, save_config
 from orb.messaging.channel import ChannelClosed
 from orb.tracing.run_trace import RunTrace
 from web.state import DashboardState
+from .execution_controller import (
+    ControllerAction,
+    ControllerContext,
+    ControllerDecision,
+    DefaultExecutionController,
+    ExecutionController,
+)
 from .topology_classifier import ProviderBackedTopologyClassifier, TopologyClassifier
 from .transcript import ConversationSession, RunTranscript
 
@@ -65,6 +72,7 @@ class GraphRuntime:
             self._planner_model_config,
             lambda provider_name: self._providers.get(provider_name),
         )
+        self._execution_controller: ExecutionController = DefaultExecutionController()
 
     @staticmethod
     def _available_topologies() -> dict:
@@ -197,6 +205,134 @@ class GraphRuntime:
             })
         return options
 
+    @staticmethod
+    def _topology_fanout(topology_id: str) -> int:
+        topo = GraphRuntime._available_topologies().get(str(topology_id or ""))
+        if topo is None:
+            return 0
+        return max(0, len(topo.agents) - 1)
+
+    @classmethod
+    def _compact_topology_for_limit(cls, max_fanout: int) -> str:
+        if max_fanout <= 0:
+            return ""
+        viable: list[tuple[int, str]] = []
+        for topology_id in cls._available_topologies():
+            fanout = cls._topology_fanout(topology_id)
+            if fanout <= max_fanout:
+                viable.append((fanout, topology_id))
+        if not viable:
+            return ""
+        viable.sort()
+        return viable[-1][1]
+
+    async def _evaluate_execution_controller(
+        self,
+        *,
+        query: str,
+        topology_id: str,
+        predicted: dict,
+        requested_topology: str,
+        stage: str,
+    ) -> ControllerDecision:
+        decision = await self._execution_controller.evaluate(
+            ControllerContext(
+                query=query,
+                topology_id=topology_id,
+                task_type=str(predicted.get("task_type") or ""),
+                routing_mode=str(predicted.get("routing_mode") or ""),
+                stage=stage,
+                budget_total=int(getattr(self._config, "budget", self.state.budget) or self.state.budget or 0),
+                budget_remaining=int(self.state.budget_remaining),
+                timeout_s=float(getattr(self._config, "timeout", 0.0) or 0.0),
+                elapsed_s=0.0,
+                fanout=self._topology_fanout(topology_id),
+                max_fanout=int(getattr(self._config, "max_fanout", 0) or 0),
+                escalation_allowed=bool(predicted.get("escalation_allowed")),
+                stop_early_allowed=bool(predicted.get("stop_early_allowed")),
+                signals=dict(predicted.get("signals") or {}),
+                metadata={
+                    "requested_topology": requested_topology,
+                    "recommended_topology": str(predicted.get("topology") or topology_id),
+                    "compact_topology": self._compact_topology_for_limit(
+                        int(getattr(self._config, "max_fanout", 0) or 0)
+                    ),
+                    "escalation_reason": str(predicted.get("escalation_reason") or ""),
+                    "stop_early_reason": str(predicted.get("stop_early_reason") or ""),
+                },
+            )
+        )
+        return decision
+
+    def _execution_controller_snapshot(
+        self,
+        predicted: dict,
+        *,
+        topology_id: str = "",
+        decision: ControllerDecision | None = None,
+        status: str = "primed",
+        interventions: list[dict] | None = None,
+    ) -> dict:
+        config = self._config
+        budget_limit = int(getattr(config, "budget", self.state.budget) or self.state.budget or 0)
+        timeout_s = float(getattr(config, "timeout", 0.0) or 0.0)
+        max_depth = int(getattr(config, "max_depth", 0) or 0)
+        max_cooldown = int(getattr(config, "max_cooldown", 0) or 0)
+        max_fanout = int(getattr(config, "max_fanout", 0) or 0)
+        entry_agent = str(getattr(config, "entry_agent", "") or "")
+        synthesis_agent = str(getattr(config, "synthesis_agent", "") or "")
+        escalation_allowed = bool(predicted.get("escalation_allowed"))
+        stop_early_allowed = bool(predicted.get("stop_early_allowed"))
+        default_interventions: list[dict[str, str]] = []
+        if escalation_allowed:
+            default_interventions.append({
+                "kind": "escalation_recommended",
+                "reason": str(predicted.get("escalation_reason") or ""),
+            })
+        if stop_early_allowed:
+            default_interventions.append({
+                "kind": "stop_early_recommended",
+                "reason": str(predicted.get("stop_early_reason") or ""),
+            })
+        if not default_interventions:
+            default_interventions.append({
+                "kind": "continue",
+                "reason": str(predicted.get("reason") or predicted.get("summary") or ""),
+            })
+
+        if escalation_allowed:
+            decision_name = "recommend_escalation"
+            decision_reason = str(predicted.get("escalation_reason") or predicted.get("reason") or "")
+        elif stop_early_allowed:
+            decision_name = "recommend_stop_early"
+            decision_reason = str(predicted.get("stop_early_reason") or predicted.get("reason") or "")
+        else:
+            decision_name = "continue"
+            decision_reason = str(predicted.get("reason") or predicted.get("summary") or "")
+
+        if decision is not None and decision.action != ControllerAction.CONTINUE:
+            decision_name = decision.action.value
+            decision_reason = decision.reason or decision_reason
+        intervention_items = list(interventions or default_interventions)
+
+        return {
+            "mode": "enforced" if decision is not None and decision.action != ControllerAction.CONTINUE else "advisory",
+            "status": status,
+            "policy": "phase3_runtime_slice",
+            "topology_id": topology_id or str(predicted.get("topology") or ""),
+            "budget_limit": budget_limit,
+            "budget_remaining": int(self.state.budget_remaining),
+            "timeout_s": timeout_s,
+            "max_depth": max_depth,
+            "max_cooldown": max_cooldown,
+            "max_fanout": max_fanout,
+            "entry_agent": entry_agent,
+            "synthesis_agent": synthesis_agent,
+            "decision": decision_name,
+            "decision_reason": decision_reason,
+            "interventions": intervention_items,
+        }
+
     @property
     def running(self) -> bool:
         return self._run_task is not None and not self._run_task.done()
@@ -239,6 +375,9 @@ class GraphRuntime:
 
     def set_topology_classifier(self, classifier: TopologyClassifier) -> None:
         self._topology_classifier = classifier
+
+    def set_execution_controller(self, controller: ExecutionController) -> None:
+        self._execution_controller = controller
 
     @staticmethod
     def _provider_config_entry(provider: str) -> dict:
@@ -1112,6 +1251,10 @@ class GraphRuntime:
             session_id=self._conversation_session.session_id,
             metadata={"session_id": self._conversation_session.session_id},
         )
+        if self._config:
+            configured_budget = int(getattr(self._config, "budget", self.state.budget) or self.state.budget or 0)
+            self.state.budget = configured_budget
+            self.state.budget_remaining = configured_budget
         requested_target, query = self._resolve_conversation_target(
             query,
             default_target="coordinator",
@@ -1122,13 +1265,42 @@ class GraphRuntime:
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
         predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
+        controller_decision = await self._evaluate_execution_controller(
+            query=query,
+            topology_id=selected_topology,
+            predicted=predicted,
+            requested_topology=str(predicted.get("requested_topology") or topology or "auto"),
+            stage="planning",
+        )
+        controller_interventions: list[dict] = []
+        if controller_decision.action in {ControllerAction.FALLBACK_TOPOLOGY, ControllerAction.REDUCE_FANOUT}:
+            controller_interventions.append({
+                "kind": controller_decision.action.value,
+                "reason": controller_decision.reason,
+                "target": controller_decision.topology_id,
+                "details": dict(controller_decision.details),
+            })
+            if (
+                controller_decision.action == ControllerAction.FALLBACK_TOPOLOGY
+                and controller_decision.topology_id
+                and controller_decision.topology_id in self._available_topologies()
+            ):
+                selected_topology = controller_decision.topology_id
         routing_payload = {
+            "topology": selected_topology,
             "task_type": str(predicted.get("task_type") or ""),
             "reason": str(predicted.get("reason") or ""),
             "summary": str(predicted.get("summary") or ""),
             "routing_mode": str(predicted.get("routing_mode") or ""),
             "classifier_model": str(predicted.get("classifier_model") or ""),
             "classifier_provider": str(predicted.get("classifier_provider") or ""),
+            "controller": self._execution_controller_snapshot(
+                predicted,
+                topology_id=selected_topology,
+                decision=controller_decision,
+                status="applied" if controller_interventions else "primed",
+                interventions=controller_interventions or None,
+            ),
             "signals": dict(predicted.get("signals") or {}),
             "candidates": list(predicted.get("candidates") or []),
             "escalation_allowed": bool(predicted.get("escalation_allowed")),
@@ -1148,6 +1320,7 @@ class GraphRuntime:
                 "routing_mode": str(predicted.get("routing_mode") or ""),
                 "classifier_model": str(predicted.get("classifier_model") or ""),
                 "classifier_provider": str(predicted.get("classifier_provider") or ""),
+                "controller": dict(routing_payload.get("controller") or {}),
                 "signals": dict(predicted.get("signals") or {}),
                 "candidate_details": list(predicted.get("candidates") or []),
                 "escalation_allowed": bool(predicted.get("escalation_allowed")),
@@ -1163,15 +1336,21 @@ class GraphRuntime:
             "Classified task",
             f"{predicted.get('task_type') or 'unknown'} · {predicted.get('summary') or predicted.get('reason') or ''}".strip(),
         )
+        topology_label, topology_description, agent_positions = self._topology_meta(selected_topology)
+        graph_view = self._topology_graph_view(selected_topology)
         await self._record_plan_step(
             "topology",
             "Selected topology",
-            f"{predicted.get('label') or selected_topology}: {predicted.get('reason') or predicted.get('description') or ''}".strip(),
+            f"{topology_label or selected_topology}: {predicted.get('reason') or topology_description or ''}".strip(),
         )
-        topology_label, topology_description, agent_positions = self._topology_meta(selected_topology)
-        graph_view = self._topology_graph_view(selected_topology)
-        agent_complexity = dict(predicted.get("agent_complexity") or {})
+        if controller_interventions:
+            await self._record_plan_step(
+                "controller",
+                "Applied execution policy",
+                controller_decision.reason or controller_decision.action.value,
+            )
         overall_complexity = int(predicted.get("complexity", 50))
+        agent_complexity = self._derive_agent_complexity(selected_topology, overall_complexity)
         fallback_model_map = self._build_agent_model_map(
             overall_complexity,
             model_pin=model_pin,
@@ -1351,6 +1530,15 @@ class GraphRuntime:
         available_topologies = self._available_topologies()
         if not query:
             first_id, topo = next(iter(available_topologies.items()))
+            controller = self._execution_controller_snapshot({
+                "topology": first_id,
+                "reason": "Empty query defaults to the first approved topology.",
+                "summary": "No task provided yet",
+                "escalation_allowed": False,
+                "stop_early_allowed": False,
+                "escalation_reason": "",
+                "stop_early_reason": "No task provided yet.",
+            }, topology_id=first_id)
             return {
                 "topology": first_id,
                 "label": topo.label,
@@ -1369,6 +1557,7 @@ class GraphRuntime:
                 "routing_mode": "default",
                 "classifier_model": "",
                 "classifier_provider": "",
+                "controller": controller,
                 "complexity": 0,
                 "agent_complexity": {},
                 "agent_models": {},
@@ -1408,6 +1597,18 @@ class GraphRuntime:
                 for candidate in classification.candidates
             ],
         )
+        controller = self._execution_controller_snapshot(
+            {
+                "topology": topology_id,
+                "reason": classification.reason,
+                "summary": classification.summary,
+                "escalation_allowed": classification.escalation_allowed,
+                "stop_early_allowed": classification.stop_early_allowed,
+                "escalation_reason": classification.escalation_reason,
+                "stop_early_reason": classification.stop_early_reason,
+            },
+            topology_id=topology_id,
+        )
         return {
             "topology": topology_id,
             "label": classification.label,
@@ -1433,6 +1634,7 @@ class GraphRuntime:
             "routing_mode": classification.routing_mode,
             "classifier_model": classification.classifier_model,
             "classifier_provider": classification.classifier_provider,
+            "controller": controller,
             "complexity": complexity,
             "agent_complexity": agent_complexity,
             "agent_models": {role: cfg.model_id for role, cfg in agent_model_map.items()},
@@ -1851,6 +2053,19 @@ class GraphRuntime:
             trace_recorder=trace_recorder,
             tier_override=self._tier_override,
             agent_model_map=agent_model_map or None,
+            execution_controller=self._execution_controller,
+            controller_context={
+                "query": query,
+                "task_type": str(self.state.routing.get("task_type") or ""),
+                "routing_mode": str(self.state.routing.get("routing_mode") or ""),
+                "signals": dict(self.state.routing.get("signals") or {}),
+                "escalation_allowed": bool(self.state.routing.get("escalation_allowed")),
+                "stop_early_allowed": bool(self.state.routing.get("stop_early_allowed")),
+                "requested_topology": str(self.state.routing.get("requested_topology") or "auto"),
+                "recommended_topology": str(self.state.routing.get("topology") or topology),
+                "escalation_reason": str(self.state.routing.get("escalation_reason") or ""),
+                "stop_early_reason": str(self.state.routing.get("stop_early_reason") or ""),
+            },
         )
         self._last_trace = trace_recorder
         self._last_trace.record_stage_start(

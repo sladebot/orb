@@ -405,6 +405,11 @@ class RunTrace:
             (event for event in self.events if event.kind == TraceEventKind.TOPOLOGY_CHOICE),
             None,
         )
+        controller_data = {}
+        if topology_event is not None:
+            raw_controller = topology_event.data.get("controller")
+            if isinstance(raw_controller, dict):
+                controller_data = raw_controller
         final_event = next(
             (event for event in reversed(self.events) if event.kind == TraceEventKind.FINAL_OUTCOME),
             None,
@@ -432,12 +437,32 @@ class RunTrace:
             "escalation_reason": str((topology_event.data.get("escalation_reason") if topology_event else "") or ""),
             "stop_early_reason": str((topology_event.data.get("stop_early_reason") if topology_event else "") or ""),
             "routing_candidates": list((topology_event.data.get("candidate_details") if topology_event else []) or []),
+            "controller_mode": str(controller_data.get("mode") or ""),
+            "controller_status": str(controller_data.get("status") or ""),
+            "controller_policy": str(controller_data.get("policy") or ""),
+            "controller_decision": str(controller_data.get("decision") or ""),
+            "controller_reason": str(controller_data.get("decision_reason") or ""),
+            "controller_budget_limit": int(controller_data.get("budget_limit") or 0),
+            "controller_budget_remaining": int(controller_data.get("budget_remaining") or 0),
+            "controller_timeout_s": float(controller_data.get("timeout_s") or 0.0),
+            "controller_max_depth": int(controller_data.get("max_depth") or 0),
+            "controller_max_cooldown": int(controller_data.get("max_cooldown") or 0),
+            "controller_max_fanout": int(controller_data.get("max_fanout") or 0),
+            "controller_interventions": list(controller_data.get("interventions") or []),
         }
         if final_event is not None:
             summary["success"] = bool(final_event.data.get("success"))
             summary["result"] = str(final_event.data.get("result") or "")
             summary["error"] = str(final_event.data.get("error") or "")
             summary["final_message"] = final_event.message
+            if final_event.data.get("controller_action"):
+                summary["controller_decision"] = str(final_event.data.get("controller_action") or summary["controller_decision"])
+            if final_event.data.get("controller_reason"):
+                summary["controller_reason"] = str(final_event.data.get("controller_reason") or summary["controller_reason"])
+            if isinstance(final_event.data.get("controller_interventions"), list):
+                summary["controller_interventions"] = list(final_event.data.get("controller_interventions") or [])
+            if final_event.data.get("budget_remaining") is not None:
+                summary["controller_budget_remaining"] = int(final_event.data.get("budget_remaining") or 0)
         else:
             summary["success"] = None
             summary["result"] = ""

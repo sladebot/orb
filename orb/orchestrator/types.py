@@ -9,6 +9,7 @@ class OrchestratorConfig:
     budget: int = 200
     max_depth: int = 10
     max_cooldown: int = 5
+    max_fanout: int = 0
     entry_agent: str = "coder"
     synthesis_agent: str | None = None  # stays alive until all workers complete
 

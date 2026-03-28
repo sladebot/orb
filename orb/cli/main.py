@@ -401,6 +401,7 @@ def parse_args() -> argparse.Namespace:
     daemon_common.add_argument("--host", default=None, help="Daemon bind host")
     daemon_common.add_argument("--port", type=int, default=None, help="Daemon bind port")
     daemon_common.add_argument("--workdir", type=str, help="Daemon workspace directory")
+    daemon_common.add_argument("--max-fanout", type=int, default=None, help="Max worker fan-out before controller fallback")
     daemon_common.add_argument(
         "--local-only",
         action="store_true",
@@ -417,6 +418,7 @@ def parse_args() -> argparse.Namespace:
     daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
     daemon_parser.add_argument("--port", type=int, default=8080, help="Daemon bind port (default: 8080)")
     daemon_parser.add_argument("--workdir", type=str, help="Daemon workspace directory (default: create a fresh /tmp/orb-daemon-* dir each start)")
+    daemon_parser.add_argument("--max-fanout", type=int, default=0, help="Max worker fan-out before controller fallback (default: unlimited)")
     daemon_sub = daemon_parser.add_subparsers(dest="daemon_action")
     daemon_sub.add_parser("run", parents=[daemon_common], help="Run the daemon in the foreground")
     daemon_sub.add_parser("start", parents=[daemon_common], help="Start the daemon in the background")
@@ -432,6 +434,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--budget", type=int, default=200, help="Global message budget")
     parser.add_argument("--timeout", type=float, default=600.0, help="Timeout in seconds")
     parser.add_argument("--max-depth", type=int, default=10, help="Max message hop depth")
+    parser.add_argument("--max-fanout", type=int, default=0, help="Max worker fan-out before controller fallback (0 = unlimited)")
     parser.add_argument("--model", type=str, help="Override default cloud model")
     parser.add_argument("--local-only", action="store_true", help="Use only local models")
     parser.add_argument("--cloud-only", action="store_true", help="Use only cloud models")
@@ -762,7 +765,12 @@ async def async_main() -> None:
             runtime = GraphRuntime(DashboardState())
             runtime.configure(
                 providers=build_providers(local_only=False, cloud_only=False),
-                config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
+                config=OrchestratorConfig(
+                    timeout=args.timeout,
+                    budget=args.budget,
+                    max_depth=args.max_depth,
+                    max_fanout=args.max_fanout,
+                ),
                 model_overrides=None,
                 tier_override=None,
             )
@@ -877,7 +885,12 @@ async def async_main() -> None:
                 local_only=args.local_only,
                 cloud_only=args.cloud_only,
             ),
-            config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
+            config=OrchestratorConfig(
+                timeout=args.timeout,
+                budget=args.budget,
+                max_depth=args.max_depth,
+                max_fanout=args.max_fanout,
+            ),
             model_overrides=None,
             tier_override=None,
         )
@@ -980,6 +993,7 @@ async def async_main() -> None:
         timeout=args.timeout,
         budget=args.budget,
         max_depth=args.max_depth,
+        max_fanout=args.max_fanout,
     )
 
     model_overrides: dict[ModelTier, ModelConfig] = {}

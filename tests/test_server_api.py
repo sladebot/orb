@@ -70,7 +70,7 @@ def _openai_and_ollama_enabled():
     }
 
 
-def _make_server() -> DashboardServer:
+def _make_server(config: OrchestratorConfig | None = None) -> DashboardServer:
     state = DashboardState()
     server = DashboardServer(state, host="127.0.0.1", port=18099)
     server._app["_test_server_ref"] = server
@@ -104,7 +104,7 @@ def _make_server() -> DashboardServer:
     lt.DEFAULT_MODELS[ModelTier.CLOUD_FAST] = mock_cfg
     lt.DEFAULT_MODELS[ModelTier.CLOUD_STRONG] = mock_cfg
 
-    config = OrchestratorConfig(budget=50, timeout=10.0)
+    config = config or OrchestratorConfig(budget=50, timeout=10.0)
     server.set_providers(
         providers={"mock": mock_client},
         config=config,
@@ -535,3 +535,75 @@ class TestModelAllocation:
         assert predicted["signals"]["mentions_breadth"] is True
         assert predicted["topology"] == "hierarchy"
         assert predicted["escalation_reason"] == "Escalate to hierarchy when broad repo analysis is required."
+
+    @pytest.mark.asyncio
+    async def test_start_run_persists_controller_snapshot_into_state_and_trace(self, client, monkeypatch):
+        runtime = client.server.app["_test_server_ref"].runtime  # type: ignore[index]
+
+        async def fake_run_orchestrator(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(runtime, "_run_orchestrator", fake_run_orchestrator)
+
+        resp = await client.post("/api/start", json={
+            "query": "build a mobile app",
+            "topology": "triad",
+        })
+        assert resp.status == 200
+
+        await runtime._run_task  # noqa: SLF001
+
+        controller = runtime.state.routing["controller"]
+        assert controller["mode"] == "advisory"
+        assert controller["policy"] == "phase3_runtime_slice"
+        assert controller["decision"] == "recommend_stop_early"
+        assert controller["budget_limit"] == 50
+        assert controller["budget_remaining"] == 50
+        assert controller["timeout_s"] == 10.0
+
+        trace_summary = runtime._last_trace.summary()  # noqa: SLF001
+        assert trace_summary["controller_mode"] == "advisory"
+        assert trace_summary["controller_policy"] == "phase3_runtime_slice"
+        assert trace_summary["controller_decision"] == "recommend_stop_early"
+        assert trace_summary["controller_reason"] == "A compact topology should be enough."
+        assert trace_summary["controller_budget_limit"] == 50
+        assert trace_summary["controller_budget_remaining"] == 50
+        assert trace_summary["controller_timeout_s"] == 10.0
+        assert trace_summary["controller_interventions"][0]["kind"] == "stop_early_recommended"
+
+    @pytest.mark.asyncio
+    async def test_start_run_applies_controller_fallback_for_excessive_fanout(self, monkeypatch):
+        server = _make_server(OrchestratorConfig(budget=50, timeout=10.0, max_fanout=3))
+        test_server = TestServer(server._app)
+        test_client = TestClient(test_server)
+        await test_client.start_server()
+        try:
+            runtime = server.runtime
+
+            async def fake_run_orchestrator(*args, **kwargs):
+                return None
+
+            monkeypatch.setattr(runtime, "_run_orchestrator", fake_run_orchestrator)
+
+            resp = await test_client.post("/api/start", json={
+                "query": "build a mobile app",
+                "topology": "hierarchy",
+            })
+            assert resp.status == 200
+
+            await runtime._run_task  # noqa: SLF001
+
+            assert runtime.state.topology_id == "triad"
+            controller = runtime.state.routing["controller"]
+            assert controller["mode"] == "enforced"
+            assert controller["status"] == "applied"
+            assert controller["decision"] == "fallback_topology"
+            assert controller["topology_id"] == "triad"
+            assert controller["max_fanout"] == 3
+
+            trace_summary = runtime._last_trace.summary()  # noqa: SLF001
+            assert trace_summary["topology_id"] == "triad"
+            assert trace_summary["controller_decision"] == "fallback_topology"
+            assert trace_summary["controller_interventions"][0]["kind"] == "fallback_topology"
+        finally:
+            await test_client.close()

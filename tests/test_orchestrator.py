@@ -2,6 +2,7 @@ import pytest
 
 from orb.llm.types import ModelTier, ModelConfig, CompletionResponse, ToolCall
 from orb.orchestrator.types import OrchestratorConfig
+from orb.runtime.execution_controller import DefaultExecutionController
 from orb.topologies import create_orchestrator
 from orb.tracing.run_trace import TraceEventKind
 from tests.test_claude_agent import MockLLMClient
@@ -98,12 +99,109 @@ class TestOrchestrator:
             providers={"mock": mock},
             config=config,
             model_overrides=overrides,
-            trace=False,
+            trace=True,
         )
 
         result = await orchestrator.run("Write hello world")
 
+        assert not result.success
         assert result.timed_out
+        assert result.error == "timeout"
+        assert orchestrator.trace is not None
+        final_outcome = next(
+            event
+            for event in reversed(orchestrator.trace.events)
+            if event.kind == TraceEventKind.FINAL_OUTCOME
+        )
+        assert final_outcome.data["controller_action"] == "timeout"
+        assert final_outcome.data["controller_source"] == "timeout"
+        assert final_outcome.data["timed_out"] is True
+
+    async def test_budget_exhaustion(self):
+        """A routed message budget of zero should fail with a controller outcome."""
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[
+                    ToolCall(
+                        id="t1",
+                        name="send_message",
+                        input={"to": "coder", "content": "Write hello world"},
+                    ),
+                ],
+            ),
+        ])
+
+        mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
+        overrides = {t: mock_model for t in ModelTier}
+
+        config = OrchestratorConfig(timeout=2.0, budget=0)
+        orchestrator = create_orchestrator(
+            "triad",
+            providers={"mock": mock},
+            config=config,
+            model_overrides=overrides,
+            trace=True,
+        )
+
+        result = await orchestrator.run("Write hello world")
+
+        assert not result.success
+        assert not result.timed_out
+        assert result.error == "budget_exhausted"
+        assert result.message_count == 0
+        assert orchestrator.trace is not None
+        final_outcome = next(
+            event
+            for event in reversed(orchestrator.trace.events)
+            if event.kind == TraceEventKind.FINAL_OUTCOME
+        )
+        assert final_outcome.data["controller_action"] == "budget_exhausted"
+        assert final_outcome.data["controller_source"] == "route_failure"
+        assert final_outcome.data["controller_applied"] is True
+        assert final_outcome.data["message_count"] == 0
+
+    async def test_stop_early_controller_finishes_after_first_completion(self):
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(id="t1", name="complete_task", input={"result": "done early"})],
+            ),
+        ])
+
+        mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")
+        overrides = {t: mock_model for t in ModelTier}
+        orchestrator = create_orchestrator(
+            "triad",
+            providers={"mock": mock},
+            config=OrchestratorConfig(timeout=2.0, budget=10),
+            model_overrides=overrides,
+            trace=True,
+            execution_controller=DefaultExecutionController(),
+            controller_context={
+                "query": "small task",
+                "stop_early_allowed": True,
+                "stop_early_reason": "First satisfactory completion is enough.",
+            },
+        )
+
+        result = await orchestrator.run("small task", entry_agent="coordinator")
+
+        assert result.success
+        assert not result.timed_out
+        assert result.error is None
+        assert orchestrator.trace is not None
+        final_outcome = next(
+            event
+            for event in reversed(orchestrator.trace.events)
+            if event.kind == TraceEventKind.FINAL_OUTCOME
+        )
+        assert final_outcome.data["controller_action"] == "stop_early"
+        assert final_outcome.data["controller_source"] == "controller"
+        assert final_outcome.data["controller_applied"] is True
+        assert final_outcome.data["controller_interventions"][0]["action"] == "stop_early"
 
     async def test_entry_agent_not_found(self):
         mock = MockLLMClient()

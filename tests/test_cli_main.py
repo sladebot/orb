@@ -27,6 +27,7 @@ def _base_args(**overrides) -> Namespace:
         budget=200,
         timeout=30.0,
         max_depth=10,
+        max_fanout=0,
         model=None,
         local_only=False,
         cloud_only=False,
@@ -563,6 +564,18 @@ async def test_parse_args_preserves_root_local_only_for_daemon():
     assert args.daemon_action == "run"
     assert args.local_only is True
     assert args.host == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_parse_args_accepts_daemon_max_fanout():
+    from orb.cli.main import parse_args
+
+    with patch("sys.argv", ["orb", "daemon", "run", "--max-fanout", "3"]):
+        args = parse_args()
+
+    assert args.subcommand == "daemon"
+    assert args.daemon_action == "run"
+    assert args.max_fanout == 3
 
 
 @pytest.mark.asyncio

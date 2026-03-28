@@ -21,6 +21,7 @@ from .schema import ModelSelectionSchema, TopologySchema
 if TYPE_CHECKING:
     from ..llm.client import LLMClient
     from ..llm.types import ModelConfig, ModelTier
+    from ..runtime.execution_controller import ExecutionController
 
 
 def create_orchestrator(
@@ -32,6 +33,8 @@ def create_orchestrator(
     trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
+    execution_controller: "ExecutionController | None" = None,
+    controller_context: dict | None = None,
 ) -> Orchestrator:
     """Build an Orchestrator from a YAML-defined topology."""
     loader = get_loader()
@@ -52,6 +55,8 @@ def create_orchestrator(
         trace_recorder=trace_recorder,
         tier_override=tier_override,
         agent_model_map=agent_model_map,
+        execution_controller=execution_controller,
+        controller_context=controller_context,
     )
 
 
@@ -69,6 +74,8 @@ def _build_from_schema(
     trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
+    execution_controller: "ExecutionController | None" = None,
+    controller_context: dict | None = None,
 ) -> Orchestrator:
     config = config or OrchestratorConfig()
     # Only override entry_agent from YAML if user hasn't set a custom one
@@ -171,6 +178,8 @@ def _build_from_schema(
         trace=trace_recorder,
         topology_id=topo_def.id,
         sandbox=sandbox,
+        execution_controller=execution_controller,
+        controller_context=controller_context,
     )
 
 
