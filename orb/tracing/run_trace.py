@@ -427,6 +427,10 @@ class RunTrace:
             "routing_mode": str((topology_event.data.get("routing_mode") if topology_event else "") or ""),
             "classifier_model": str((topology_event.data.get("classifier_model") if topology_event else "") or ""),
             "classifier_provider": str((topology_event.data.get("classifier_provider") if topology_event else "") or ""),
+            "escalation_allowed": bool((topology_event.data.get("escalation_allowed") if topology_event else False) or False),
+            "stop_early_allowed": bool((topology_event.data.get("stop_early_allowed") if topology_event else False) or False),
+            "escalation_reason": str((topology_event.data.get("escalation_reason") if topology_event else "") or ""),
+            "stop_early_reason": str((topology_event.data.get("stop_early_reason") if topology_event else "") or ""),
             "routing_candidates": list((topology_event.data.get("candidate_details") if topology_event else []) or []),
         }
         if final_event is not None:

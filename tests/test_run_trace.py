@@ -13,7 +13,15 @@ class TestRunTrace:
             reason="risky task",
             task_type="coding",
             candidates=["single_agent", "planner_executor_verifier"],
-            data={"routing_mode": "llm", "classifier_model": "gpt-5.4-mini", "classifier_provider": "openai-codex"},
+            data={
+                "routing_mode": "llm",
+                "classifier_model": "gpt-5.4-mini",
+                "classifier_provider": "openai-codex",
+                "escalation_allowed": True,
+                "stop_early_allowed": False,
+                "escalation_reason": "Use a verifier-backed topology for risky work.",
+                "stop_early_reason": "",
+            },
         )
         trace.record_initial_injection(target="coordinator", message="Build a CLI tool")
         trace.record_message_routed(
@@ -60,6 +68,9 @@ class TestRunTrace:
         assert trace.summary()["routing_mode"] == "llm"
         assert trace.summary()["classifier_model"] == "gpt-5.4-mini"
         assert trace.summary()["classifier_provider"] == "openai-codex"
+        assert trace.summary()["escalation_allowed"] is True
+        assert trace.summary()["stop_early_allowed"] is False
+        assert trace.summary()["escalation_reason"] == "Use a verifier-backed topology for risky work."
         assert trace.summary()["success"] is True
 
     def test_trace_json_round_trip_preserves_events(self):

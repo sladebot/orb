@@ -1133,6 +1133,8 @@ class GraphRuntime:
             "candidates": list(predicted.get("candidates") or []),
             "escalation_allowed": bool(predicted.get("escalation_allowed")),
             "stop_early_allowed": bool(predicted.get("stop_early_allowed")),
+            "escalation_reason": str(predicted.get("escalation_reason") or ""),
+            "stop_early_reason": str(predicted.get("stop_early_reason") or ""),
             "requested_topology": str(predicted.get("requested_topology") or topology or "auto"),
         }
         self._last_trace.record_topology_choice(
@@ -1150,6 +1152,8 @@ class GraphRuntime:
                 "candidate_details": list(predicted.get("candidates") or []),
                 "escalation_allowed": bool(predicted.get("escalation_allowed")),
                 "stop_early_allowed": bool(predicted.get("stop_early_allowed")),
+                "escalation_reason": str(predicted.get("escalation_reason") or ""),
+                "stop_early_reason": str(predicted.get("stop_early_reason") or ""),
                 "summary": str(predicted.get("summary") or ""),
             },
         )
@@ -1359,6 +1363,8 @@ class GraphRuntime:
                 "candidates": [],
                 "escalation_allowed": False,
                 "stop_early_allowed": True,
+                "escalation_reason": "",
+                "stop_early_reason": "No task provided yet.",
                 "requested_topology": requested_topology,
                 "routing_mode": "default",
                 "classifier_model": "",
@@ -1421,6 +1427,8 @@ class GraphRuntime:
             ],
             "escalation_allowed": classification.escalation_allowed,
             "stop_early_allowed": classification.stop_early_allowed,
+            "escalation_reason": classification.escalation_reason,
+            "stop_early_reason": classification.stop_early_reason,
             "requested_topology": classification.requested_topology,
             "routing_mode": classification.routing_mode,
             "classifier_model": classification.classifier_model,

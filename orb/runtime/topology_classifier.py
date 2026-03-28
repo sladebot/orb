@@ -28,6 +28,8 @@ class TopologyClassification:
     candidates: list[TopologyCandidate] = field(default_factory=list)
     escalation_allowed: bool = False
     stop_early_allowed: bool = False
+    escalation_reason: str = ""
+    stop_early_reason: str = ""
     requested_topology: str = "auto"
     routing_mode: str = "llm"
     signals: dict[str, object] = field(default_factory=dict)
@@ -70,14 +72,22 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
         predict_provider = self._provider_lookup_fn(planner_model.provider)
         if predict_provider is None:
             raise RuntimeError(f"Planner provider '{planner_model.provider}' is not available")
+        routing_signals = self._query_signals(
+            query=query,
+            requested_topology=requested_topology,
+            model_pin=model_pin,
+            topologies=topologies,
+        )
 
         prompt = (
             "Classify this software task and choose the best topology. Respond with JSON only.\n\n"
             f"Task: {query}\n"
             f"Requested topology: {requested_topology}\n"
             f"Requested model pin: {model_pin}\n\n"
+            f"Routing signals: {json.dumps(routing_signals)}\n\n"
             "Choose one task type from: simple_direct, coding, review, broad_research, risky_action, ambiguous_decomposition.\n"
-            "Choose the best topology from the listed topologies. If the requested topology is not 'auto', still classify the task but honor the pin.\n"
+            "Choose the best topology from the listed topologies. Use the provided selection_hints, complexity ranges, and topology descriptions when deciding.\n"
+            "If the requested topology is not 'auto', still classify the task but honor the pin.\n"
             "Classify only. Do not assign per-agent models.\n"
             "Do not include any keys other than the required JSON schema keys.\n"
             "The task_type value must exactly match one of the allowed values.\n"
@@ -90,7 +100,9 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             '"topology": "<topology id>", '
             '"candidates": [{"topology": "<topology id>", "score": <number>, "reason": "<why>"}], '
             '"escalation_allowed": <true|false>, '
-            '"stop_early_allowed": <true|false>}\n\n'
+            '"stop_early_allowed": <true|false>, '
+            '"escalation_reason": "<short recommendation reason>", '
+            '"stop_early_reason": "<short recommendation reason>"}\n\n'
             f"Available topologies: {json.dumps(self._topology_payload(topologies))}\n"
         )
         req = CompletionRequest(
@@ -114,6 +126,7 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             parsed=parsed,
             requested_topology=requested_topology,
             topologies=topologies,
+            signals=routing_signals,
             classifier_model=str(response.model or planner_model.model_id or ""),
             classifier_provider=str(planner_model.provider or ""),
         )
@@ -124,6 +137,12 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             topology_id: {
                 "label": topo.label,
                 "description": topo.description,
+                "selection_hints": {
+                    "ideal_for": list((topo.selection_hints.ideal_for if topo.selection_hints else []) or []),
+                    "keywords": list((topo.selection_hints.keywords if topo.selection_hints else []) or []),
+                    "min_complexity": int((topo.selection_hints.min_complexity if topo.selection_hints else 0) or 0),
+                    "max_complexity": int((topo.selection_hints.max_complexity if topo.selection_hints else 100) or 100),
+                },
                 "agents": {
                     agent_id: {
                         "role": agent.role,
@@ -134,6 +153,28 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
                 },
             }
             for topology_id, topo in topologies.items()
+        }
+
+    @staticmethod
+    def _query_signals(
+        *,
+        query: str,
+        requested_topology: str,
+        model_pin: str,
+        topologies: dict[str, TopologySchema],
+    ) -> dict[str, object]:
+        lowered = str(query or "").lower()
+        words = [part for part in lowered.replace("\n", " ").split() if part]
+        return {
+            "word_count": len(words),
+            "requested_topology": requested_topology,
+            "requested_topology_is_valid": requested_topology == "auto" or requested_topology in topologies,
+            "model_pin_active": model_pin != "auto",
+            "mentions_code": any(token in lowered for token in ("code", "implement", "fix", "test", "refactor", "bug", "repo", "file")),
+            "mentions_review": any(token in lowered for token in ("review", "audit", "regression", "correctness", "risk")),
+            "mentions_research": any(token in lowered for token in ("research", "investigate", "explore", "understand", "compare")),
+            "mentions_risk": any(token in lowered for token in ("security", "production", "critical", "dangerous", "delete", "auth")),
+            "mentions_breadth": any(token in lowered for token in ("architecture", "plan", "migration", "system", "broad")),
         }
 
     @staticmethod
@@ -161,6 +202,7 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
         parsed: dict[str, Any],
         requested_topology: str,
         topologies: dict[str, TopologySchema],
+        signals: dict[str, object] | None = None,
         classifier_model: str = "",
         classifier_provider: str = "",
     ) -> TopologyClassification:
@@ -184,12 +226,13 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
         topo = topologies[topology_id]
         candidates: list[TopologyCandidate] = []
         raw_candidates = parsed.get("candidates") or []
+        seen_candidates: set[str] = set()
         if isinstance(raw_candidates, list):
             for item in raw_candidates:
                 if not isinstance(item, dict):
                     continue
                 candidate_topology = str(item.get("topology") or "").strip()
-                if candidate_topology not in topologies:
+                if candidate_topology not in topologies or candidate_topology in seen_candidates:
                     continue
                 score = item.get("score")
                 try:
@@ -203,12 +246,22 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
                         reason=str(item.get("reason") or ""),
                     )
                 )
+                seen_candidates.add(candidate_topology)
 
         reason = str(parsed.get("reason") or "")
         if pinned:
             reason = f"User pinned topology {topo.label}; classifier context: {reason}".strip()
 
         complexity = max(0, min(100, int(parsed.get("complexity", 50))))
+        if topology_id not in seen_candidates:
+            candidates.insert(
+                0,
+                TopologyCandidate(
+                    topology_id=topology_id,
+                    score=1.0 if not candidates else None,
+                    reason=reason or "selected topology",
+                ),
+            )
         return TopologyClassification(
             topology_id=topology_id,
             label=topo.label,
@@ -220,9 +273,11 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             candidates=candidates,
             escalation_allowed=bool(parsed.get("escalation_allowed")),
             stop_early_allowed=bool(parsed.get("stop_early_allowed")),
+            escalation_reason=str(parsed.get("escalation_reason") or ""),
+            stop_early_reason=str(parsed.get("stop_early_reason") or ""),
             requested_topology=requested_topology,
             routing_mode="pinned" if pinned else "llm",
-            signals={},
+            signals=dict(signals or {}),
             classifier_model=classifier_model,
             classifier_provider=classifier_provider,
         )

@@ -188,7 +188,13 @@ class TestDashboardBridge:
         state.agent_neighbors = {"coder": ["reviewer", "tester"]}
         state.agent_positions = {"coder": "implementation hub"}
         state.graph_view = {"rows": [[{"node": "coder"}]], "order": ["coder"]}
-        state.routing = {"task_type": "coding", "reason": "compact implementation", "classifier_model": "gpt-5.4-mini"}
+        state.routing = {
+            "task_type": "coding",
+            "reason": "compact implementation",
+            "classifier_model": "gpt-5.4-mini",
+            "stop_early_allowed": True,
+            "stop_early_reason": "Triad should be sufficient.",
+        }
         state.agents["coder"] = __import__(
             "web.state", fromlist=["AgentState"]
         ).AgentState(node_id="coder", role="Coder", status="idle")
@@ -205,6 +211,7 @@ class TestDashboardBridge:
         assert event["plan"]["graph_view"]["order"] == ["coder"]
         assert event["plan"]["routing"]["task_type"] == "coding"
         assert event["plan"]["routing"]["classifier_model"] == "gpt-5.4-mini"
+        assert event["plan"]["routing"]["stop_early_reason"] == "Triad should be sufficient."
         agent = event["agents"][0]
         assert agent["id"] == "coder"
         assert agent["role"] == "Coder"

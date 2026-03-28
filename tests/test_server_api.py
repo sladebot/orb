@@ -85,6 +85,8 @@ def _make_server() -> DashboardServer:
                 "candidates": [{"topology": "triad", "score": 0.9, "reason": "best fit"}],
                 "escalation_allowed": False,
                 "stop_early_allowed": True,
+                "escalation_reason": "",
+                "stop_early_reason": "A compact topology should be enough.",
             }),
             model="mock",
         ),
@@ -379,6 +381,8 @@ class TestModelAllocation:
                     "candidates": [{"topology": "triad", "score": 0.95, "reason": "best fit"}],
                     "escalation_allowed": False,
                     "stop_early_allowed": True,
+                    "escalation_reason": "",
+                    "stop_early_reason": "Triad should be sufficient for this task.",
                 }),
                 model=ANTHROPIC_HAIKU_MODEL,
             ),
@@ -403,6 +407,10 @@ class TestModelAllocation:
         assert predicted["routing_mode"] == "llm"
         assert predicted["classifier_model"] == ANTHROPIC_HAIKU_MODEL
         assert predicted["classifier_provider"] == "anthropic"
+        assert predicted["signals"]["word_count"] >= 4
+        assert predicted["signals"]["requested_topology"] == "auto"
+        assert predicted["stop_early_allowed"] is True
+        assert predicted["stop_early_reason"] == "Triad should be sufficient for this task."
 
     @pytest.mark.asyncio
     async def test_predict_topology_uses_openai_provider(self, monkeypatch):
@@ -420,6 +428,8 @@ class TestModelAllocation:
                     "candidates": [],
                     "escalation_allowed": False,
                     "stop_early_allowed": True,
+                    "escalation_reason": "",
+                    "stop_early_reason": "No escalation is needed.",
                 }),
                 model="gpt-4o",
             ),
@@ -436,6 +446,8 @@ class TestModelAllocation:
         assert predicted.get("routing_mode") == "llm"
         assert predicted.get("classifier_model") == "gpt-4o"
         assert predicted.get("classifier_provider") == "openai"
+        assert predicted["candidates"][0]["topology"] == "triad"
+        assert predicted["stop_early_reason"] == "No escalation is needed."
 
     @pytest.mark.asyncio
     async def test_predict_topology_errors_when_no_provider_is_available(self, monkeypatch):
@@ -463,6 +475,10 @@ class TestModelAllocation:
                     summary="Custom classifier result",
                     complexity=33,
                     reason=f"custom:{query}",
+                    escalation_allowed=True,
+                    stop_early_allowed=False,
+                    escalation_reason="Escalate if the task grows beyond the initial decomposition.",
+                    stop_early_reason="",
                     requested_topology=requested_topology,
                     routing_mode="custom",
                     classifier_model="orb-lite-routing",
@@ -478,3 +494,44 @@ class TestModelAllocation:
         assert predicted["reason"] == "custom:build a mobile app"
         assert predicted["classifier_model"] == "orb-lite-routing"
         assert predicted["classifier_provider"] == "orb"
+        assert predicted["escalation_reason"] == "Escalate if the task grows beyond the initial decomposition."
+
+    @pytest.mark.asyncio
+    async def test_predict_topology_prompt_includes_selection_hints_and_routing_signals(self, monkeypatch):
+        monkeypatch.setattr(runtime_mod, "get_config", lambda key: _all_anthropic_models_enabled() if key == "providers" else None)
+        runtime = GraphRuntime()
+        predictor = MockLLMClient([
+            CompletionResponse(
+                content=json.dumps({
+                    "task_type": "broad_research",
+                    "summary": "Need repo investigation before coding",
+                    "complexity": 62,
+                    "reason": "The task is broad enough for hierarchy",
+                    "topology": "hierarchy",
+                    "candidates": [{"topology": "hierarchy", "score": 0.92, "reason": "best fit"}],
+                    "escalation_allowed": True,
+                    "stop_early_allowed": False,
+                    "escalation_reason": "Escalate to hierarchy when broad repo analysis is required.",
+                    "stop_early_reason": "",
+                }),
+                model=ANTHROPIC_HAIKU_MODEL,
+            ),
+            CompletionResponse(
+                content=json.dumps({"assignments": {}}),
+                model=ANTHROPIC_SONNET_MODEL,
+            ),
+        ])
+        runtime._providers = {"anthropic": predictor}  # noqa: SLF001
+
+        predicted = await runtime.predict_topology("investigate the repository architecture and plan a migration")
+
+        classifier_prompt = predictor.requests[0].messages[0]["content"]
+        assert '"selection_hints"' in classifier_prompt
+        assert '"ideal_for"' in classifier_prompt
+        assert '"keywords"' in classifier_prompt
+        assert 'Routing signals:' in classifier_prompt
+        assert '"mentions_research": true' in classifier_prompt
+        assert predicted["signals"]["mentions_research"] is True
+        assert predicted["signals"]["mentions_breadth"] is True
+        assert predicted["topology"] == "hierarchy"
+        assert predicted["escalation_reason"] == "Escalate to hierarchy when broad repo analysis is required."

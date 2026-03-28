@@ -702,6 +702,10 @@ class Dashboard {
             summary: routing.summary || '',
             classifier_model: routing.classifier_model || '',
             classifier_provider: routing.classifier_provider || '',
+            escalation_allowed: Boolean(routing.escalation_allowed),
+            stop_early_allowed: Boolean(routing.stop_early_allowed),
+            escalation_reason: routing.escalation_reason || '',
+            stop_early_reason: routing.stop_early_reason || '',
             complexity: Math.max(...Object.values(this._plan.agent_complexity || {}), 0),
             agent_complexity: this._plan.agent_complexity || {},
             agent_models: this._plan.agent_models || {},
@@ -1462,6 +1466,14 @@ class Dashboard {
                 <div class="trace-detail-card">
                     <div class="trace-detail-label">Classifier Model</div>
                     <div class="trace-detail-value">${this._escapeHtml(this._shortModel(summary.classifier_model || '') || 'unknown')}</div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Escalation</div>
+                    <div class="trace-detail-value">${summary.escalation_allowed ? this._escapeHtml(summary.escalation_reason || 'recommended') : 'not recommended'}</div>
+                </div>
+                <div class="trace-detail-card">
+                    <div class="trace-detail-label">Early Stop</div>
+                    <div class="trace-detail-value">${summary.stop_early_allowed ? this._escapeHtml(summary.stop_early_reason || 'eligible') : 'not recommended'}</div>
                 </div>
                 <div class="trace-detail-card trace-detail-card-wide">
                     <div class="trace-detail-label">Agents</div>
@@ -2451,6 +2463,14 @@ class Dashboard {
         const classifierModel = pred.classifier_model || '';
         const classifierProvider = pred.classifier_provider || this._inferProvider(classifierModel);
         const classifierShort = this._shortModel(classifierModel);
+        const advisoryRows = [
+            pred.escalation_allowed
+                ? `<div class="pred-reason">Escalation recommended: ${this._escapeHtml(pred.escalation_reason || 'The task may justify a stronger topology if execution stalls.')}</div>`
+                : '',
+            pred.stop_early_allowed
+                ? `<div class="pred-reason">Early stop eligible: ${this._escapeHtml(pred.stop_early_reason || 'The selected topology may be sufficient without further escalation.')}</div>`
+                : '',
+        ].filter(Boolean).join('');
         const optionsHtml = topology.id ? `
             <div class="pred-option chosen">
                 <span class="pred-option-label">${this._escapeHtml(topology.label || topology.id)}</span>
@@ -2493,6 +2513,7 @@ class Dashboard {
             </div>
             ${routingMeta ? `<div class="pred-reason">${this._escapeHtml(routingMeta)}</div>` : ''}
             <div class="pred-reason">${this._escapeHtml(topology.description || pred.reason || '')}</div>
+            ${advisoryRows}
             <div class="pred-options">${optionsHtml}</div>
             ${(plannerRows || agentRows) ? `<div class="pred-agent-models">${plannerRows}${agentRows}</div>` : ''}
         `;

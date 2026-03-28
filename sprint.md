@@ -24,6 +24,13 @@ They are usually one of:
 
 This sprint should therefore prioritize infrastructure that makes Orb observable and tunable before adding more agent complexity.
 
+## Status Snapshot
+
+- Phase 1 is complete.
+- Phase 2 is complete.
+- The original heuristic-routing plan has been superseded by a pluggable classifier interface with a lightweight provider-backed classifier, so future learned routing can replace the backend without changing runtime orchestration.
+- The next phase should focus on execution controller policies rather than adding more topology complexity first.
+
 ## Current Gaps
 
 Today Orb has the foundations for agent execution, routing, and UI visibility, but it is still missing the layers needed for systematic improvement:
@@ -33,6 +40,7 @@ Today Orb has the foundations for agent execution, routing, and UI visibility, b
 - execution control is limited
 - verification is not first-class in planning or runtime policy
 - memory boundaries and access policy are not explicit enough
+- workdir context selection is too blunt; Orb needs to discover relevant local files on demand instead of pulling an entire custom workspace into context
 - role definitions are still too generic
 - adaptation by budget, latency, and risk is under-specified
 - there is no strong replay/evaluation harness for configuration comparisons
@@ -81,12 +89,12 @@ Make every run measurable before changing routing behavior aggressively.
 
 Tasks:
 
-- define a canonical `RunTrace` schema for one Orb run
-- define event types for topology choice, agent spawn, stage start/finish, tool call, retry, verifier decision, human override, and final outcome
-- add trace collection hooks in orchestrator, runtime, message bus, and agent execution paths
-- attach per-agent model, role, token, and latency metadata to trace events
-- emit stable run IDs and trace IDs across logs and UI updates
-- add a trace export path for offline analysis and replay input generation
+- [x] define a canonical `RunTrace` schema for one Orb run
+- [x] define event types for topology choice, agent spawn, stage start/finish, tool call, retry, verifier decision, human override, and final outcome
+- [x] add trace collection hooks in orchestrator, runtime, message bus, and agent execution paths
+- [x] attach per-agent model, role, token, and latency metadata to trace events
+- [x] emit stable run IDs and trace IDs across logs and UI updates
+- [x] add a trace export path for offline analysis and replay input generation
 
 Scope:
 
@@ -110,19 +118,23 @@ Exit criteria:
 
 - every non-trivial run emits a machine-readable trace that explains coordination, cost, and outcome
 
+Status:
+
+- Complete. Trace summaries, exported traces, session-aware trace lookup, routing metadata, and per-agent model visibility are all in place.
+
 ## Phase 2: Build a Topology Library and Routing Heuristics
 
 Make topology selection explicit instead of implicit.
 
 Tasks:
 
-- define the first approved topology set Orb is allowed to use
-- encode each topology as an explicit runtime structure rather than ad hoc branching logic
-- define task categories that drive routing decisions
-- implement first-pass heuristic routing rules per task category
-- implement escalation rules for moving from simple to stronger topologies
-- implement early-stop rules for cases where extra coordination is unnecessary
-- record routing inputs and decisions into telemetry
+- [x] define the first approved topology set Orb is allowed to use
+- [x] encode each topology as an explicit runtime structure rather than ad hoc branching logic
+- [x] define task categories that drive routing decisions
+- [x] implement first-pass heuristic routing rules per task category
+- [x] implement escalation rules for moving from simple to stronger topologies
+- [x] implement early-stop rules for cases where extra coordination is unnecessary
+- [x] record routing inputs and decisions into telemetry
 
 Scope:
 
@@ -148,6 +160,14 @@ Scope:
 Exit criteria:
 
 - Orb can explain why it selected a topology and when it escalated or stopped
+
+Status:
+
+- Complete.
+- The runtime now classifies tasks through a dedicated `TopologyClassifier` interface and a lightweight provider-backed implementation grounded in topology metadata and selection hints.
+- Routing outputs now include task type, routing mode, routing reason, candidate topologies, routing signals, classifier model, and advisory escalation/early-stop recommendations with reasons.
+- Dashboard and trace views expose that routing surface end to end, which satisfies the Phase 2 requirement that Orb can explain why it selected a topology and when it would escalate or stop.
+- Enforcement remains intentionally out of scope for Phase 2. Escalation and early-stop are recommendations here; actual runtime enforcement belongs to Phase 3's execution controller layer.
 
 ## Phase 3: Add Execution Controller Policies
 
@@ -177,6 +197,19 @@ Scope:
 Exit criteria:
 
 - runs respect explicit cost and latency budgets, and the runtime can cut off wasteful execution paths
+
+Status:
+
+- Not started.
+- This should be the next implementation phase.
+
+## Next Phase Plan
+
+1. Add an explicit execution-controller layer that is separate from topology classification.
+2. Enforce run-level budget, per-agent token, timeout, and max fan-out policies in the runtime.
+3. Turn `escalation_allowed` and `stop_early_allowed` from trace metadata into actual controller decisions.
+4. Record controller interventions in `RunTrace` so replay and evaluation can compare policy behavior.
+5. Add policy-focused tests for timeout, fallback, retry/kill, and budget exhaustion paths.
 
 ## Phase 4: Make Verification First-Class
 
@@ -246,7 +279,33 @@ Exit criteria:
 
 - Orb can measure role effectiveness and memory writes are policy-driven instead of ad hoc
 
-## Phase 6: Adapt Cost, Latency, and Risk at Runtime
+## Phase 6: Add Workdir-Aware Context Selection
+
+Make local workspace context discoverable without dumping the whole tree into prompts.
+
+Tasks:
+
+- define how Orb should treat the current folder when launched in a custom workdir
+- add a repository/workdir context policy that starts from local files without preloading the entire tree
+- require nodes to discover relevant files incrementally via file reads, searches, and grep/ripgrep-style lookups
+- allow different nodes to gather different context slices based on their role
+- define how discovered local context is summarized, cached, or discarded between steps
+- add tests that prove Orb can solve coding tasks in a custom path without naive full-workspace ingestion
+
+Scope:
+
+- start from the current folder contents when Orb is launched in a custom path
+- do not preload the entire workspace into prompt context
+- support targeted context discovery through filesystem tools and content search
+- allow node-specific context acquisition
+- keep discovered context bounded, inspectable, and traceable
+- prevent irrelevant files from polluting every node's prompt
+
+Exit criteria:
+
+- Orb can work effectively in arbitrary local folders by discovering only the relevant files needed for each node's task
+
+## Phase 7: Adapt Cost, Latency, and Risk at Runtime
 
 Use controller signals to adapt structure to real-world constraints.
 
@@ -279,7 +338,7 @@ Exit criteria:
 
 - Orb no longer applies one coordination pattern to every task class
 
-## Phase 7: Build Replay and Evaluation Harness
+## Phase 8: Build Replay and Evaluation Harness
 
 Create the system needed to compare Orb configurations systematically.
 
@@ -311,7 +370,7 @@ Exit criteria:
 
 - any proposed coordination change can be compared against a baseline on the same task set
 
-## Phase 8: Add Topology-Level Safety Constraints
+## Phase 9: Add Topology-Level Safety Constraints
 
 Enforce safety in coordination structure, not only in individual agent actions.
 
@@ -337,7 +396,7 @@ Exit criteria:
 
 - Orb can explain which topology-level constraints were applied to a run and why
 
-## Phase 9: Move from Heuristics to Learned Routing
+## Phase 10: Move from Heuristics to Learned Routing
 
 Only after telemetry and replay are solid, start learning from outcomes.
 
