@@ -61,8 +61,9 @@ class GraphRuntime:
         self._last_result = None
         self._last_trace: RunTrace | None = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
+        self._mode: str = "single"
         self._topology_classifier: TopologyClassifier = ProviderBackedTopologyClassifier(
-            self._planner_model_config,
+            self._planner_model_configs,
             lambda provider_name: self._providers.get(provider_name),
         )
 
@@ -221,11 +222,12 @@ class GraphRuntime:
         for callback in stale:
             self._subscribers.discard(callback)
 
-    def configure(self, providers: dict, config, model_overrides, tier_override) -> None:
+    def configure(self, providers: dict, config, model_overrides, tier_override, mode: str = "single") -> None:
         self._all_providers = dict(providers)
         self._config = config
         self._model_overrides = model_overrides
         self._tier_override = tier_override
+        self._mode = mode
         enabled = [
             name for name in self._all_providers
             if self._provider_enabled(name) and self._provider_has_enabled_models(name)
@@ -1638,7 +1640,12 @@ class GraphRuntime:
                 return ModelConfig(ModelTier.CLOUD_FAST, model_id, "anthropic")
         return None
 
-    def _planner_model_config(self):
+    def _planner_model_configs(self):
+        """Return all candidate planner models in priority order.
+
+        The classifier tries them in sequence and falls back to the next if a
+        provider is unreachable (e.g. vmlx server not running).
+        """
         from orb.llm.types import ANTHROPIC_HAIKU_MODEL, DEFAULT_MODELS, ModelConfig, ModelTier
 
         candidates: list[tuple[int, int, ModelConfig]] = []
@@ -1676,9 +1683,9 @@ class GraphRuntime:
             bucket = 0 if tier == ModelTier.LOCAL_SMALL else 1
             candidates.append((bucket, 99, cfg))
         if not candidates:
-            return None
+            return []
         candidates.sort(key=lambda item: (item[0], item[1]))
-        return candidates[0][2]
+        return [cfg for _, _, cfg in candidates]
 
     def _available_model_choices(self) -> list[dict]:
         choices: list[dict] = []
@@ -1851,6 +1858,7 @@ class GraphRuntime:
             trace_recorder=trace_recorder,
             tier_override=self._tier_override,
             agent_model_map=agent_model_map or None,
+            mode=getattr(self, "_mode", "single"),
         )
         self._last_trace = trace_recorder
         self._last_trace.record_stage_start(
@@ -1860,7 +1868,15 @@ class GraphRuntime:
         )
         self._persist_run_trace()
 
-        agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
+        if orchestrator.agents:
+            agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
+        elif orchestrator._agent_configs_for_process:
+            agent_roles = {
+                nid: cfg.role
+                for nid, (cfg, _) in orchestrator._agent_configs_for_process.items()
+            }
+        else:
+            agent_roles = {}
         bridge.setup_agents(agent_roles)
         bridge.setup_edges([(e.a, e.b) for e in orchestrator.bus.graph.edges])
         bridge.setup_plan(

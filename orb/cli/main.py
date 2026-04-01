@@ -437,6 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cloud-only", action="store_true", help="Use only cloud models")
     parser.add_argument("--ollama-model", type=str, default=os.environ.get("OLLAMA_MODEL"), help="Ollama model to use for all local tiers (e.g. qwen3.5:9b)")
     parser.add_argument("--connect", type=str, help="Connect TUI or dashboard client to an existing Orb daemon URL")
+    parser.add_argument("--mode", choices=["single", "amux"], default="single", help="Runtime mode: single (all agents in one process, default) or amux (each agent in its own OS process)")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="Enable verbose logging (default: on)")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress verbose logging")
@@ -533,6 +534,7 @@ def _daemon_command(
     *,
     local_only: bool = False,
     cloud_only: bool = False,
+    mode: str = "single",
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -543,6 +545,8 @@ def _daemon_command(
         cmd.append("--local-only")
     if cloud_only:
         cmd.append("--cloud-only")
+    if mode != "single":
+        cmd.extend(["--mode", mode])
     cmd.extend([
         "daemon",
         "run",
@@ -607,6 +611,7 @@ def _start_managed_daemon(
     *,
     local_only: bool = False,
     cloud_only: bool = False,
+    mode: str = "single",
 ) -> dict:
     active = _load_daemon_state()
     if active and _pid_is_alive(int(active.get("pid", -1))):
@@ -632,6 +637,7 @@ def _start_managed_daemon(
             resolved_workdir,
             local_only=local_only,
             cloud_only=cloud_only,
+            mode=mode,
         ),
         stdin=subprocess.DEVNULL,
         stdout=log_handle,
@@ -841,6 +847,7 @@ async def async_main() -> None:
                 args.workdir,
                 local_only=args.local_only,
                 cloud_only=args.cloud_only,
+                mode=getattr(args, "mode", "single"),
             )
             print(f"  Restarted Orb daemon (pid {info['pid']})")
             print(f"  URL:       http://{info['host']}:{info['port']}")
@@ -855,6 +862,7 @@ async def async_main() -> None:
                 args.workdir,
                 local_only=args.local_only,
                 cloud_only=args.cloud_only,
+                mode=getattr(args, "mode", "single"),
             )
             print(f"  Started Orb daemon (pid {info['pid']})")
             print(f"  URL:       http://{info['host']}:{info['port']}")
@@ -866,9 +874,11 @@ async def async_main() -> None:
 
         daemon_host = args.host or "127.0.0.1"
         daemon_port = args.port or 8080
+        daemon_mode = getattr(args, "mode", "single")
         daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
         os.chdir(daemon_workdir)
         _save_daemon_state(pid=os.getpid(), host=daemon_host, port=daemon_port, workdir=daemon_workdir)
+        logging.getLogger(__name__).info(f"Daemon starting in mode={daemon_mode}, workdir={daemon_workdir}")
 
         dash_state = DashboardState()
         dashboard_server = DashboardServer(dash_state, host=daemon_host, port=daemon_port)
@@ -880,6 +890,7 @@ async def async_main() -> None:
             config=OrchestratorConfig(timeout=args.timeout, budget=args.budget, max_depth=args.max_depth),
             model_overrides=None,
             tier_override=None,
+            mode=daemon_mode,
         )
 
         await dashboard_server.start()

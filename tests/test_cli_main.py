@@ -457,6 +457,7 @@ async def test_async_main_daemon_start_starts_background_process():
         None,
         local_only=False,
         cloud_only=False,
+        mode="single",
     )
 
 
@@ -512,6 +513,7 @@ async def test_async_main_daemon_restart_restarts_background_process():
         None,
         local_only=False,
         cloud_only=False,
+        mode="single",
     )
 
 
@@ -536,6 +538,7 @@ async def test_async_main_daemon_restart_preserves_local_only():
         None,
         local_only=True,
         cloud_only=False,
+        mode="single",
     )
 
 

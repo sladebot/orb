@@ -9,7 +9,7 @@ from orb.graph.graph import Graph
 from orb.llm.client import LLMClient
 from orb.llm.types import CompletionRequest, CompletionResponse, ToolCall, ModelTier
 from orb.messaging.bus import MessageBus
-from orb.messaging.channel import AgentChannel
+from orb.messaging.channel import InProcessChannel
 from orb.messaging.message import Message, MessageType
 from orb.runtime.transcript import RunTranscript
 from orb.tracing.run_trace import RunTrace, TraceEventKind
@@ -48,8 +48,8 @@ def _build_two_agent_setup(mock_client: MockLLMClient, trace: RunTrace | None = 
 
     bus = MessageBus(graph)
 
-    ch_a = AgentChannel()
-    ch_b = AgentChannel()
+    ch_a = InProcessChannel()
+    ch_b = InProcessChannel()
     bus.register_channel("agent_a", ch_a)
     bus.register_channel("agent_b", ch_b)
 

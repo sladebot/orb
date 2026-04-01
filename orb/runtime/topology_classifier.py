@@ -51,8 +51,12 @@ class TopologyClassifier(ABC):
 
 
 class ProviderBackedTopologyClassifier(TopologyClassifier):
-    def __init__(self, planner_model_config_fn, provider_lookup_fn) -> None:
-        self._planner_model_config_fn = planner_model_config_fn
+    def __init__(self, planner_model_configs_fn, provider_lookup_fn) -> None:
+        # planner_model_configs_fn() must return either a single ModelConfig or a
+        # list of ModelConfig objects in priority order. When multiple configs are
+        # returned, the classifier tries each in turn and falls back on connection
+        # errors so that an offline local provider (e.g. vmlx) never blocks a run.
+        self._planner_model_configs_fn = planner_model_configs_fn
         self._provider_lookup_fn = provider_lookup_fn
 
     async def classify(
@@ -63,15 +67,17 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
         model_pin: str,
         topologies: dict[str, TopologySchema],
     ) -> TopologyClassification:
+        import httpx
         from orb.llm.types import CompletionRequest
 
-        planner_model = self._planner_model_config_fn()
-        if planner_model is None:
+        raw = self._planner_model_configs_fn()
+        if raw is None:
+            raise RuntimeError("No providers available for task classification")
+        candidates = raw if isinstance(raw, list) else [raw]
+        candidates = [c for c in candidates if c is not None]
+        if not candidates:
             raise RuntimeError("No providers available for task classification")
 
-        predict_provider = self._provider_lookup_fn(planner_model.provider)
-        if predict_provider is None:
-            raise RuntimeError(f"Planner provider '{planner_model.provider}' is not available")
         routing_signals = self._query_signals(
             query=query,
             requested_topology=requested_topology,
@@ -105,31 +111,50 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             '"stop_early_reason": "<short recommendation reason>"}\n\n'
             f"Available topologies: {json.dumps(self._topology_payload(topologies))}\n"
         )
-        req = CompletionRequest(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-            system=(
-                "You are the topology classifier for a software multi-agent runtime. "
-                "Classify the task and choose the best overall topology. "
-                "Do not assign models or plan execution steps. "
-                "Return valid JSON only."
-            ),
-            model_config=planner_model,
-        )
-        try:
-            response = await predict_provider.complete(req)
-        except Exception as exc:
-            raise RuntimeError(f"Topology classification call failed: {exc}") from exc
 
-        parsed = self._parse_response(response.content or "")
-        return self._build_classification(
-            parsed=parsed,
-            requested_topology=requested_topology,
-            topologies=topologies,
-            signals=routing_signals,
-            classifier_model=str(response.model or planner_model.model_id or ""),
-            classifier_provider=str(planner_model.provider or ""),
-        )
+        usable = [
+            (m, self._provider_lookup_fn(m.provider))
+            for m in candidates
+            if self._provider_lookup_fn(m.provider) is not None
+        ]
+        if not usable:
+            raise RuntimeError("No providers available for task classification")
+
+        last_exc: Exception | None = None
+        for planner_model, predict_provider in usable:
+            req = CompletionRequest(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                system=(
+                    "You are the topology classifier for a software multi-agent runtime. "
+                    "Classify the task and choose the best overall topology. "
+                    "Do not assign models or plan execution steps. "
+                    "Return valid JSON only."
+                ),
+                model_config=planner_model,
+            )
+            try:
+                response = await predict_provider.complete(req)
+            except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+                # Provider unreachable — try next candidate
+                last_exc = exc
+                continue
+            except Exception as exc:
+                raise RuntimeError(f"Topology classification call failed: {exc}") from exc
+
+            parsed = self._parse_response(response.content or "")
+            return self._build_classification(
+                parsed=parsed,
+                requested_topology=requested_topology,
+                topologies=topologies,
+                signals=routing_signals,
+                classifier_model=str(response.model or planner_model.model_id or ""),
+                classifier_provider=str(planner_model.provider or ""),
+            )
+
+        raise RuntimeError(
+            f"Topology classification call failed: {last_exc}"
+        ) from last_exc
 
     @staticmethod
     def _topology_payload(topologies: dict[str, TopologySchema]) -> dict[str, Any]:

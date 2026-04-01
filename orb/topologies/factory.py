@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,7 +10,7 @@ from ..agent.llm_agent import LLMAgent
 from ..agent.types import AgentConfig
 from ..graph.graph import Graph
 from ..messaging.bus import MessageBus
-from ..messaging.channel import AgentChannel
+from ..messaging.channel import InProcessChannel
 from ..orchestrator.orchestrator import Orchestrator
 from ..orchestrator.types import OrchestratorConfig
 from ..sandbox.sandbox import Sandbox
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
     from ..llm.client import LLMClient
     from ..llm.types import ModelConfig, ModelTier
 
+logger = logging.getLogger(__name__)
+
 
 def create_orchestrator(
     topology_id: str,
@@ -32,6 +36,7 @@ def create_orchestrator(
     trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
+    mode: str = "single",
 ) -> Orchestrator:
     """Build an Orchestrator from a YAML-defined topology."""
     loader = get_loader()
@@ -52,6 +57,7 @@ def create_orchestrator(
         trace_recorder=trace_recorder,
         tier_override=tier_override,
         agent_model_map=agent_model_map,
+        mode=mode,
     )
 
 
@@ -60,18 +66,16 @@ def create_orchestrator(
 # ------------------------------------------------------------------
 
 
-def _build_from_schema(
+def _build_common(
     topo_def: TopologySchema,
     providers: dict[str, "LLMClient"],
-    config: OrchestratorConfig | None = None,
-    model_overrides: dict["ModelTier", "ModelConfig"] | None = None,
-    trace: bool = True,
-    trace_recorder: RunTrace | None = None,
-    tier_override: "ModelTier | None" = None,
-    agent_model_map: dict[str, "ModelConfig"] | None = None,
-) -> Orchestrator:
+    config: OrchestratorConfig | None,
+    agent_model_map: dict[str, "ModelConfig"] | None,
+    trace: bool,
+    trace_recorder: RunTrace | None,
+):
+    """Build the shared pieces: config, agent_defs, graph, topology_contexts, bus, sandbox, trace."""
     config = config or OrchestratorConfig()
-    # Only override entry_agent from YAML if user hasn't set a custom one
     entry = (
         topo_def.entry_agent
         if config.entry_agent == OrchestratorConfig().entry_agent
@@ -83,7 +87,6 @@ def _build_from_schema(
         synthesis_agent=topo_def.synthesis_agent,
     )
 
-    # Build AgentConfig dict from schema
     agent_defs: dict[str, AgentConfig] = {}
     for node_id, agent_schema in topo_def.agents.items():
         pinned_model = None
@@ -107,14 +110,12 @@ def _build_from_schema(
             suppress_context_guidelines=agent_schema.suppress_context_guidelines,
         )
 
-    # Build graph
     graph = Graph()
     for nid in agent_defs:
         graph.add_node(nid)
     for a, b in topo_def.edges:
         graph.add_edge(a, b)
 
-    # Build topology contexts
     node_roles = {nid: ac.role for nid, ac in agent_defs.items()}
     topology_contexts = build_topology_contexts(
         topology_id=topo_def.id,
@@ -125,7 +126,6 @@ def _build_from_schema(
         completion_rules=topo_def.completion_rules,
     )
 
-    # Message bus
     bus = MessageBus(
         graph=graph,
         max_depth=config.max_depth,
@@ -133,16 +133,39 @@ def _build_from_schema(
         max_cooldown=config.max_cooldown,
     )
 
-    # Shared sandbox
     sandbox = Sandbox(root=Path.cwd())
     trace_recorder = trace_recorder or (RunTrace() if trace else None)
 
-    # Build agents
+    return config, agent_defs, graph, topology_contexts, bus, sandbox, trace_recorder
+
+
+def _build_from_schema(
+    topo_def: TopologySchema,
+    providers: dict[str, "LLMClient"],
+    config: OrchestratorConfig | None = None,
+    model_overrides: dict["ModelTier", "ModelConfig"] | None = None,
+    trace: bool = True,
+    trace_recorder: RunTrace | None = None,
+    tier_override: "ModelTier | None" = None,
+    agent_model_map: dict[str, "ModelConfig"] | None = None,
+    mode: str = "single",
+) -> Orchestrator:
+    config, agent_defs, graph, topology_contexts, bus, sandbox, trace_recorder = _build_common(
+        topo_def, providers, config, agent_model_map, trace, trace_recorder,
+    )
+
+    if mode == "amux":
+        return _build_process_mode(
+            topo_def, agent_defs, graph, topology_contexts, bus, sandbox,
+            trace_recorder, config, trace,
+        )
+
+    # ── Local mode (default) ──
     agents: dict[str, LLMAgent] = {}
     for nid, agent_config in agent_defs.items():
         if agent_config.enable_filesystem:
             agent_config = dataclasses.replace(agent_config, sandbox=sandbox)
-        channel = AgentChannel()
+        channel = InProcessChannel()
         bus.register_channel(nid, channel)
         agents[nid] = LLMAgent(
             config=agent_config,
@@ -154,7 +177,6 @@ def _build_from_schema(
             trace=trace_recorder,
         )
 
-    # Initialize agents with neighbor info
     for nid, agent in agents.items():
         neighbor_roles = {
             n: agent_defs[n].role for n in graph.get_neighbors(nid)
@@ -172,6 +194,62 @@ def _build_from_schema(
         topology_id=topo_def.id,
         sandbox=sandbox,
     )
+
+
+def _build_process_mode(
+    topo_def: TopologySchema,
+    agent_defs: dict[str, AgentConfig],
+    graph: Graph,
+    topology_contexts: dict,
+    bus: MessageBus,
+    sandbox: Sandbox,
+    trace_recorder: RunTrace | None,
+    config: OrchestratorConfig,
+    trace: bool,
+) -> Orchestrator:
+    """Build an Orchestrator that runs agents in separate processes over UDS."""
+    from ..runtime.uds_server import UDSServer
+
+    socket_dir = tempfile.mkdtemp(prefix="orb-")
+    agent_ids = list(agent_defs.keys())
+    uds_server = UDSServer(socket_dir=socket_dir, agent_ids=agent_ids)
+
+    # Register InProcessChannel placeholders on the bus for each agent.
+    # Once all subprocesses connect, the orchestrator replaces these with live
+    # UDSChannels so that bus.route() actually delivers to the subprocesses.
+    agents: dict[str, LLMAgent] = {}
+    agent_configs_for_process: dict[str, tuple[AgentConfig, dict]] = {}
+
+    for nid, agent_config in agent_defs.items():
+        if agent_config.enable_filesystem:
+            agent_config = dataclasses.replace(agent_config, sandbox=sandbox)
+
+        channel = InProcessChannel()
+        bus.register_channel(nid, channel)
+
+        # Store config + topology context for subprocess bootstrap
+        agent_configs_for_process[nid] = (agent_config, topology_contexts[nid].to_dict())
+
+    event_logger = EventLogger(enabled=trace, trace=trace_recorder)
+
+    orchestrator = Orchestrator(
+        agents=agents,
+        bus=bus,
+        config=config,
+        event_logger=event_logger,
+        trace=trace_recorder,
+        topology_id=topo_def.id,
+        sandbox=sandbox,
+    )
+
+    # Attach process mode metadata for the orchestrator to use
+    orchestrator._uds_server = uds_server
+    orchestrator._socket_dir = socket_dir
+    orchestrator._agent_configs_for_process = agent_configs_for_process
+    orchestrator._process_mode = True
+
+    logger.info(f"Process mode orchestrator created, socket dir: {socket_dir}")
+    return orchestrator
 
 
 def _resolve_model_selection(
