@@ -65,8 +65,8 @@ class DashboardServer:
         """Retained for compatibility; runtime owns live agents."""
         self.runtime._agents = agents
 
-    def set_providers(self, providers: dict, config, model_overrides, tier_override) -> None:
-        self.runtime.configure(providers, config, model_overrides, tier_override)
+    def set_providers(self, providers: dict, config, model_overrides, tier_override, mode: str = "single") -> None:
+        self.runtime.configure(providers, config, model_overrides, tier_override, mode=mode)
 
     async def start(self) -> None:
         self.runtime.subscribe(self.broadcast)

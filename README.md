@@ -177,6 +177,7 @@ Useful global flags:
 - `--budget N`: set a global message budget
 - `--timeout N`: set timeout in seconds
 - `--connect URL`: attach TUI or dashboard to an existing daemon
+- `--mode single|amux`: runtime mode — `single` runs all agents as async tasks in one process (default); `amux` runs each agent in its own OS process over Unix domain sockets, giving crash isolation and true parallelism for agents that execute code
 
 ## Topologies
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from abc import ABC, abstractmethod
 
 from .message import Message
 
@@ -9,8 +10,29 @@ class ChannelClosed(Exception):
     pass
 
 
-class AgentChannel:
-    """Thin wrapper around asyncio.Queue — Go-style channel for agent messaging."""
+class AgentChannel(ABC):
+    """Abstract base class for agent communication channels."""
+
+    @abstractmethod
+    async def send(self, msg: Message) -> None: ...
+
+    @abstractmethod
+    async def receive(self) -> Message: ...
+
+    @abstractmethod
+    def close(self) -> None: ...
+
+    @property
+    @abstractmethod
+    def closed(self) -> bool: ...
+
+    @property
+    @abstractmethod
+    def qsize(self) -> int: ...
+
+
+class InProcessChannel(AgentChannel):
+    """In-process channel backed by asyncio.Queue — Go-style channel for agent messaging."""
 
     def __init__(self, maxsize: int = 32) -> None:
         self._queue: asyncio.Queue[Message | None] = asyncio.Queue(maxsize=maxsize)
@@ -29,7 +51,6 @@ class AgentChannel:
 
     def close(self) -> None:
         self._closed = True
-        # Put sentinel to unblock any waiting receive
         try:
             self._queue.put_nowait(None)
         except asyncio.QueueFull:

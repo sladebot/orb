@@ -150,13 +150,13 @@ async def test_set_subgraph_store_passes_providers():
     from orb.agent.types import AgentConfig
     from orb.graph.graph import Graph
     from orb.messaging.bus import MessageBus
-    from orb.messaging.channel import AgentChannel
+    from orb.messaging.channel import InProcessChannel
     from orb.llm.types import ModelConfig, ModelTier
 
     graph = Graph()
     graph.add_node("agent-test")
     bus = MessageBus(graph)
-    channel = AgentChannel()
+    channel = InProcessChannel()
     bus.register_channel("agent-test", channel)
     config = AgentConfig(node_id="agent-test", role="Tester", description="Test agent")
     mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="mock", provider="mock")

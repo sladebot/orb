@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from orb.messaging.channel import AgentChannel, ChannelClosed
+from orb.messaging.channel import InProcessChannel, ChannelClosed
 from orb.messaging.message import Message, MessageType
 
 
@@ -12,14 +12,14 @@ def _msg(payload: str = "test") -> Message:
 
 class TestAgentChannel:
     async def test_send_receive(self):
-        ch = AgentChannel()
+        ch = InProcessChannel()
         msg = _msg("hello")
         await ch.send(msg)
         received = await ch.receive()
         assert received.payload == "hello"
 
     async def test_fifo_order(self):
-        ch = AgentChannel()
+        ch = InProcessChannel()
         for i in range(5):
             await ch.send(_msg(f"msg-{i}"))
         for i in range(5):
@@ -27,7 +27,7 @@ class TestAgentChannel:
             assert received.payload == f"msg-{i}"
 
     async def test_close_unblocks_receive(self):
-        ch = AgentChannel()
+        ch = InProcessChannel()
 
         async def close_later():
             await asyncio.sleep(0.05)
@@ -38,13 +38,13 @@ class TestAgentChannel:
             await ch.receive()
 
     async def test_send_after_close(self):
-        ch = AgentChannel()
+        ch = InProcessChannel()
         ch.close()
         with pytest.raises(ChannelClosed):
             await ch.send(_msg())
 
     async def test_backpressure(self):
-        ch = AgentChannel(maxsize=2)
+        ch = InProcessChannel(maxsize=2)
         await ch.send(_msg("1"))
         await ch.send(_msg("2"))
         assert ch.full
@@ -54,7 +54,7 @@ class TestAgentChannel:
             await asyncio.wait_for(ch.send(_msg("3")), timeout=0.1)
 
     async def test_qsize(self):
-        ch = AgentChannel()
+        ch = InProcessChannel()
         assert ch.qsize == 0
         await ch.send(_msg())
         assert ch.qsize == 1

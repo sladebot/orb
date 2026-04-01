@@ -2,7 +2,7 @@ import pytest
 
 from orb.graph import Graph
 from orb.messaging.bus import MessageBus, RoutingError
-from orb.messaging.channel import AgentChannel
+from orb.messaging.channel import InProcessChannel
 from orb.messaging.message import Message, MessageType
 from orb.messaging.middleware import HopLimitExceeded, BudgetExhausted, CooldownExceeded
 
@@ -17,9 +17,9 @@ def _setup_bus(max_depth=10, budget=200, max_cooldown=5):
     # No edge a-c
 
     bus = MessageBus(g, max_depth=max_depth, budget=budget, max_cooldown=max_cooldown)
-    ch_a = AgentChannel()
-    ch_b = AgentChannel()
-    ch_c = AgentChannel()
+    ch_a = InProcessChannel()
+    ch_b = InProcessChannel()
+    ch_c = InProcessChannel()
     bus.register_channel("a", ch_a)
     bus.register_channel("b", ch_b)
     bus.register_channel("c", ch_c)
@@ -51,7 +51,7 @@ class TestMessageBus:
         g.add_node("b")
         g.add_edge("a", "b")
         bus = MessageBus(g)
-        bus.register_channel("a", AgentChannel())
+        bus.register_channel("a", InProcessChannel())
         # b has no channel
         with pytest.raises(RoutingError):
             await bus.route(_msg("a", "b"))
