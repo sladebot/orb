@@ -102,6 +102,43 @@ def _vmlx_api_key() -> str | None:
     return value or None
 
 
+def _omlx_base_url() -> str:
+    """Resolve OMLX base URL for its OpenAI-compatible API."""
+    env_value = os.environ.get("OMLX_BASE_URL")
+    if env_value:
+        base_url = env_value.rstrip("/")
+    else:
+        try:
+            from ..cli.config import get as get_config
+            provider_cfg = get_config("providers") or {}
+            entry = provider_cfg.get("omlx") or {}
+            base_url = str(entry.get("base_url") or "").rstrip("/") if isinstance(entry, dict) else ""
+        except Exception:
+            base_url = ""
+    if not base_url:
+        base_url = "http://localhost:8000/v1"
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _omlx_api_key() -> str | None:
+    value = os.environ.get("OMLX_API_KEY")
+    if value is None:
+        try:
+            from ..cli.config import get as get_config
+            provider_cfg = get_config("providers") or {}
+            entry = provider_cfg.get("omlx") or {}
+            if isinstance(entry, dict):
+                value = entry.get("api_key")
+        except Exception:
+            value = None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
 def _ollama_reachable() -> bool:
     global _ollama_reachable_cache
     # Config check always runs first — no caching for disabled state
@@ -148,6 +185,19 @@ def _vmlx_enabled() -> bool:
             return False
         providers = get_config("providers") or {}
         entry = providers.get("vmlx") or {}
+        return bool(entry.get("enabled", False)) if isinstance(entry, dict) else False
+    except Exception:
+        return False
+
+
+def _omlx_enabled() -> bool:
+    """True when OMLX local-model support is explicitly enabled in config."""
+    try:
+        from ..cli.config import local_models_enabled, get as get_config
+        if not local_models_enabled():
+            return False
+        providers = get_config("providers") or {}
+        entry = providers.get("omlx") or {}
         return bool(entry.get("enabled", False)) if isinstance(entry, dict) else False
     except Exception:
         return False
@@ -228,6 +278,7 @@ def _anthropic_factory() -> "LLMClient":
 def _build_registry() -> list[ProviderSpec]:
     from .ollama import OllamaProvider
     from .vmlx import VmlxProvider
+    from .omlx import OmlxProvider
     return [
         ProviderSpec(
             name="anthropic",
@@ -268,6 +319,16 @@ def _build_registry() -> list[ProviderSpec]:
             factory=lambda: VmlxProvider(
                 base_url=_vmlx_base_url(),
                 api_key=_vmlx_api_key(),
+            ),
+        ),
+        ProviderSpec(
+            name="omlx",
+            is_cloud=False,
+            env_vars=[],
+            check=_omlx_enabled,
+            factory=lambda: OmlxProvider(
+                base_url=_omlx_base_url(),
+                api_key=_omlx_api_key(),
             ),
         ),
     ]

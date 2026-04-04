@@ -36,9 +36,14 @@ _DEFAULTS: dict[str, Any] = {
             "models": {},
         },
         "vmlx": {
-            "enabled": True,
+            "enabled": False,
             "models": {},
             "base_url": "http://localhost:1234/v1",
+        },
+        "omlx": {
+            "enabled": True,
+            "models": {},
+            "base_url": "http://localhost:8000/v1",
         },
     },
 }

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from orb.llm.anthropic import AnthropicProvider
+from orb.llm.omlx import OmlxProvider
 from orb.llm.openai import OpenAIProvider
 from orb.llm.types import CompletionRequest, ModelConfig, ModelTier
 
@@ -117,3 +118,69 @@ async def test_anthropic_provider_preserves_native_message_schema(monkeypatch):
     await provider.close()
 
     assert captured["messages"] == req_messages
+
+
+@pytest.mark.asyncio
+async def test_omlx_provider_parses_tool_calls(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "model": "qwen",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "demo",
+                                        "arguments": '{"x": 1}',
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": "stop",
+                    },
+                ],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 3,
+                },
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def post(self, url, json, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    provider = OmlxProvider(base_url="http://localhost:8000/v1", api_key="secret")
+    req = CompletionRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "demo", "description": "demo tool", "input_schema": {"type": "object"}}],
+        model_config=ModelConfig(ModelTier.LOCAL_SMALL, "qwen", "omlx"),
+    )
+
+    resp = await provider.complete(req)
+    await provider.close()
+
+    assert captured["url"] == "http://localhost:8000/v1/chat/completions"
+    assert captured["headers"] == {"Authorization": "Bearer secret"}
+    assert captured["json"]["tools"][0]["function"]["name"] == "demo"
+    assert resp.tool_calls[0].name == "demo"
+    assert resp.tool_calls[0].input == {"x": 1}

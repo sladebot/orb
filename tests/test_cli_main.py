@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from orb.cli.main import async_main
+from orb.cli.main import DEFAULT_DAEMON_PORT, async_main
 from orb.tracing import RunTrace
 
 
@@ -208,7 +208,7 @@ async def test_async_main_tui_subcommand_defaults_to_local_daemon():
 
     attach_tui.assert_awaited_once()
     _, kwargs = attach_tui.call_args
-    assert kwargs["connect_url"] == "http://127.0.0.1:8080"
+    assert kwargs["connect_url"] == f"http://127.0.0.1:{DEFAULT_DAEMON_PORT}"
     assert kwargs["initial_query"] == "hello"
 
 
@@ -438,14 +438,14 @@ async def test_async_main_daemon_honors_explicit_workdir():
 
 @pytest.mark.asyncio
 async def test_async_main_daemon_start_starts_background_process():
-    args = _base_args(subcommand="daemon", daemon_action="start", host="0.0.0.0", port=8080)
+    args = _base_args(subcommand="daemon", daemon_action="start", host="0.0.0.0", port=DEFAULT_DAEMON_PORT)
 
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._setup_log_file"), \
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 1234,
              "host": "0.0.0.0",
-             "port": 8080,
+             "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-x",
          }) as start_daemon, \
          patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
@@ -453,7 +453,7 @@ async def test_async_main_daemon_start_starts_background_process():
 
     start_daemon.assert_called_once_with(
         "0.0.0.0",
-        8080,
+        DEFAULT_DAEMON_PORT,
         None,
         local_only=False,
         cloud_only=False,
@@ -466,8 +466,8 @@ async def test_start_managed_daemon_fails_fast_when_port_in_use():
 
     with patch("orb.cli.main._load_daemon_state", return_value=None), \
          patch("orb.cli.main._port_bind_error", return_value=OSError(98, "Address already in use")):
-        with pytest.raises(RuntimeError, match="Port 8080 is already in use"):
-            _start_managed_daemon("0.0.0.0", 8080, None)
+        with pytest.raises(RuntimeError, match=f"Port {DEFAULT_DAEMON_PORT} is already in use"):
+            _start_managed_daemon("0.0.0.0", DEFAULT_DAEMON_PORT, None)
 
 
 @pytest.mark.asyncio
@@ -488,7 +488,7 @@ async def test_async_main_daemon_stop_uses_managed_stop():
          patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon:
         await async_main()
 
-    stop_daemon.assert_awaited_once_with(8080)
+    stop_daemon.assert_awaited_once_with(DEFAULT_DAEMON_PORT)
 
 
 @pytest.mark.asyncio
@@ -500,7 +500,7 @@ async def test_async_main_daemon_restart_restarts_background_process():
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 5678,
              "host": "127.0.0.1",
-             "port": 8080,
+             "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-y",
          }) as start_daemon:
         await async_main()
@@ -508,7 +508,7 @@ async def test_async_main_daemon_restart_restarts_background_process():
     stop_daemon.assert_awaited_once()
     start_daemon.assert_called_once_with(
         "127.0.0.1",
-        8080,
+        DEFAULT_DAEMON_PORT,
         None,
         local_only=False,
         cloud_only=False,
@@ -524,7 +524,7 @@ async def test_async_main_daemon_restart_preserves_local_only():
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 5678,
              "host": "0.0.0.0",
-             "port": 8080,
+             "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-y",
          }) as start_daemon:
         await async_main()
@@ -532,7 +532,7 @@ async def test_async_main_daemon_restart_preserves_local_only():
     stop_daemon.assert_awaited_once()
     start_daemon.assert_called_once_with(
         "0.0.0.0",
-        8080,
+        DEFAULT_DAEMON_PORT,
         None,
         local_only=True,
         cloud_only=False,
@@ -573,7 +573,7 @@ async def test_async_main_daemon_status_reports_running_process():
          patch("orb.cli.main._load_daemon_state", return_value={
              "pid": 4321,
              "host": "0.0.0.0",
-             "port": 8080,
+             "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-z",
          }), \
          patch("orb.cli.main._pid_is_alive", return_value=True), \
@@ -586,7 +586,7 @@ async def test_async_main_daemon_status_reports_running_process():
 
 @pytest.mark.asyncio
 async def test_async_main_daemon_status_reports_unmanaged_listener():
-    args = _base_args(subcommand="daemon", daemon_action="status", port=8080)
+    args = _base_args(subcommand="daemon", daemon_action="status", port=DEFAULT_DAEMON_PORT)
 
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._load_daemon_state", return_value=None), \
@@ -600,7 +600,7 @@ async def test_async_main_daemon_status_reports_unmanaged_listener():
 
 @pytest.mark.asyncio
 async def test_async_main_daemon_status_refuses_non_orb_listener(capsys):
-    args = _base_args(subcommand="daemon", daemon_action="status", port=8080)
+    args = _base_args(subcommand="daemon", daemon_action="status", port=DEFAULT_DAEMON_PORT)
 
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._load_daemon_state", return_value=None), \
@@ -621,7 +621,7 @@ async def test_stop_managed_daemon_falls_back_to_port_listener():
          patch("orb.cli.main._port_looks_like_orb_daemon", return_value=True), \
          patch("orb.cli.main.os.kill") as kill, \
          patch("orb.cli.main._pid_is_alive", side_effect=[False]):
-        stopped = await _stop_managed_daemon(8080)
+        stopped = await _stop_managed_daemon(DEFAULT_DAEMON_PORT)
 
     assert stopped is True
     kill.assert_called_once_with(9999, __import__("signal").SIGTERM)
@@ -635,7 +635,7 @@ async def test_stop_managed_daemon_rejects_non_orb_listener():
          patch("orb.cli.main._find_listening_pid", return_value=9999), \
          patch("orb.cli.main._port_looks_like_orb_daemon", return_value=False):
         with pytest.raises(RuntimeError, match="does not look like an Orb daemon"):
-            await _stop_managed_daemon(8080)
+            await _stop_managed_daemon(DEFAULT_DAEMON_PORT)
 
 
 def test_daemon_state_file_uses_stable_home_path():

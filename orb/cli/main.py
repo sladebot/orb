@@ -30,6 +30,8 @@ from .repl import run_repl
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
 DAEMON_STATE_FILE = os.path.join(os.path.expanduser("~"), ".orb", "daemon.json")
+DEFAULT_DAEMON_PORT = 1337
+DEFAULT_CONNECT_URL = f"http://127.0.0.1:{DEFAULT_DAEMON_PORT}"
 _LEVEL_COLORS = {
     "DEBUG":    "\033[2m",       # dim
     "INFO":     "\033[36m",      # cyan
@@ -386,7 +388,7 @@ def parse_args() -> argparse.Namespace:
 
     tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
-    tui_parser.add_argument("--connect", type=str, default=None, help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    tui_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     tui_parser.add_argument("--port", type=int, default=None, help="Orb daemon port shorthand for localhost connects")
     tui_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
@@ -394,7 +396,7 @@ def parse_args() -> argparse.Namespace:
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
-    dashboard_parser.add_argument("--connect", type=str, default=None, help="Orb daemon URL (default: http://127.0.0.1:8080)")
+    dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     dashboard_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
@@ -415,7 +417,7 @@ def parse_args() -> argparse.Namespace:
     )
     daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
     daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
-    daemon_parser.add_argument("--port", type=int, default=8080, help="Daemon bind port (default: 8080)")
+    daemon_parser.add_argument("--port", type=int, default=DEFAULT_DAEMON_PORT, help=f"Daemon bind port (default: {DEFAULT_DAEMON_PORT})")
     daemon_parser.add_argument("--workdir", type=str, help="Daemon workspace directory (default: create a fresh /tmp/orb-daemon-* dir each start)")
     daemon_sub = daemon_parser.add_subparsers(dest="daemon_action")
     daemon_sub.add_parser("run", parents=[daemon_common], help="Run the daemon in the foreground")
@@ -443,7 +445,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _normalize_connect_url(url: str | None, default: str = "http://127.0.0.1:8080") -> str:
+def _normalize_connect_url(url: str | None, default: str = DEFAULT_CONNECT_URL) -> str:
     base = (url or default).rstrip("/")
     if "://" not in base:
         base = f"http://{base}"
@@ -652,7 +654,7 @@ def _start_managed_daemon(
     }
 
 
-async def _stop_managed_daemon(port: int = 8080) -> bool:
+async def _stop_managed_daemon(port: int = DEFAULT_DAEMON_PORT) -> bool:
     state = _load_daemon_state()
     if not state:
         pid = _find_listening_pid(port)
@@ -771,7 +773,7 @@ async def async_main() -> None:
             cfg = load_config()
             providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
             print("Updated provider catalogs in ~/.orb/config.json")
-            for provider_name in ("anthropic", "openai-codex", "ollama", "vmlx"):
+            for provider_name in ("anthropic", "openai-codex", "ollama", "vmlx", "omlx"):
                 entry = providers_cfg.get(provider_name) if isinstance(providers_cfg, dict) else None
                 if not isinstance(entry, dict):
                     continue
@@ -813,7 +815,7 @@ async def async_main() -> None:
             state = _load_daemon_state()
             if not state or not _pid_is_alive(int(state.get("pid", -1))):
                 _clear_daemon_state()
-                port = args.port or 8080
+                port = args.port or DEFAULT_DAEMON_PORT
                 pid = _find_listening_pid(port)
                 if pid is None:
                     print("  Orb daemon is not running.")
@@ -829,12 +831,12 @@ async def async_main() -> None:
             print(f"  Workspace: {state['workdir']}")
             return
         if daemon_action == "stop":
-            await _stop_managed_daemon(args.port or 8080)
+            await _stop_managed_daemon(args.port or DEFAULT_DAEMON_PORT)
             return
         if daemon_action == "restart":
-            await _stop_managed_daemon(args.port or 8080)
+            await _stop_managed_daemon(args.port or DEFAULT_DAEMON_PORT)
             host = args.host or "127.0.0.1"
-            port = args.port or 8080
+            port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
                 port,
@@ -848,7 +850,7 @@ async def async_main() -> None:
             return
         if daemon_action == "start":
             host = args.host or "127.0.0.1"
-            port = args.port or 8080
+            port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
                 port,
@@ -865,7 +867,7 @@ async def async_main() -> None:
         from web.state import DashboardState
 
         daemon_host = args.host or "127.0.0.1"
-        daemon_port = args.port or 8080
+        daemon_port = args.port or DEFAULT_DAEMON_PORT
         daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
         os.chdir(daemon_workdir)
         _save_daemon_state(pid=os.getpid(), host=daemon_host, port=daemon_port, workdir=daemon_workdir)
@@ -972,7 +974,7 @@ async def async_main() -> None:
     if not providers:
         print_error(
             "No LLM providers available. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
-            "or ensure Ollama/VMLX is running locally."
+            "or ensure Ollama/VMLX/OMLX is running locally."
         )
         sys.exit(1)
 
@@ -995,7 +997,7 @@ async def async_main() -> None:
         elif "gpt" in args.model:
             provider = "openai-codex"
         else:
-            provider = "ollama" if "ollama" in providers else "vmlx" if "vmlx" in providers else "ollama"
+            provider = "ollama" if "ollama" in providers else "omlx" if "omlx" in providers else "vmlx" if "vmlx" in providers else "ollama"
         override_config = ModelConfig(
             tier=ModelTier.CLOUD_FAST,
             model_id=args.model,

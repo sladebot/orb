@@ -30,6 +30,7 @@ This sprint should therefore prioritize infrastructure that makes Orb observable
 - Phase 2 is complete.
 - The original heuristic-routing plan has been superseded by a pluggable classifier interface with a lightweight provider-backed classifier, so future learned routing can replace the backend without changing runtime orchestration.
 - The next phase should focus on execution controller policies rather than adding more topology complexity first.
+- Roles and memory-boundary work remains planned, but it should stay behind execution control and verification rather than leapfrogging them.
 
 ## Current Gaps
 
@@ -278,6 +279,11 @@ Scope:
 Exit criteria:
 
 - Orb can measure role effectiveness and memory writes are policy-driven instead of ad hoc
+
+Status:
+
+- Not started.
+- This phase stays deferred until execution-controller and verification work are in place.
 
 ## Phase 6: Add Workdir-Aware Context Selection
 

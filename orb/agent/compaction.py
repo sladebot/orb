@@ -80,13 +80,14 @@ async def compact_history(
 
 
 async def _llm_summary(prompt: str, providers: dict) -> str:
-    from ..llm.types import CompletionRequest, ModelTier, DEFAULT_MODELS, ANTHROPIC_MODELS, CODEX_MODELS
+    from ..llm.types import CompletionRequest, ModelConfig, ModelTier, DEFAULT_MODELS, ANTHROPIC_MODELS, CODEX_MODELS
 
     provider = (
         providers.get("anthropic")
         or providers.get("openai-codex")
         or providers.get("ollama")
         or providers.get("vmlx")
+        or providers.get("omlx")
     )
     if not provider:
         logger.debug("compaction: no provider available, using fallback summary")
@@ -99,8 +100,12 @@ async def _llm_summary(prompt: str, providers: dict) -> str:
         model_config = ANTHROPIC_MODELS.get(ModelTier.CLOUD_LITE) or ANTHROPIC_MODELS[ModelTier.CLOUD_FAST]
     elif has_codex:
         model_config = CODEX_MODELS.get(ModelTier.CLOUD_LITE) or CODEX_MODELS[ModelTier.CLOUD_FAST]
-    else:
+    elif "ollama" in providers:
         model_config = DEFAULT_MODELS.get(ModelTier.LOCAL_SMALL) or DEFAULT_MODELS[ModelTier.LOCAL_MEDIUM]
+    elif "omlx" in providers:
+        model_config = ModelConfig(ModelTier.LOCAL_SMALL, "qwen", "omlx")
+    else:
+        model_config = ModelConfig(ModelTier.LOCAL_SMALL, "qwen", "vmlx")
 
     request = CompletionRequest(
         messages=[{"role": "user", "content": prompt}],

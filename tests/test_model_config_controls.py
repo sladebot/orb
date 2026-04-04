@@ -30,7 +30,8 @@ def test_load_config_normalizes_model_entries(tmp_path, monkeypatch):
     assert cfg["providers"]["openai-codex"]["enabled"] is True
     assert cfg["providers"]["ollama"]["models"] == {}
     assert cfg["providers"]["ollama"]["enabled"] is False
-    assert cfg["providers"]["vmlx"]["enabled"] is True
+    assert cfg["providers"]["vmlx"]["enabled"] is False
+    assert cfg["providers"]["omlx"]["enabled"] is True
 
 
 def test_load_config_canonicalizes_stale_model_aliases(tmp_path, monkeypatch):
@@ -88,7 +89,8 @@ def test_default_config_matches_seeded_user_defaults(tmp_path, monkeypatch):
     assert cfg["providers"]["anthropic"]["enabled"] is False
     assert cfg["providers"]["openai-codex"]["enabled"] is True
     assert cfg["providers"]["ollama"]["enabled"] is False
-    assert cfg["providers"]["vmlx"]["enabled"] is True
+    assert cfg["providers"]["vmlx"]["enabled"] is False
+    assert cfg["providers"]["omlx"]["enabled"] is True
 
 
 def test_runtime_configure_drops_provider_with_no_enabled_models(monkeypatch):
@@ -198,12 +200,35 @@ def test_models_payload_includes_vmlx_catalog_models(monkeypatch):
     assert ("vmlx", "Qwen/Qwen2.5-Coder-7B-Instruct") in entries
 
 
-def test_build_agent_model_map_uses_vmlx_when_it_is_the_only_local_provider(monkeypatch):
+def test_models_payload_includes_omlx_catalog_models(monkeypatch):
     monkeypatch.setattr(
         runtime_mod,
         "get_config",
         lambda key: {
-            "vmlx": {
+            "omlx": {
+                "enabled": True,
+                "catalog": [
+                    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "label": "Qwen 2.5 Coder 7B", "local": True},
+                ],
+            },
+        } if key == "providers" else None,
+    )
+
+    runtime = GraphRuntime()
+    runtime._providers = {"omlx": object()}  # noqa: SLF001
+
+    payload = runtime.models_payload()
+    entries = {(item["provider"], item["id"]) for item in payload["models"]}
+
+    assert ("omlx", "Qwen/Qwen2.5-Coder-7B-Instruct") in entries
+
+
+def test_build_agent_model_map_uses_omlx_when_it_is_the_only_local_provider(monkeypatch):
+    monkeypatch.setattr(
+        runtime_mod,
+        "get_config",
+        lambda key: {
+            "omlx": {
                 "enabled": True,
                 "catalog": [
                     {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "label": "Qwen 2.5 Coder 7B", "local": True},
@@ -219,7 +244,7 @@ def test_build_agent_model_map_uses_vmlx_when_it_is_the_only_local_provider(monk
     )
 
     runtime = GraphRuntime()
-    runtime._providers = {"vmlx": object()}  # noqa: SLF001
+    runtime._providers = {"omlx": object()}  # noqa: SLF001
 
     model_map = runtime._build_agent_model_map(  # noqa: SLF001
         complexity=30,
@@ -232,5 +257,5 @@ def test_build_agent_model_map_uses_vmlx_when_it_is_the_only_local_provider(monk
         },
     )
 
-    assert model_map["coordinator"].provider == "vmlx"
-    assert model_map["coder"].provider == "vmlx"
+    assert model_map["coordinator"].provider == "omlx"
+    assert model_map["coder"].provider == "omlx"

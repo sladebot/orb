@@ -292,6 +292,7 @@ class GraphRuntime:
             "openai-codex": ["gpt-5.4-mini", "gpt-5.4"],
             "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
             "vmlx": [],
+            "omlx": [],
         }
         model_ids = list(defaults.get(provider, []))
         for item in cls._provider_config_entry(provider).get("catalog") or []:
@@ -447,6 +448,17 @@ class GraphRuntime:
                     providers_cfg["vmlx"] = entry
                     updated = True
 
+        if "omlx" in self._all_providers:
+            catalog, defaults = await self._fetch_omlx_catalog()
+            if catalog:
+                entry = dict(providers_cfg.get("omlx") or {})
+                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+                    entry["catalog"] = catalog
+                    entry["default_models"] = defaults
+                    entry["refreshed_at"] = int(time.time())
+                    providers_cfg["omlx"] = entry
+                    updated = True
+
         if updated:
             cfg["providers"] = providers_cfg
             save_config(cfg)
@@ -529,6 +541,45 @@ class GraphRuntime:
 
         provider_cfg = self._provider_config_entry("vmlx")
         endpoint = str(provider_cfg.get("base_url") or _vmlx_base_url()).rstrip("/")
+        if not endpoint.endswith("/v1"):
+            endpoint = f"{endpoint}/v1"
+        headers = {}
+        api_key = provider_cfg.get("api_key")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{endpoint}/models", timeout=5.0, headers=headers or None)
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+        except Exception:
+            return [], {}
+
+        catalog = []
+        seen: set[str] = set()
+        for item in data:
+            model_id = str(item.get("id") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            catalog.append({"id": model_id, "label": model_id, "local": True})
+
+        defaults = {
+            "local_small": self._pick_catalog_model(catalog, "7b", catalog[0]["id"] if catalog else "qwen"),
+            "local_medium": self._pick_catalog_model(catalog, "14b", catalog[0]["id"] if catalog else "qwen"),
+            "local_large": self._pick_catalog_model(catalog, "32b", catalog[-1]["id"] if catalog else "qwen"),
+        }
+        if catalog:
+            defaults["local_small"] = self._pick_catalog_model(catalog, "7b", catalog[0]["id"])
+            defaults["local_medium"] = self._pick_catalog_model(catalog, "14b", catalog[min(1, len(catalog) - 1)]["id"])
+            defaults["local_large"] = self._pick_catalog_model(catalog, "32b", catalog[-1]["id"])
+        return catalog, defaults
+
+    async def _fetch_omlx_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        from orb.llm.registry import _omlx_base_url
+
+        provider_cfg = self._provider_config_entry("omlx")
+        endpoint = str(provider_cfg.get("base_url") or _omlx_base_url()).rstrip("/")
         if not endpoint.endswith("/v1"):
             endpoint = f"{endpoint}/v1"
         headers = {}
@@ -1329,6 +1380,15 @@ class GraphRuntime:
                     "provider": "vmlx",
                     "local": True,
                 })
+        if "omlx" in self._providers:
+            configured = self._provider_catalog("omlx")
+            for item in configured:
+                models.append({
+                    "id": item["id"],
+                    "label": item.get("label") or item["id"],
+                    "provider": "omlx",
+                    "local": True,
+                })
         return {"models": models}
 
     def _pick_primary_result(self, completions: dict[str, str]) -> tuple[str | None, str]:
@@ -1468,11 +1528,13 @@ class GraphRuntime:
             ModelTier,
             OPENAI_CODEX_PROVIDER,
             OLLAMA_PROVIDER,
+            OMLX_PROVIDER,
             VMLX_PROVIDER,
         )
 
         has_ollama = "ollama" in self._providers
         has_vmlx = "vmlx" in self._providers
+        has_omlx = "omlx" in self._providers
         has_anthropic = "anthropic" in self._providers
         has_codex = "openai-codex" in self._providers
 
@@ -1489,13 +1551,14 @@ class GraphRuntime:
             elif model_pin.startswith("gpt-5.4"):
                 force_provider = "openai-codex"
             elif "qwen" in model_pin or "llama" in model_pin:
-                force_provider = "ollama" if has_ollama else "vmlx" if has_vmlx else "ollama"
+                force_provider = "ollama" if has_ollama else "omlx" if has_omlx else "vmlx" if has_vmlx else "ollama"
 
         provider_available = {
             "anthropic": has_anthropic,
             "openai-codex": has_codex,
             "ollama": has_ollama,
             "vmlx": has_vmlx,
+            "omlx": has_omlx,
         }
         if force_provider and not provider_available.get(force_provider):
             logger.warning("Forced provider '%s' not available; falling back to auto", force_provider)
@@ -1509,12 +1572,16 @@ class GraphRuntime:
         ollama_medium = self._provider_default_model("ollama", "local_medium", "qwen3.5:27b")
         vmlx_small = self._provider_default_model("vmlx", "local_small", "qwen")
         vmlx_medium = self._provider_default_model("vmlx", "local_medium", "qwen")
+        omlx_small = self._provider_default_model("omlx", "local_small", "qwen")
+        omlx_medium = self._provider_default_model("omlx", "local_medium", "qwen")
         use_ant = has_anthropic and force_provider in (None, "anthropic")
         use_codex = has_codex and force_provider in (None, "openai-codex")
         q9 = local(OLLAMA_PROVIDER, ModelTier.LOCAL_SMALL, ollama_small) if has_ollama and force_provider in (None, "ollama") else None
         q27 = local(OLLAMA_PROVIDER, ModelTier.LOCAL_MEDIUM, ollama_medium) if has_ollama and force_provider in (None, "ollama") else None
         vsmall = local(VMLX_PROVIDER, ModelTier.LOCAL_SMALL, vmlx_small) if has_vmlx and force_provider in (None, "vmlx") else None
         vmedium = local(VMLX_PROVIDER, ModelTier.LOCAL_MEDIUM, vmlx_medium) if has_vmlx and force_provider in (None, "vmlx") else None
+        osmall = local(OMLX_PROVIDER, ModelTier.LOCAL_SMALL, omlx_small) if has_omlx and force_provider in (None, "omlx") else None
+        omedium = local(OMLX_PROVIDER, ModelTier.LOCAL_MEDIUM, omlx_medium) if has_omlx and force_provider in (None, "omlx") else None
 
         def codex(tier: ModelTier) -> ModelConfig:
             return ModelConfig(tier=tier, model_id=codex_default, provider=OPENAI_CODEX_PROVIDER)
@@ -1531,11 +1598,11 @@ class GraphRuntime:
 
         def pick(score: int):
             if score <= 25:
-                return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
+                return best(q9, osmall, vsmall, haiku, q27, omedium, vmedium, sonnet, opus)
             if score <= 50:
-                return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
+                return best(q27, omedium, vmedium, haiku, sonnet, q9, osmall, vsmall, opus)
             if score <= 70:
-                return best(sonnet, haiku, q27, vmedium, opus)
+                return best(sonnet, haiku, q27, omedium, vmedium, opus)
             if score <= 75:
                 return best(sonnet, haiku, opus)
             return best(opus, sonnet)
@@ -1543,31 +1610,31 @@ class GraphRuntime:
         def pick_for_role(category: str, score: int):
             if category == "entry":
                 if score <= 35:
-                    return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
-                return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
+                    return best(q9, osmall, vsmall, haiku, q27, omedium, vmedium, sonnet, opus)
+                return best(q27, omedium, vmedium, haiku, sonnet, q9, osmall, vsmall, opus)
             if category == "implementation":
                 if score <= 35:
-                    return best(q27, vmedium, sonnet, haiku, opus)
+                    return best(q27, omedium, vmedium, sonnet, haiku, opus)
                 if score <= 70:
-                    return best(sonnet, q27, vmedium, haiku, opus)
+                    return best(sonnet, q27, omedium, vmedium, haiku, opus)
                 return best(opus, sonnet)
             if category == "review":
                 if score <= 35:
-                    return best(q27, vmedium, sonnet, haiku, opus)
+                    return best(q27, omedium, vmedium, sonnet, haiku, opus)
                 if score <= 70:
-                    return best(sonnet, q27, vmedium, haiku, opus)
+                    return best(sonnet, q27, omedium, vmedium, haiku, opus)
                 return best(opus, sonnet)
             if category == "validation":
                 if score <= 30:
-                    return best(q9, vsmall, haiku, q27, vmedium, sonnet, opus)
+                    return best(q9, osmall, vsmall, haiku, q27, omedium, vmedium, sonnet, opus)
                 if score <= 50:
-                    return best(q27, vmedium, haiku, sonnet, q9, vsmall, opus)
-                return best(sonnet, q27, vmedium, haiku, opus)
+                    return best(q27, omedium, vmedium, haiku, sonnet, q9, osmall, vsmall, opus)
+                return best(sonnet, q27, omedium, vmedium, haiku, opus)
             if category == "discovery":
                 if score <= 40:
-                    return best(q27, vmedium, sonnet, haiku, opus)
+                    return best(q27, omedium, vmedium, sonnet, haiku, opus)
                 if score <= 75:
-                    return best(sonnet, q27, vmedium, haiku, opus)
+                    return best(sonnet, q27, omedium, vmedium, haiku, opus)
                 return best(opus, sonnet)
             return pick(score)
 
@@ -1642,14 +1709,18 @@ class GraphRuntime:
         from orb.llm.types import ANTHROPIC_HAIKU_MODEL, DEFAULT_MODELS, ModelConfig, ModelTier
 
         candidates: list[tuple[int, int, ModelConfig]] = []
+        if "omlx" in self._providers:
+            model_id = self._provider_default_model("omlx", "local_small", "qwen")
+            if self._provider_model_enabled("omlx", model_id):
+                candidates.append((0, 0, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "omlx")))
         if "vmlx" in self._providers:
             model_id = self._provider_default_model("vmlx", "local_small", "qwen")
             if self._provider_model_enabled("vmlx", model_id):
-                candidates.append((0, 0, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")))
+                candidates.append((0, 1, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")))
         if "ollama" in self._providers:
             model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
             if self._provider_model_enabled("ollama", model_id):
-                candidates.append((0, 1, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")))
+                candidates.append((0, 2, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")))
         if "openai-codex" in self._providers:
             model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4-mini")
             if self._provider_model_enabled("openai-codex", model_id):

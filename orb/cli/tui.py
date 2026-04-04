@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
+DEFAULT_DASHBOARD_PORT = 1337
+
 AGENT_COLORS: dict[str, str] = {
     "coordinator": "magenta",
     "coder":       "cyan",
@@ -1111,7 +1113,7 @@ class OrbTUI(App[None]):
 
     def __init__(
         self,
-        server_port: int = 8080,
+        server_port: int = DEFAULT_DASHBOARD_PORT,
         server_host: str = "127.0.0.1",
         server_scheme: str = "http",
         topology: str = "triad",
@@ -2273,7 +2275,7 @@ def run_tui(
     topology: str = "triad",
     budget: int = 200,
     show_logs: bool = False,
-    server_port: int = 18080,
+    server_port: int = DEFAULT_DASHBOARD_PORT,
     initial_query: str | None = None,
     exit_after_run: bool = False,
 ) -> None:
@@ -2295,7 +2297,7 @@ async def run_tui_with_dashboard(
     tier_override: Any = None,
     topology: str = "triad",
     budget: int = 200,
-    dashboard_port: int = 8080,
+    dashboard_port: int = DEFAULT_DASHBOARD_PORT,
     show_logs: bool = False,
     initial_query: str | None = None,
     exit_after_run: bool = False,
@@ -2318,7 +2320,7 @@ async def run_tui_async(
     topology: str = "triad",
     budget: int = 200,
     show_logs: bool = False,
-    server_port: int = 18080,
+    server_port: int = DEFAULT_DASHBOARD_PORT,
     initial_query: str | None = None,
     exit_after_run: bool = False,
 ) -> None:
@@ -2343,7 +2345,7 @@ async def attach_tui(
     parsed = urlparse(connect_url if "://" in connect_url else f"http://{connect_url}")
     scheme = parsed.scheme or "http"
     host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (443 if scheme == "https" else 80)
+    port = parsed.port or (443 if scheme == "https" else DEFAULT_DASHBOARD_PORT)
     await OrbTUI(
         server_port=port,
         server_host=host,

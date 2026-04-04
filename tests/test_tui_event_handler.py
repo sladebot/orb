@@ -16,7 +16,7 @@ def _make_tui() -> OrbTUI:
     """Create an OrbTUI instance with all Textual widget calls mocked out."""
     tui = object.__new__(OrbTUI)
     # Initialise only the data-layer attributes (bypass super().__init__)
-    tui._server_port   = 8080
+    tui._server_port   = 1337
     tui._topology_name = "triad"
     tui._show_logs     = False
     tui._agents        = {}

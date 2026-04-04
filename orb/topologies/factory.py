@@ -187,6 +187,7 @@ def _resolve_model_selection(
         "openai-codex": CODEX_MODELS[ModelTier.CLOUD_STRONG],
         "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
         "vmlx": ModelConfig(ModelTier.LOCAL_LARGE, "qwen", "vmlx"),
+        "omlx": ModelConfig(ModelTier.LOCAL_LARGE, "qwen", "omlx"),
     }
 
     available = [p for p in provider_models if p in providers]
