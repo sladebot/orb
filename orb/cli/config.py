@@ -209,6 +209,68 @@ def get(key: str) -> Any:
     return load_config().get(key, _DEFAULTS.get(key))
 
 
+def provider_model_enabled(provider: str, model_id: str, *, cfg: dict[str, Any] | None = None) -> bool:
+    cfg = cfg or load_config()
+    providers = cfg.get("providers") if isinstance(cfg, dict) else {}
+    entry = providers.get(provider) or {} if isinstance(providers, dict) else {}
+    models = entry.get("models") or {} if isinstance(entry, dict) else {}
+    canonical = _canonical_model_id(provider, model_id)
+    if not canonical:
+        return False
+    if not isinstance(models, dict) or not models:
+        return True
+    value = models.get(canonical)
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return bool(value.get("enabled", True))
+    return True
+
+
+def provider_catalog(provider: str, *, cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    cfg = cfg or load_config()
+    providers = cfg.get("providers") if isinstance(cfg, dict) else {}
+    entry = providers.get(provider) or {} if isinstance(providers, dict) else {}
+    catalog = entry.get("catalog") or [] if isinstance(entry, dict) else []
+    filtered: list[dict[str, Any]] = []
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        model_id = _canonical_model_id(provider, item.get("id") or "")
+        if not model_id or not provider_model_enabled(provider, model_id, cfg=cfg):
+            continue
+        normalized = dict(item)
+        normalized["id"] = model_id
+        if not normalized.get("label"):
+            normalized["label"] = model_id
+        filtered.append(normalized)
+    return filtered
+
+
+def provider_default_model(provider: str, key: str) -> str:
+    cfg = load_config()
+    providers = cfg.get("providers") if isinstance(cfg, dict) else {}
+    entry = providers.get(provider) or {} if isinstance(providers, dict) else {}
+    defaults = entry.get("default_models") or {} if isinstance(entry, dict) else {}
+    candidate = _canonical_model_id(provider, defaults.get(key) or "")
+    if candidate and provider_model_enabled(provider, candidate, cfg=cfg):
+        return candidate
+
+    catalog = provider_catalog(provider, cfg=cfg)
+    if catalog:
+        return str(catalog[0].get("id") or "")
+
+    models = entry.get("models") or {} if isinstance(entry, dict) else {}
+    for model_id in models:
+        canonical = _canonical_model_id(provider, model_id)
+        if canonical and provider_model_enabled(provider, canonical, cfg=cfg):
+            return canonical
+
+    return ""
+
+
 def set_value(key: str, value: str) -> None:
     if key not in _DEFAULTS:
         raise KeyError(f"Unknown config key: {key!r}")

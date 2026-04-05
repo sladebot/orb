@@ -101,10 +101,10 @@ class LLMAgent(AgentNode):
         self._subgraph_store = None
         self._fact_extractor = None
 
-    async def _emit(self, activity: str) -> None:
+    async def _emit(self, activity: str, details: dict | None = None) -> None:
         """Fire the activity callback if set."""
         if self._on_activity:
-            cb = self._on_activity(self.node_id, activity)
+            cb = self._on_activity(self.node_id, activity, details or {})
             if asyncio.iscoroutine(cb):
                 await cb
 
@@ -398,7 +398,15 @@ class LLMAgent(AgentNode):
             for tc in response.tool_calls:
                 if tc.name == "send_message":
                     to = tc.input.get("to", "?")
-                    await self._emit(f"Sending message to {to}…")
+                    await self._emit(
+                        f"Sending message to {to}…",
+                        {
+                            "kind": "send_message",
+                            "to": to,
+                            "content": tc.input.get("content", ""),
+                            "context": tc.input.get("context", []),
+                        },
+                    )
                     await self._handle_send(msg, tc.id, tc.input, response.model)
                 elif tc.name == "complete_task":
                     await self._emit("Completing task…")

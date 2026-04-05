@@ -11,11 +11,9 @@ import json
 import logging
 from uuid import uuid4
 
+from ..cli.config import provider_default_model
 from ..llm.client import LLMClient
 from ..llm.types import (
-    ANTHROPIC_PROVIDER,
-    ANTHROPIC_SONNET_MODEL,
-    OPENAI_CODEX_PROVIDER,
     CompletionRequest,
     ModelConfig,
     ModelTier,
@@ -31,20 +29,6 @@ _EXTRACTION_PROMPT = (
     'of {{"subject", "predicate", "object"}} triples. '
     "Return only valid JSON, no prose.\n\n{content}"
 )
-
-_CODEX_MODEL = ModelConfig(
-    tier=ModelTier.CLOUD_FAST,
-    model_id="gpt-5.4",
-    provider=OPENAI_CODEX_PROVIDER,
-    max_tokens=512,
-)
-_ANTHROPIC_MODEL = ModelConfig(
-    tier=ModelTier.CLOUD_FAST,
-    model_id=ANTHROPIC_SONNET_MODEL,
-    provider=ANTHROPIC_PROVIDER,
-    max_tokens=512,
-)
-
 
 class FactExtractor:
     """Extracts structured facts from agent turn content via LLM and writes to SubgraphStore."""
@@ -72,28 +56,34 @@ class FactExtractor:
         prompt = _EXTRACTION_PROMPT.format(content=content)
         messages = [{"role": "user", "content": prompt}]
 
-        if OPENAI_CODEX_PROVIDER in self._providers:
+        if "openai-codex" in self._providers:
             try:
+                model_id = provider_default_model("openai-codex", "cloud_fast")
+                if not model_id:
+                    raise RuntimeError("no configured openai-codex model")
                 request = CompletionRequest(
                     messages=messages,
                     tools=[],
                     system="",
-                    model_config=_CODEX_MODEL,
+                    model_config=ModelConfig(ModelTier.CLOUD_FAST, model_id, "openai-codex", max_tokens=512),
                 )
-                response = await self._providers[OPENAI_CODEX_PROVIDER].complete(request)
+                response = await self._providers["openai-codex"].complete(request)
                 return response.content
             except Exception as exc:
                 logger.debug("Codex fact extraction failed, trying Anthropic: %s", exc)
 
-        if ANTHROPIC_PROVIDER in self._providers:
+        if "anthropic" in self._providers:
             try:
+                model_id = provider_default_model("anthropic", "cloud_fast")
+                if not model_id:
+                    raise RuntimeError("no configured anthropic model")
                 request = CompletionRequest(
                     messages=messages,
                     tools=[],
                     system="",
-                    model_config=_ANTHROPIC_MODEL,
+                    model_config=ModelConfig(ModelTier.CLOUD_FAST, model_id, "anthropic", max_tokens=512),
                 )
-                response = await self._providers[ANTHROPIC_PROVIDER].complete(request)
+                response = await self._providers["anthropic"].complete(request)
                 return response.content
             except Exception as exc:
                 logger.debug("Anthropic fact extraction failed: %s", exc)

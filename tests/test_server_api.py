@@ -32,6 +32,11 @@ def _all_anthropic_models_enabled():
                 ANTHROPIC_SONNET_MODEL: {"enabled": True},
                 ANTHROPIC_OPUS_MODEL: {"enabled": True},
             },
+            "default_models": {
+                "cloud_lite": ANTHROPIC_HAIKU_MODEL,
+                "cloud_fast": ANTHROPIC_SONNET_MODEL,
+                "cloud_strong": ANTHROPIC_OPUS_MODEL,
+            },
         },
     }
 
@@ -179,6 +184,10 @@ class TestServerAPI:
         assert resp.status == 200
         data = await resp.json()
         assert data["ok"] is True
+        assert data["init"]["type"] == "init"
+        assert data["init"]["run_active"] is True
+        assert data["init"]["plan"]["topology"]["id"] == "triad"
+        assert data["init"]["plan"]["query"] == "write hello world"
 
     async def test_api_start_rejects_concurrent_run(self, client):
         await client.post("/api/start", json={

@@ -41,6 +41,7 @@ class ActivityRecord:
     agent: str
     activity: str
     elapsed: float
+    details: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -175,6 +176,7 @@ class DashboardState:
                     "agent": a.agent,
                     "activity": a.activity,
                     "elapsed": a.elapsed,
+                    "details": a.details,
                 }
                 for a in self.activity_events
             ],

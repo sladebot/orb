@@ -180,15 +180,25 @@ def _resolve_model_selection(
     existing_agents: dict[str, AgentConfig],
 ) -> "ModelConfig | None":
     """Resolve model_selection hints to a concrete ModelConfig."""
-    from ..llm.types import ANTHROPIC_MODELS, CODEX_MODELS, ModelConfig, ModelTier
+    from ..cli.config import provider_default_model
+    from ..llm.types import ModelConfig, ModelTier
 
-    provider_models: dict[str, ModelConfig] = {
-        "anthropic": ANTHROPIC_MODELS[ModelTier.CLOUD_STRONG],
-        "openai-codex": CODEX_MODELS[ModelTier.CLOUD_STRONG],
-        "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
-        "vmlx": ModelConfig(ModelTier.LOCAL_LARGE, "qwen", "vmlx"),
-        "omlx": ModelConfig(ModelTier.LOCAL_LARGE, "qwen", "omlx"),
-    }
+    provider_models: dict[str, ModelConfig] = {}
+    anthropic_model = provider_default_model("anthropic", "cloud_strong")
+    codex_model = provider_default_model("openai-codex", "cloud_strong")
+    if anthropic_model:
+        provider_models["anthropic"] = ModelConfig(ModelTier.CLOUD_STRONG, anthropic_model, "anthropic")
+    if codex_model:
+        provider_models["openai-codex"] = ModelConfig(ModelTier.CLOUD_STRONG, codex_model, "openai-codex")
+    ollama_model = provider_default_model("ollama", "local_large")
+    vmlx_model = provider_default_model("vmlx", "local_large")
+    omlx_model = provider_default_model("omlx", "local_large")
+    if ollama_model:
+        provider_models["ollama"] = ModelConfig(ModelTier.LOCAL_LARGE, ollama_model, "ollama")
+    if vmlx_model:
+        provider_models["vmlx"] = ModelConfig(ModelTier.LOCAL_LARGE, vmlx_model, "vmlx")
+    if omlx_model:
+        provider_models["omlx"] = ModelConfig(ModelTier.LOCAL_LARGE, omlx_model, "omlx")
 
     available = [p for p in provider_models if p in providers]
 

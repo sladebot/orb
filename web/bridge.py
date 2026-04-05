@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Callable, Awaitable
 
@@ -11,6 +12,8 @@ from .state import DashboardState, AgentState, EdgeState, MessageRecord
 
 # Callback to broadcast JSON to all connected clients
 BroadcastFn = Callable[[str], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardBridge:
@@ -74,6 +77,16 @@ class DashboardBridge:
         """Called by MessageBus event system."""
         elapsed = time.time() - self.state.start_time
         context_slice = list(msg.context_slice) if msg.context_slice else []
+        logger.info(
+            "dashboard event=message_routed event_name=%s from=%s to=%s type=%s depth=%s elapsed=%.2fs model=%s",
+            event,
+            msg.from_,
+            msg.to,
+            msg.type.value,
+            msg.depth,
+            elapsed,
+            msg.metadata.get("model", ""),
+        )
 
         record = MessageRecord(
             id=msg.id,
@@ -146,6 +159,12 @@ class DashboardBridge:
             if model:
                 self.state.agents[agent_id].model = model
         self._persist_state()
+        logger.info(
+            "dashboard event=agent_status agent=%s status=%s model=%s",
+            agent_id,
+            status,
+            model,
+        )
 
         await self._send({
             "type": "agent_status",
@@ -160,6 +179,12 @@ class DashboardBridge:
             self.state.agents[agent_id].status = "completed"
             self.state.agents[agent_id].completed_result = result
         self._persist_state()
+        logger.info(
+            "dashboard event=agent_complete agent=%s consensus=%s result_preview=%s",
+            agent_id,
+            is_consensus,
+            result[:160].replace("\n", " "),
+        )
 
         await self._send({
             "type": "complete",
@@ -177,6 +202,12 @@ class DashboardBridge:
             if status and agent.status not in {"completed", "error"}:
                 agent.status = status
         self._persist_state()
+        logger.info(
+            "dashboard event=agent_heartbeat agent=%s status=%s ts=%.3f",
+            agent_id,
+            status,
+            ts,
+        )
 
         await self._send({
             "type": "agent_heartbeat",

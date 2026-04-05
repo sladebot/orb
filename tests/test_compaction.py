@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import pytest
 
+import orb.cli.config as config_mod
 from orb.agent.compaction import compact_history, COMPACT_THRESHOLD
-from orb.llm.types import CompletionResponse, ModelTier, ModelConfig
+from orb.llm.types import CompletionResponse
 from tests.test_claude_agent import MockLLMClient
 
 
@@ -12,10 +13,6 @@ def _make_mock_providers(summary: str = "Prior work summary.") -> dict:
     client = MockLLMClient([
         CompletionResponse(content=summary, model="mock"),
     ])
-    mock_cfg = ModelConfig(tier=ModelTier.CLOUD_LITE, model_id="mock", provider="anthropic")
-    # Patch DEFAULT_MODELS so compact_history picks the right model config
-    import orb.llm.types as lt
-    lt.DEFAULT_MODELS[ModelTier.CLOUD_LITE] = mock_cfg
     # Use "anthropic" key so compact_history finds the provider
     return {"anthropic": client}
 
@@ -30,6 +27,10 @@ def _long_history(n: int = COMPACT_THRESHOLD) -> list[dict]:
 
 
 class TestCompaction:
+    @pytest.fixture(autouse=True)
+    def _mock_provider_default_model(self, monkeypatch):
+        monkeypatch.setattr(config_mod, "provider_default_model", lambda provider, key: "mock")
+
     async def test_compacted_output_ends_with_assistant(self):
         """After compaction the history must end on an assistant turn."""
         providers = _make_mock_providers("summary text")
@@ -68,9 +69,6 @@ class TestCompaction:
                 raise RuntimeError("network error")
             async def close(self): pass
 
-        import orb.llm.types as lt
-        mock_cfg = ModelConfig(tier=ModelTier.CLOUD_LITE, model_id="mock", provider="anthropic")
-        lt.DEFAULT_MODELS[ModelTier.CLOUD_LITE] = mock_cfg
         providers = {"anthropic": BrokenClient()}
         msgs = _long_history(COMPACT_THRESHOLD)
         result = await compact_history(msgs, providers)

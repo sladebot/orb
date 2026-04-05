@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
+import pytest
+
+import orb.agent.fact_extractor as fact_extractor_mod
 from orb.agent.fact_extractor import FactExtractor, LLM_EXTRACTION_CONFIDENCE
 from orb.llm.client import LLMClient
 from orb.llm.types import CompletionResponse
@@ -35,6 +37,18 @@ def _make_providers(codex_response=None, codex_raises=None,
             ant.complete.return_value = _make_response(anthropic_response)
         providers[ANTHROPIC_PROVIDER] = ant
     return providers
+
+
+@pytest.fixture(autouse=True)
+def _mock_provider_default_model(monkeypatch):
+    def resolve(provider: str, key: str) -> str:
+        if provider == "openai-codex":
+            return "mock-codex"
+        if provider == "anthropic":
+            return "mock-anthropic"
+        return ""
+
+    monkeypatch.setattr(fact_extractor_mod, "provider_default_model", resolve)
 
 
 @pytest.mark.asyncio

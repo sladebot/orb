@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -43,6 +44,7 @@ class DashboardServer:
         self._app = web.Application(middlewares=[_no_cache_middleware])
         self._clients: dict[web.WebSocketResponse, str | None] = {}
         self._runner: web.AppRunner | None = None
+        self._catalog_refresh_task: asyncio.Task | None = None
 
         self._app.router.add_get("/ws", self._ws_handler)
         self._app.router.add_get("/api/state", self._state_handler)
@@ -70,12 +72,13 @@ class DashboardServer:
 
     async def start(self) -> None:
         self.runtime.subscribe(self.broadcast)
-        await self.runtime.refresh_provider_catalogs()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()
-        logger.info("Dashboard server running at http://localhost:%s", self.port)
+        logger.info("Dashboard server running at http://%s:%s", self.host, self.port)
+        self._catalog_refresh_task = asyncio.create_task(self.runtime.refresh_provider_catalogs())
+        self._catalog_refresh_task.add_done_callback(self._log_catalog_refresh_error)
 
         # Start topology file watcher for hot-reload
         from orb.topologies import get_watcher
@@ -83,12 +86,23 @@ class DashboardServer:
         self._topology_watcher.on_reload(self._on_topologies_reloaded)
         self._topology_watcher.start()
 
+    @staticmethod
+    def _log_catalog_refresh_error(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Background provider catalog refresh failed")
+
     async def _on_topologies_reloaded(self) -> None:
         await self.broadcast(json.dumps({"type": "topologies_reloaded"}))
 
     async def stop(self) -> None:
         if hasattr(self, "_topology_watcher"):
             self._topology_watcher.stop()
+        if self._catalog_refresh_task is not None and not self._catalog_refresh_task.done():
+            self._catalog_refresh_task.cancel()
         self.runtime.unsubscribe(self.broadcast)
         await self.runtime.stop()
         for ws in list(self._clients):

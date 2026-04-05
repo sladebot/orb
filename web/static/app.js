@@ -43,7 +43,7 @@ class Dashboard {
 
         // Raw data for node detail panel
         this._rawMessages = [];         // all messages, capped at 200
-        this._agentActivityLines = {};  // agentId -> string[] (last 10 lines)
+        this._agentActivityLines = {};  // agentId -> recent structured activity events
         this._plan = null;
         this._fileChanges = new Map();
         this._panelWidthKeys = ['changes-panel', 'communications-panel'];
@@ -57,6 +57,8 @@ class Dashboard {
         this._selectedTraceRun = '';
         this._demoMode = new URL(window.location.href).searchParams.get('demo') || '';
         this._traceDemoStarted = false;
+        this._feedSequence = 0;
+        this._thinkingAgents = new Set();
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -396,6 +398,8 @@ class Dashboard {
         this._plan = data.plan || null;
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
         this._fileChanges = new Map();
+        this._feedSequence = 0;
+        this._clearThinking();
         this._updateSessionUrl(data.session_id || '');
         if (!document.getElementById('trace-admin-modal')?.classList.contains('hidden')) {
             this._loadTraceSessions();
@@ -451,6 +455,7 @@ class Dashboard {
                 agent: activityEvent.agent,
                 activity: activityEvent.activity,
                 elapsed: activityEvent.elapsed,
+                details: activityEvent.details || {},
                 hydrated: true,
             });
         }
@@ -502,6 +507,7 @@ class Dashboard {
     }
 
     _handlePlanStep(data) {
+        if (!this._plan) this._plan = { topology: {}, routing: {}, agent_complexity: {}, agent_models: {} };
         if (!this._planSteps) this._planSteps = [];
         const step = {
             stage: data.stage || 'planning',
@@ -523,6 +529,8 @@ class Dashboard {
         if (typeof data.detail === 'string' && data.title === 'Selected topology') {
             const match = data.detail.match(/^([^:]+):?/);
             if (match?.[1]) {
+                this._plan.topology = this._plan.topology || {};
+                this._plan.topology.label = match[1].trim();
                 document.getElementById('stat-topology').textContent = match[1].trim();
                 this._setText('hero-topology-label', match[1].trim());
             }
@@ -713,9 +721,6 @@ class Dashboard {
     }
 
     _addPlanStepEntry(step) {
-        const empty = this.messageLog.querySelector('.empty-state');
-        if (empty) empty.remove();
-
         const stage = String(step.stage || 'planning').toLowerCase();
         const stageClass = {
             planning: 'msg-stage-planning',
@@ -731,14 +736,14 @@ class Dashboard {
             <div class="msg-header">
                 <span class="msg-time">${(step.elapsed || 0).toFixed(1)}s</span>
                 <span class="msg-type-badge msg-type-system">plan</span>
+                <span class="agent-coordinator">runtime</span>
                 <span class="msg-stage-pill ${stageClass}">${this._escapeHtml(step.stage || 'planning')}</span>
             </div>
             <div class="msg-preview"><strong>${this._escapeHtml(step.title || 'Planning update')}</strong></div>
             ${step.detail ? `<div class="msg-expanded" style="display:block"><div class="msg-full-content">${this._escapeHtml(step.detail)}</div></div>` : ''}
         `;
 
-        this.messageLog.appendChild(entry);
-        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+        this._insertFeedEntry(entry, step.elapsed || 0);
     }
 
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
@@ -815,8 +820,7 @@ class Dashboard {
                 <div class="msg-full-content">${this._escapeHtml(preview)}${preview.length >= 180 ? '…' : ''}</div>
             </div>
         `;
-        this.messageLog.appendChild(entry);
-        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+        this._insertFeedEntry(entry, data.elapsed || 0);
     }
 
     // ── Message log ───────────────────────────────────────────
@@ -1037,14 +1041,38 @@ class Dashboard {
         const lines = this._agentActivityLines[agentId] || [];
         const actSection = document.getElementById('ndp-activity-section');
         const actLog = document.getElementById('ndp-activity-log');
-        if (lines.length > 0 && status !== 'completed') {
+        if (lines.length > 0) {
             actSection.classList.remove('hidden');
-            actLog.innerHTML = lines.map(a => `
+            actLog.innerHTML = lines.map((entry) => {
+                const activity = typeof entry === 'string' ? entry : (entry.activity || '');
+                const details = entry && typeof entry === 'object' ? (entry.details || {}) : {};
+                const elapsed = entry && typeof entry === 'object' && entry.elapsed !== undefined
+                    ? `<span class="ndp-activity-elapsed">${Number(entry.elapsed).toFixed(1)}s</span>`
+                    : '';
+                const destination = typeof details.to === 'string' && details.to
+                    ? `<span class="ndp-activity-target">${this._escapeHtml(details.to)}</span>`
+                    : '';
+                const content = typeof details.content === 'string' && details.content
+                    ? `<div class="ndp-activity-payload">${this._escapeHtml(details.content)}</div>`
+                    : '';
+                const context = Array.isArray(details.context) && details.context.length
+                    ? `<div class="ndp-activity-context">${details.context.map((item, index) => `<div class="msg-context-item">[${index}] ${this._escapeHtml(item)}</div>`).join('')}</div>`
+                    : '';
+                return `
                 <div class="ndp-activity-line">
-                    <span class="activity-icon">${this._activityIcon(a)}</span>
-                    <span>${this._escapeHtml(a)}</span>
+                    <span class="activity-icon">${this._activityIcon(activity)}</span>
+                    <div class="ndp-activity-copy">
+                        <div class="ndp-activity-header">
+                            ${elapsed}
+                            <span>${this._escapeHtml(activity)}</span>
+                            ${destination}
+                        </div>
+                        ${content}
+                        ${context}
+                    </div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         } else {
             actSection.classList.add('hidden');
         }
@@ -1792,7 +1820,6 @@ class Dashboard {
 
         // Clear previous run state
         this._clearThinking();
-        this._thinkingAgent = null;
         this._runModelShown = false;
         this._rawMessages = [];
         this._agentActivityLines = {};
@@ -1847,6 +1874,23 @@ class Dashboard {
         if (data.session_id) {
             this._updateSessionUrl(data.session_id);
         }
+        if (data.init && !this._shouldIgnoreStartSnapshot(data.init)) {
+            this._handleInit(data.init);
+        }
+    }
+
+    _shouldIgnoreStartSnapshot(snapshot) {
+        if (!snapshot || typeof snapshot !== 'object') return false;
+        const snapshotSessionId = String(snapshot.session_id || '');
+        const currentSessionId = String(this._wsSessionId || '');
+        const sameSession = snapshotSessionId && currentSessionId && snapshotSessionId === currentSessionId;
+        const hasLiveProgress = Boolean(
+            (this._planSteps && this._planSteps.length) ||
+            (this._rawMessages && this._rawMessages.length) ||
+            (this.messageLog && this.messageLog.querySelector('.msg-entry, .prediction-card')) ||
+            Object.keys(this.agents || {}).length
+        );
+        return sameSession && hasLiveProgress;
     }
 
     async _createNewSession() {
@@ -2003,7 +2047,6 @@ class Dashboard {
         this._closeSettings();
         this._hideLoader();
         this._clearThinking();
-        this._thinkingAgent = null;
         this._rawMessages = [];
         this._agentActivityLines = {};
         this._plan = null;
@@ -2364,6 +2407,7 @@ class Dashboard {
     _updateSessionUrl(sessionId) {
         const normalizedSessionId = sessionId || '';
         const url = new URL(window.location.href);
+        const previousSessionId = String(this._wsSessionId || '');
         if (normalizedSessionId) {
             url.searchParams.set('session', normalizedSessionId);
         } else {
@@ -2372,7 +2416,14 @@ class Dashboard {
         const next = `${url.pathname}${url.search}${url.hash}`;
         const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
         if (next !== current) window.history.replaceState({}, '', next);
-        if ((this._wsSessionId || '') !== normalizedSessionId) {
+        if (!previousSessionId && normalizedSessionId) {
+            // The current socket was opened without an explicit session, which already
+            // means "attach to the active session". Keep that live socket instead of
+            // forcing a reconnect just to mirror the session id into the URL.
+            this._wsSessionId = normalizedSessionId;
+            return;
+        }
+        if (previousSessionId !== normalizedSessionId) {
             this._reconnectForSession();
         }
     }
@@ -2503,6 +2554,11 @@ class Dashboard {
         const el = document.createElement('div');
         el.className = 'prediction-card';
         el.innerHTML = `
+            <div class="msg-header">
+                <span class="msg-time">0.0s</span>
+                <span class="msg-type-badge msg-type-system">plan</span>
+                <span class="agent-coordinator">runtime</span>
+            </div>
             <div class="pred-header">
                 <span class="pred-title">Run Plan</span>
                 <span class="pred-complexity-label">Complexity</span>
@@ -2517,27 +2573,13 @@ class Dashboard {
             <div class="pred-options">${optionsHtml}</div>
             ${(plannerRows || agentRows) ? `<div class="pred-agent-models">${plannerRows}${agentRows}</div>` : ''}
         `;
-        this.messageLog.appendChild(el);
-        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+        this._insertFeedEntry(el, 0);
     }
 
     _showThinking(agentId) {
-        this._clearThinking();
-        const agentClass = AGENT_CSS_CLASS[agentId] || 'agent-user';
-        const el = document.createElement('div');
-        el.id = 'thinking-indicator';
-        el.className = 'thinking-indicator';
-        el.innerHTML = `
-            <div class="thinking-header">
-                <span class="${agentClass}">${agentId}</span>
-                <span class="thinking-dots"><span></span><span></span><span></span></span>
-            </div>
-            <div class="activity-log" id="activity-log"></div>
-        `;
-        this.messageLog.appendChild(el);
-        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+        if (!agentId || this._thinkingAgents.has(agentId)) return;
+        this._thinkingAgents.add(agentId);
         this.graph.setNodeThinking(agentId, true);
-        this._thinkingAgent = agentId;
     }
 
     _handleAgentActivity(data) {
@@ -2546,27 +2588,26 @@ class Dashboard {
         // Store per-agent activity lines for node detail panel
         if (!this._agentActivityLines[agent]) this._agentActivityLines[agent] = [];
         const lines = this._agentActivityLines[agent];
-        if (!data.hydrated || lines[lines.length - 1] !== activity) {
-            lines.push(activity);
+        const nextEntry = {
+            activity,
+            elapsed: data.elapsed ?? this._lastElapsed ?? 0,
+            details: data.details || {},
+        };
+        const previous = lines[lines.length - 1];
+        const previousActivity = typeof previous === 'string' ? previous : previous?.activity;
+        if (!data.hydrated || previousActivity !== activity) {
+            lines.push(nextEntry);
             if (lines.length > 10) lines.shift();
         }
 
-        // If this agent isn't currently showing the thinking indicator, show it
-        if (this._thinkingAgent !== agent) {
-            this._showThinking(agent);
-        }
-        const log = document.getElementById('activity-log');
-        if (log) {
-            const line = document.createElement('div');
-            line.className = 'activity-line';
-            const icon = this._activityIcon(activity);
-            line.innerHTML = `<span class="activity-icon">${icon}</span><span class="activity-text">${this._escapeHtml(activity)}</span>`;
-            log.appendChild(line);
-            // Keep only last 12 lines
-            while (log.children.length > 12) log.removeChild(log.firstChild);
-            // Scroll the whole message log to keep the indicator in view
-            this.messageLog.scrollTop = this.messageLog.scrollHeight;
-        }
+        this._showThinking(agent);
+        this._addActivityEntry({
+            agent,
+            activity,
+            elapsed: data.elapsed ?? this._lastElapsed ?? 0,
+            details: data.details || {},
+            hydrated: Boolean(data.hydrated),
+        });
 
         if (typeof activity === 'string' && activity.startsWith('⏳ Waiting for user')) {
             this._addMessageEntry({
@@ -2600,15 +2641,88 @@ class Dashboard {
         return '⚙';
     }
 
+    _addActivityEntry(data) {
+        if (!data?.agent || !data?.activity) return;
+        const entry = document.createElement('div');
+        entry.className = 'msg-entry msg-entry-activity';
+        const agentClass = AGENT_CSS_CLASS[data.agent] || 'agent-user';
+        const elapsed = Number(data.elapsed || 0);
+        const icon = this._activityIcon(data.activity);
+        const details = data.details && typeof data.details === 'object' ? data.details : {};
+        const destination = typeof details.to === 'string' ? details.to : '';
+        const content = typeof details.content === 'string' ? details.content : '';
+        const context = Array.isArray(details.context) ? details.context : [];
+        const detailRows = [];
+        if (destination) {
+            detailRows.push(`<div class="msg-context-item">to: ${this._escapeHtml(destination)}</div>`);
+        }
+        if (content) {
+            detailRows.push(`
+                <div class="msg-section-label">Payload</div>
+                <div class="msg-full-content">${this._escapeHtml(content)}</div>
+            `);
+        }
+        if (context.length) {
+            detailRows.push(`
+                <div class="msg-section-label">Context (${context.length} items)</div>
+                ${context.map((item, index) => `<div class="msg-context-item">[${index}] ${this._escapeHtml(item)}</div>`).join('')}
+            `);
+        }
+        entry.innerHTML = `
+            <div class="msg-header">
+                <span class="msg-time">${elapsed.toFixed(1)}s</span>
+                <span class="msg-type-badge msg-type-system">activity</span>
+                <span class="${agentClass}">${this._escapeHtml(data.agent)}</span>
+                ${destination ? `<span class="msg-arrow">&rarr;</span><span class="${AGENT_CSS_CLASS[destination] || 'agent-user'}">${this._escapeHtml(destination)}</span>` : ''}
+                <span class="msg-stage-pill msg-stage-activity">live</span>
+            </div>
+            <div class="msg-preview"><strong>${this._escapeHtml(data.agent)}</strong> ${this._escapeHtml(data.activity)}</div>
+            <div class="msg-expanded" style="display:block">
+                <div class="activity-line">
+                    <span class="activity-icon">${icon}</span>
+                    <span class="activity-text">${this._escapeHtml(data.activity)}</span>
+                </div>
+                ${detailRows.join('')}
+            </div>
+        `;
+        this._insertFeedEntry(entry, elapsed);
+    }
+
     _clearThinking(agentId) {
         const el = document.getElementById('thinking-indicator');
         if (el) el.remove();
-        if (this._thinkingAgent) {
-            this.graph.setNodeThinking(this._thinkingAgent, false);
+        if (!agentId) {
+            for (const id of this._thinkingAgents) this.graph.setNodeThinking(id, false);
+            this._thinkingAgents.clear();
+            return;
         }
-        if (!agentId || agentId === this._thinkingAgent) {
-            this._thinkingAgent = null;
+        if (this._thinkingAgents.has(agentId)) {
+            this.graph.setNodeThinking(agentId, false);
+            this._thinkingAgents.delete(agentId);
         }
+    }
+
+    _insertFeedEntry(entry, elapsed = 0) {
+        if (!this.messageLog || !entry) return;
+        const empty = this.messageLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        const sortMs = Math.round(Number(elapsed || 0) * 1000);
+        const sequence = this._feedSequence++;
+        entry.dataset.feedSortMs = String(sortMs);
+        entry.dataset.feedSeq = String(sequence);
+
+        const children = [...this.messageLog.children];
+        const insertionPoint = children.find((child) => {
+            const childSortMs = Number(child.dataset.feedSortMs);
+            const childSeq = Number(child.dataset.feedSeq);
+            if (!Number.isFinite(childSortMs) || !Number.isFinite(childSeq)) return false;
+            return childSortMs > sortMs || (childSortMs === sortMs && childSeq > sequence);
+        });
+
+        if (insertionPoint) this.messageLog.insertBefore(entry, insertionPoint);
+        else this.messageLog.appendChild(entry);
+        this.messageLog.scrollTop = this.messageLog.scrollHeight;
     }
 
     _complexityLevel(score) {

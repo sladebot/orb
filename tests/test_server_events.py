@@ -231,6 +231,7 @@ class TestDashboardBridge:
             "agent": "coder",
             "activity": "Calling claude-sonnet…",
             "elapsed": 1.2,
+            "details": {},
         }]
 
     async def test_budget_decrements_with_messages(self):

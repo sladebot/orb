@@ -262,7 +262,7 @@ class GraphRuntime:
     def _provider_model_enabled(cls, provider: str, model_id: str) -> bool:
         canonical_model_id = cls._canonical_model_id(provider, model_id)
         models = cls._provider_config_entry(provider).get("models") or {}
-        if not isinstance(models, dict):
+        if not isinstance(models, dict) or not models:
             return True
         entry = models.get(model_id)
         if entry is None and canonical_model_id != model_id:
@@ -329,52 +329,55 @@ class GraphRuntime:
         return filtered
 
     @classmethod
-    def _provider_default_model(cls, provider: str, key: str, fallback: str) -> str:
+    def _provider_default_model(cls, provider: str, key: str) -> str:
         defaults = cls._provider_config_entry(provider).get("default_models") or {}
         model_id = defaults.get(key) if isinstance(defaults, dict) else None
-        candidate = cls._canonical_model_id(provider, str(model_id) if model_id else fallback)
-        if cls._provider_model_enabled(provider, candidate):
+        candidate = cls._canonical_model_id(provider, str(model_id) if model_id else "")
+        if candidate and cls._provider_model_enabled(provider, candidate):
             return candidate
-
-        token_hints = {
-            "cloud_lite": ("haiku",),
-            "cloud_fast": ("sonnet", "mini", "gpt-5.4"),
-            "cloud_strong": ("opus", "gpt-5.4"),
-            "local_small": ("9b",),
-            "local_medium": ("27b",),
-            "local_large": ("27b",),
-        }
         catalog = cls._provider_catalog(provider)
-        for token in token_hints.get(key, ()):
-            picked = next(
-                (str(item["id"]) for item in catalog if token in str(item.get("id", "")).lower()),
-                None,
-            )
-            if picked:
-                return picked
-
-        known_models = cls._provider_known_models(provider)
-        for token in token_hints.get(key, ()):
-            picked = next(
-                (
-                    model_id for model_id in known_models
-                    if token in model_id.lower() and cls._provider_model_enabled(provider, model_id)
-                ),
-                None,
-            )
-            if picked:
-                return picked
-
-        if cls._provider_model_enabled(provider, fallback):
-            return fallback
         first_enabled = next((str(item["id"]) for item in catalog), None)
         if first_enabled:
             return first_enabled
+        known_models = cls._provider_known_models(provider)
         first_known_enabled = next(
             (model_id for model_id in known_models if cls._provider_model_enabled(provider, model_id)),
             None,
         )
-        return first_known_enabled or fallback
+        return first_known_enabled or ""
+
+    @classmethod
+    def _provider_configured_model_entries(cls, provider: str, *, local: bool) -> list[dict]:
+        catalog = cls._provider_catalog(provider)
+        if catalog:
+            return [
+                {
+                    "id": str(item["id"]),
+                    "label": str(item.get("label") or item["id"]),
+                    "local": local,
+                }
+                for item in catalog
+            ]
+
+        entry = cls._provider_config_entry(provider)
+        defaults = entry.get("default_models") or {}
+        configured: list[dict] = []
+        seen: set[str] = set()
+        if isinstance(defaults, dict):
+            for model_id in defaults.values():
+                canonical = cls._canonical_model_id(provider, str(model_id or ""))
+                if not canonical or canonical in seen or not cls._provider_model_enabled(provider, canonical):
+                    continue
+                configured.append({"id": canonical, "label": canonical, "local": local})
+                seen.add(canonical)
+        if configured:
+            return configured
+
+        return [
+            {"id": model_id, "label": model_id, "local": local}
+            for model_id in cls._provider_known_models(provider)
+            if model_id and cls._provider_model_enabled(provider, model_id)
+        ]
 
     @staticmethod
     def _anthropic_label_for_model(model_id: str) -> str:
@@ -1167,6 +1170,14 @@ class GraphRuntime:
             query,
             default_target="coordinator",
         )
+        logger.info(
+            "run start session=%s requested_topology=%s requested_target=%s model_pin=%s query=%s",
+            self._conversation_session.session_id,
+            topology,
+            requested_target,
+            model_pin,
+            query[:240].replace("\n", " "),
+        )
         self.state.run_query = query
         self._sync_session_state()
         self._last_trace.record_stage_start("planning", message="run planning started")
@@ -1255,9 +1266,25 @@ class GraphRuntime:
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
         self.state.routing = routing_payload
+        logger.info(
+            "run planning session=%s topology=%s task_type=%s complexity=%s classifier_provider=%s classifier_model=%s",
+            self._conversation_session.session_id,
+            selected_topology,
+            predicted.get("task_type") or "",
+            overall_complexity,
+            predicted.get("classifier_provider") or "",
+            predicted.get("classifier_model") or "",
+        )
+        logger.info(
+            "run allocation session=%s models=%s",
+            self._conversation_session.session_id,
+            ", ".join(f"{aid}={cfg.provider}:{cfg.model_id}" for aid, cfg in agent_model_map.items()),
+        )
         self._persist_run_trace()
         self._persist_dashboard_snapshot()
         self._clear_dashboard_file_changes()
+        planning_init = self.current_init_event(session_id=self._conversation_session.session_id) | {"run_active": True}
+        await self._broadcast(json.dumps(planning_init))
         self._run_task = asyncio.create_task(
             self._run_orchestrator(
                 query,
@@ -1279,10 +1306,12 @@ class GraphRuntime:
             "session_id": self._conversation_session.session_id,
             "session_generation": self._conversation_session.generation,
             "session_turn": self._conversation_session.user_turn_count(),
+            "init": planning_init,
         }
 
     async def stop_run(self) -> dict:
         if self.running:
+            logger.info("run stop session=%s", self._conversation_session.session_id)
             if self._last_trace is not None:
                 self._last_trace.record_human_override(
                     action="stop_run",
@@ -1309,6 +1338,7 @@ class GraphRuntime:
         self._persist_session()
         self._sync_session_state()
         self._persist_dashboard_snapshot(run_active=False)
+        logger.info("session new session=%s", self._conversation_session.session_id)
         return 200, {
             "ok": True,
             "session_id": self._conversation_session.session_id,
@@ -1318,74 +1348,46 @@ class GraphRuntime:
         }
 
     def models_payload(self) -> dict:
-        from orb.llm.types import ANTHROPIC_MODEL_LABELS, ANTHROPIC_PROVIDER, ANTHROPIC_MODELS
+        from orb.llm.types import ANTHROPIC_PROVIDER
 
         models = [{"id": "auto", "label": "Auto-select", "provider": "auto", "local": False}]
         if "anthropic" in self._providers:
-            configured = self._provider_catalog("anthropic")
-            if configured:
-                for item in configured:
-                    models.append({
-                        "id": item["id"],
-                        "label": item.get("label") or item["id"],
-                        "provider": ANTHROPIC_PROVIDER,
-                        "local": False,
-                    })
-            else:
-                for config in ANTHROPIC_MODELS.values():
-                    if not self._provider_model_enabled(ANTHROPIC_PROVIDER, config.model_id):
-                        continue
-                    models.append({
-                        "id": config.model_id,
-                        "label": ANTHROPIC_MODEL_LABELS[config.model_id],
-                        "provider": ANTHROPIC_PROVIDER,
-                        "local": False,
-                    })
-        if "openai-codex" in self._providers:
-            configured = self._provider_catalog("openai-codex")
-            if configured:
-                for item in configured:
-                    models.append({
-                        "id": item["id"],
-                        "label": item.get("label") or item["id"],
-                        "provider": "openai-codex",
-                        "local": False,
-                    })
-            else:
-                if self._provider_model_enabled("openai-codex", "gpt-5.4-mini"):
-                    models.append({"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "provider": "openai-codex", "local": False})
-                if self._provider_model_enabled("openai-codex", "gpt-5.4"):
-                    models.append({"id": "gpt-5.4", "label": "GPT-5.4", "provider": "openai-codex", "local": False})
-        if "ollama" in self._providers:
-            configured = self._provider_catalog("ollama")
-            if configured:
-                for item in configured:
-                    models.append({
-                        "id": item["id"],
-                        "label": item.get("label") or item["id"],
-                        "provider": "ollama",
-                        "local": True,
-                    })
-            else:
-                if self._provider_model_enabled("ollama", "qwen3.5:9b"):
-                    models.append({"id": "qwen3.5:9b", "label": "Qwen 9b", "provider": "ollama", "local": True})
-                if self._provider_model_enabled("ollama", "qwen3.5:27b"):
-                    models.append({"id": "qwen3.5:27b", "label": "Qwen 27b", "provider": "ollama", "local": True})
-        if "vmlx" in self._providers:
-            configured = self._provider_catalog("vmlx")
-            for item in configured:
+            for item in self._provider_configured_model_entries("anthropic", local=False):
                 models.append({
                     "id": item["id"],
-                    "label": item.get("label") or item["id"],
+                    "label": item["label"],
+                    "provider": ANTHROPIC_PROVIDER,
+                    "local": False,
+                })
+        if "openai-codex" in self._providers:
+            for item in self._provider_configured_model_entries("openai-codex", local=False):
+                models.append({
+                    "id": item["id"],
+                    "label": item["label"],
+                    "provider": "openai-codex",
+                    "local": False,
+                })
+        if "ollama" in self._providers:
+            for item in self._provider_configured_model_entries("ollama", local=True):
+                models.append({
+                    "id": item["id"],
+                    "label": item["label"],
+                    "provider": "ollama",
+                    "local": True,
+                })
+        if "vmlx" in self._providers:
+            for item in self._provider_configured_model_entries("vmlx", local=True):
+                models.append({
+                    "id": item["id"],
+                    "label": item["label"],
                     "provider": "vmlx",
                     "local": True,
                 })
         if "omlx" in self._providers:
-            configured = self._provider_catalog("omlx")
-            for item in configured:
+            for item in self._provider_configured_model_entries("omlx", local=True):
                 models.append({
                     "id": item["id"],
-                    "label": item.get("label") or item["id"],
+                    "label": item["label"],
                     "provider": "omlx",
                     "local": True,
                 })
@@ -1520,10 +1522,7 @@ class GraphRuntime:
         topology_id: str = "triad",
     ) -> dict:
         from orb.llm.types import (
-            ANTHROPIC_HAIKU_MODEL,
-            ANTHROPIC_OPUS_MODEL,
             ANTHROPIC_PROVIDER,
-            ANTHROPIC_SONNET_MODEL,
             ModelConfig,
             ModelTier,
             OPENAI_CODEX_PROVIDER,
@@ -1564,16 +1563,16 @@ class GraphRuntime:
             logger.warning("Forced provider '%s' not available; falling back to auto", force_provider)
             force_provider = None
 
-        anthropic_haiku = self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL)
-        anthropic_sonnet = self._provider_default_model("anthropic", "cloud_fast", ANTHROPIC_SONNET_MODEL)
-        anthropic_opus = self._provider_default_model("anthropic", "cloud_strong", ANTHROPIC_OPUS_MODEL)
-        codex_default = self._provider_default_model("openai-codex", "cloud_fast", "gpt-5.4")
-        ollama_small = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
-        ollama_medium = self._provider_default_model("ollama", "local_medium", "qwen3.5:27b")
-        vmlx_small = self._provider_default_model("vmlx", "local_small", "qwen")
-        vmlx_medium = self._provider_default_model("vmlx", "local_medium", "qwen")
-        omlx_small = self._provider_default_model("omlx", "local_small", "qwen")
-        omlx_medium = self._provider_default_model("omlx", "local_medium", "qwen")
+        anthropic_haiku = self._provider_default_model("anthropic", "cloud_lite")
+        anthropic_sonnet = self._provider_default_model("anthropic", "cloud_fast")
+        anthropic_opus = self._provider_default_model("anthropic", "cloud_strong")
+        codex_default = self._provider_default_model("openai-codex", "cloud_fast")
+        ollama_small = self._provider_default_model("ollama", "local_small")
+        ollama_medium = self._provider_default_model("ollama", "local_medium")
+        vmlx_small = self._provider_default_model("vmlx", "local_small")
+        vmlx_medium = self._provider_default_model("vmlx", "local_medium")
+        omlx_small = self._provider_default_model("omlx", "local_small")
+        omlx_medium = self._provider_default_model("omlx", "local_medium")
         use_ant = has_anthropic and force_provider in (None, "anthropic")
         use_codex = has_codex and force_provider in (None, "openai-codex")
         q9 = local(OLLAMA_PROVIDER, ModelTier.LOCAL_SMALL, ollama_small) if has_ollama and force_provider in (None, "ollama") else None
@@ -1693,40 +1692,40 @@ class GraphRuntime:
         return result
 
     def _allocator_model_config(self):
-        from orb.llm.types import ANTHROPIC_SONNET_MODEL, ModelTier, ModelConfig
+        from orb.llm.types import ModelTier, ModelConfig
 
         if "openai-codex" in self._providers:
-            model_id = self._provider_default_model("openai-codex", "cloud_fast", "gpt-5.4")
+            model_id = self._provider_default_model("openai-codex", "cloud_fast")
             if self._provider_model_enabled("openai-codex", model_id):
                 return ModelConfig(ModelTier.CLOUD_FAST, model_id, "openai-codex")
         if "anthropic" in self._providers:
-            model_id = self._provider_default_model("anthropic", "cloud_fast", ANTHROPIC_SONNET_MODEL)
+            model_id = self._provider_default_model("anthropic", "cloud_fast")
             if self._provider_model_enabled("anthropic", model_id):
                 return ModelConfig(ModelTier.CLOUD_FAST, model_id, "anthropic")
         return None
 
     def _planner_model_config(self):
-        from orb.llm.types import ANTHROPIC_HAIKU_MODEL, DEFAULT_MODELS, ModelConfig, ModelTier
+        from orb.llm.types import DEFAULT_MODELS, ModelConfig, ModelTier
 
         candidates: list[tuple[int, int, ModelConfig]] = []
         if "omlx" in self._providers:
-            model_id = self._provider_default_model("omlx", "local_small", "qwen")
+            model_id = self._provider_default_model("omlx", "local_small")
             if self._provider_model_enabled("omlx", model_id):
                 candidates.append((0, 0, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "omlx")))
         if "vmlx" in self._providers:
-            model_id = self._provider_default_model("vmlx", "local_small", "qwen")
+            model_id = self._provider_default_model("vmlx", "local_small")
             if self._provider_model_enabled("vmlx", model_id):
                 candidates.append((0, 1, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")))
         if "ollama" in self._providers:
-            model_id = self._provider_default_model("ollama", "local_small", "qwen3.5:9b")
+            model_id = self._provider_default_model("ollama", "local_small")
             if self._provider_model_enabled("ollama", model_id):
                 candidates.append((0, 2, ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")))
         if "openai-codex" in self._providers:
-            model_id = self._provider_default_model("openai-codex", "cloud_lite", "gpt-5.4-mini")
+            model_id = self._provider_default_model("openai-codex", "cloud_lite")
             if self._provider_model_enabled("openai-codex", model_id):
                 candidates.append((1, 0, ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")))
         if "anthropic" in self._providers:
-            model_id = self._provider_default_model("anthropic", "cloud_lite", ANTHROPIC_HAIKU_MODEL)
+            model_id = self._provider_default_model("anthropic", "cloud_lite")
             if self._provider_model_enabled("anthropic", model_id):
                 candidates.append((1, 1, ModelConfig(ModelTier.CLOUD_LITE, model_id, "anthropic")))
         if "openai" in self._providers:
@@ -1971,16 +1970,39 @@ class GraphRuntime:
 
         orchestrator._on_agent_complete = wrapped_on_complete
 
-        async def on_agent_activity(agent_id: str, activity: str) -> None:
+        async def on_agent_activity(agent_id: str, activity: str, details: dict | None = None) -> None:
+            elapsed = round(time.time() - self.state.start_time, 2)
             self.state.activity_events.append(ActivityRecord(
                 agent=agent_id,
                 activity=activity,
-                elapsed=round(time.time() - self.state.start_time, 2),
+                elapsed=elapsed,
+                details=dict(details or {}),
             ))
             if len(self.state.activity_events) > 100:
                 self.state.activity_events = self.state.activity_events[-100:]
             self._persist_dashboard_snapshot()
-            await self._broadcast(json.dumps({"type": "agent_activity", "agent": agent_id, "activity": activity}))
+            detail_summary = ""
+            if details:
+                target = str(details.get("to") or "")
+                payload = str(details.get("content") or details.get("payload") or "")
+                if target:
+                    detail_summary = f" to={target}"
+                if payload:
+                    detail_summary += f" payload={payload[:160].replace(chr(10), ' ')}"
+            logger.info(
+                "dashboard event=agent_activity agent=%s elapsed=%.2fs activity=%s%s",
+                agent_id,
+                elapsed,
+                activity,
+                detail_summary,
+            )
+            await self._broadcast(json.dumps({
+                "type": "agent_activity",
+                "agent": agent_id,
+                "activity": activity,
+                "elapsed": elapsed,
+                "details": dict(details or {}),
+            }))
 
         async def on_agent_heartbeat(agent_id: str, payload: dict) -> None:
             await bridge.on_agent_heartbeat(agent_id, payload)
@@ -2081,6 +2103,14 @@ class GraphRuntime:
             self.state.session_turn = self._conversation_session.user_turn_count()
             self._persist_dashboard_snapshot(run_active=False)
             if final_result:
+                logger.info(
+                    "run complete session=%s agent=%s elapsed=%.2fs routed=%s result=%s",
+                    self._conversation_session.session_id,
+                    final_agent_id or "",
+                    elapsed,
+                    self.state.message_count,
+                    final_result[:240].replace("\n", " "),
+                )
                 await self._broadcast(json.dumps({
                     "type": "run_complete",
                     "result": final_result,

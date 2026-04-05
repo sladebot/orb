@@ -80,7 +80,8 @@ async def compact_history(
 
 
 async def _llm_summary(prompt: str, providers: dict) -> str:
-    from ..llm.types import CompletionRequest, ModelConfig, ModelTier, DEFAULT_MODELS, ANTHROPIC_MODELS, CODEX_MODELS
+    from ..cli.config import provider_default_model
+    from ..llm.types import CompletionRequest, ModelConfig, ModelTier
 
     provider = (
         providers.get("anthropic")
@@ -97,15 +98,35 @@ async def _llm_summary(prompt: str, providers: dict) -> str:
     has_codex = "openai-codex" in providers
 
     if has_anthropic:
-        model_config = ANTHROPIC_MODELS.get(ModelTier.CLOUD_LITE) or ANTHROPIC_MODELS[ModelTier.CLOUD_FAST]
+        model_id = provider_default_model("anthropic", "cloud_lite") or provider_default_model("anthropic", "cloud_fast")
+        if not model_id:
+            logger.warning("compaction: no configured anthropic model, using fallback summary")
+            return ""
+        model_config = ModelConfig(ModelTier.CLOUD_LITE, model_id, "anthropic")
     elif has_codex:
-        model_config = CODEX_MODELS.get(ModelTier.CLOUD_LITE) or CODEX_MODELS[ModelTier.CLOUD_FAST]
+        model_id = provider_default_model("openai-codex", "cloud_lite") or provider_default_model("openai-codex", "cloud_fast")
+        if not model_id:
+            logger.warning("compaction: no configured openai-codex model, using fallback summary")
+            return ""
+        model_config = ModelConfig(ModelTier.CLOUD_LITE, model_id, "openai-codex")
     elif "ollama" in providers:
-        model_config = DEFAULT_MODELS.get(ModelTier.LOCAL_SMALL) or DEFAULT_MODELS[ModelTier.LOCAL_MEDIUM]
+        model_id = provider_default_model("ollama", "local_small") or provider_default_model("ollama", "local_medium")
+        if not model_id:
+            logger.warning("compaction: no configured ollama model, using fallback summary")
+            return ""
+        model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "ollama")
     elif "omlx" in providers:
-        model_config = ModelConfig(ModelTier.LOCAL_SMALL, "qwen", "omlx")
+        model_id = provider_default_model("omlx", "local_small")
+        if not model_id:
+            logger.warning("compaction: no configured omlx model, using fallback summary")
+            return ""
+        model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "omlx")
     else:
-        model_config = ModelConfig(ModelTier.LOCAL_SMALL, "qwen", "vmlx")
+        model_id = provider_default_model("vmlx", "local_small")
+        if not model_id:
+            logger.warning("compaction: no configured vmlx model, using fallback summary")
+            return ""
+        model_config = ModelConfig(ModelTier.LOCAL_SMALL, model_id, "vmlx")
 
     request = CompletionRequest(
         messages=[{"role": "user", "content": prompt}],
