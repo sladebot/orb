@@ -18,6 +18,7 @@ It is built around a simple idea: treat coordination as a runtime problem, not j
 - Classifies tasks before execution and records the chosen topology, routing reason, and classifier model
 - Assigns models per node instead of forcing one model across the whole run
 - Exposes a live TUI and dashboard backed by the same daemon
+- Streams incremental dashboard activity as nodes work, including node-local activity cards, message flow, and payload/context details for `send_message` events
 - Persists session-aware traces for replay, inspection, and future routing work
 - Supports local and cloud providers, including `vmlx`, `openai-codex`, `ollama`, and `anthropic`
 - Stores GraphRAG memory in Chroma-backed topology/cluster stores
@@ -34,6 +35,8 @@ Out of the box, Orb currently defaults to:
 This default mix gives Orb one local provider path and one cloud provider path without requiring all providers to be configured.
 
 Provider settings live in `~/.orb/config.json`.
+
+Orb now expects provider and model selection to come from config and provider catalog data. Runtime paths should not hardcode model IDs or inline fallback defaults.
 
 ## Install
 
@@ -133,12 +136,18 @@ Stop the daemon:
 orb daemon stop
 ```
 
-By default, the daemon listens on `http://127.0.0.1:8080`.
+By default, run the daemon on `http://0.0.0.0:8080`.
+
+Recommended startup:
+
+```bash
+orb daemon start --host 0.0.0.0 --port 8080
+```
 
 If you want a different port:
 
 ```bash
-orb daemon start --port 5000
+orb daemon start --host 0.0.0.0 --port 5000
 orb tui --port 5000
 orb dashboard --connect http://127.0.0.1:5000
 ```
@@ -237,6 +246,27 @@ This allocation considers:
 
 The dashboard surfaces those planned assignments before the run and the active model IDs as the run progresses.
 
+## Live Dashboard Behavior
+
+The dashboard is event-driven and is intended to show the run as it happens.
+
+It now:
+
+- renders planning state as soon as topology and per-node model allocation are known
+- keeps activity feed cards ordered by event elapsed time
+- shows which node each activity card came from
+- preserves live websocket updates instead of replacing them with a later bulk snapshot
+- reattaches more reliably after refresh to the current run/session
+- shows structured activity details in both the main feed and node detail panel
+
+For `send_message` activity cards, the dashboard can show:
+
+- destination node
+- payload content
+- context slice
+
+The daemon also writes more descriptive run and dashboard event logs to `~/.orb/run.log`.
+
 ## Providers and Model Selection
 
 Orb supports four provider families:
@@ -253,6 +283,14 @@ orb models
 ```
 
 Provider selection and model defaults are controlled in `~/.orb/config.json`.
+
+The runtime resolves provider/model choices from:
+
+- configured `default_models`
+- enabled catalog entries refreshed for each provider
+- enabled configured models
+
+If no valid configured model exists for a selected provider/tier, Orb should fail explicitly instead of silently choosing a hardcoded fallback model.
 
 Examples:
 
