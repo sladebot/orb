@@ -11,10 +11,10 @@ import logging
 
 from ._format import to_openai_messages
 from .client import LLMClient
+from ..cli.config import provider_default_model
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
-DEFAULT_MODEL = "qwen"
 _TIMEOUT = 600.0
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,12 @@ class VmlxProvider(LLMClient):
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         config = request.model_config
         messages = to_openai_messages(request.messages, request.system)
+        model_id = config.model_id if config else provider_default_model("vmlx", "local_small")
+        if not model_id:
+            raise RuntimeError("No configured VMLX model available")
 
         payload: dict = {
-            "model": config.model_id if config else DEFAULT_MODEL,
+            "model": model_id,
             "messages": messages,
             "max_tokens": config.max_tokens if config else 4096,
             "temperature": config.temperature if config else 0.7,
