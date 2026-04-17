@@ -4,6 +4,12 @@ Orb is a multi-agent coding runtime with a daemon, terminal UI, browser dashboar
 
 It is built around a simple idea: treat coordination as a runtime problem, not just a prompt problem. Orb chooses a topology, classifies the task, assigns models per node, runs the graph, and records enough telemetry to inspect what happened afterward.
 
+![Orb dashboard](docs/orb-dashboard.png)
+
+The browser dashboard shows run output, the live agent topology, and the per-node activity stream side by side. Agents render as rounded-pill chips with a role glyph, the active model, and a role-colored status dot that pulses while the node is working.
+
+![Agent topology panel](docs/orb-dashboard-graph.png)
+
 ![Orb TUI](docs/orb-tui.png)
 
 ![Triad demo](demo/orb-triad-demo.gif)
