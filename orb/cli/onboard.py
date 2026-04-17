@@ -272,32 +272,63 @@ def _toggle_models(
 
 # ── tier defaults ────────────────────────────────────────────────────────────
 
+def _resolve_model_choice(raw: str, enabled_ids: list[str], fallback: str) -> str:
+    """Parse a user entry as either a model name or 1-based index into
+    `enabled_ids`; fall back to `fallback` if neither matches."""
+    if raw in enabled_ids:
+        return raw
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(enabled_ids):
+            return enabled_ids[idx]
+    return fallback
+
+
 def _pick_defaults(
     provider: str,
     catalog: list[dict[str, Any]],
     current_defaults: dict[str, Any],
 ) -> dict[str, str]:
     meta = PROVIDER_META[provider]
+    tiers = list(meta["tiers"])
     enabled_ids = [str(item.get("id") or "") for item in catalog if item.get("id")]
     if not enabled_ids:
         return dict(current_defaults)
 
-    print("\nPick defaults per tier (Enter to keep, name or number to change):")
-    print(f"  Available: {', '.join(enabled_ids)}")
-
     new_defaults = {str(k): str(v) for k, v in (current_defaults or {}).items() if v}
-    for tier in meta["tiers"]:
+
+    # Enumerated model menu — same numbering used for every prompt below so
+    # users can re-type the same number across tiers without scrolling.
+    print("\nPick defaults per tier.")
+    print("  Available models:")
+    id_width = max(len(mid) for mid in enabled_ids)
+    for i, mid in enumerate(enabled_ids, 1):
+        print(f"    {i:>2}. {mid:<{id_width}}")
+
+    tier_list = ", ".join(tiers)
+    use_same = _prompt(
+        f"\n  Use the same model for all tiers ({tier_list})? [y/N]",
+        default="n",
+    ).lower()
+
+    if use_same in {"y", "yes"}:
+        # One prompt, applied to every tier.
+        previous = next(
+            (new_defaults.get(t) for t in tiers if new_defaults.get(t) in enabled_ids),
+            enabled_ids[0],
+        )
+        raw = _prompt("  Model for every tier", default=previous)
+        pick = _resolve_model_choice(raw, enabled_ids, previous)
+        for tier in tiers:
+            new_defaults[tier] = pick
+        return new_defaults
+
+    # Per-tier prompts; each accepts a model name, 1-based number, or Enter
+    # to keep the suggestion.
+    for tier in tiers:
         suggested = new_defaults.get(tier) if new_defaults.get(tier) in enabled_ids else enabled_ids[0]
         raw = _prompt(f"  {tier}", default=suggested)
-        if raw in enabled_ids:
-            new_defaults[tier] = raw
-            continue
-        if raw.isdigit():
-            idx = int(raw) - 1
-            if 0 <= idx < len(enabled_ids):
-                new_defaults[tier] = enabled_ids[idx]
-                continue
-        new_defaults[tier] = suggested
+        new_defaults[tier] = _resolve_model_choice(raw, enabled_ids, suggested)
     return new_defaults
 
 

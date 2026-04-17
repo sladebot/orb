@@ -105,7 +105,8 @@ def test_toggle_models_all_none_shortcuts(monkeypatch):
 # ── _pick_defaults ───────────────────────────────────────────────────────────
 
 def test_pick_defaults_keeps_on_empty(monkeypatch):
-    _inputs(monkeypatch, ["", "", ""])
+    # Four prompts now: the "same for all?" y/n, plus three tiers.
+    _inputs(monkeypatch, ["n", "", "", ""])
     catalog = _catalog(["m1", "m2"])
     current = {"local_small": "m1", "local_medium": "m2", "local_large": "m2"}
     result = onboard_mod._pick_defaults("ollama", catalog, current)
@@ -113,7 +114,7 @@ def test_pick_defaults_keeps_on_empty(monkeypatch):
 
 
 def test_pick_defaults_overrides_by_name(monkeypatch):
-    _inputs(monkeypatch, ["m2", "", ""])
+    _inputs(monkeypatch, ["n", "m2", "", ""])
     catalog = _catalog(["m1", "m2"])
     current = {"local_small": "m1", "local_medium": "m2", "local_large": "m2"}
     result = onboard_mod._pick_defaults("ollama", catalog, current)
@@ -121,11 +122,29 @@ def test_pick_defaults_overrides_by_name(monkeypatch):
 
 
 def test_pick_defaults_overrides_by_number(monkeypatch):
-    _inputs(monkeypatch, ["", "1", ""])
+    _inputs(monkeypatch, ["n", "", "1", ""])
     catalog = _catalog(["m1", "m2"])
     current = {"local_small": "m1", "local_medium": "m2", "local_large": "m2"}
     result = onboard_mod._pick_defaults("ollama", catalog, current)
     assert result["local_medium"] == "m1"
+
+
+def test_pick_defaults_same_for_all_applies_one_pick_to_every_tier(monkeypatch):
+    _inputs(monkeypatch, ["y", "2"])   # "use same? yes" → pick #2 once
+    catalog = _catalog(["m1", "m2", "m3"])
+    current = {"local_small": "m1", "local_medium": "m1", "local_large": "m1"}
+    result = onboard_mod._pick_defaults("ollama", catalog, current)
+    assert result["local_small"] == "m2"
+    assert result["local_medium"] == "m2"
+    assert result["local_large"] == "m2"
+
+
+def test_pick_defaults_same_for_all_by_name(monkeypatch):
+    _inputs(monkeypatch, ["yes", "m3"])
+    catalog = _catalog(["m1", "m2", "m3"])
+    current = {"local_small": "m1", "local_medium": "m1", "local_large": "m1"}
+    result = onboard_mod._pick_defaults("ollama", catalog, current)
+    assert set(result.values()) == {"m3"}
 
 
 # ── _probe_local / reachability ──────────────────────────────────────────────
@@ -223,8 +242,9 @@ async def test_configure_provider_saves_catalog_and_defaults(isolated_config, mo
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
     isolated_config.write_text(json.dumps(cfg))
 
-    # Toggle model #3 off, confirm, then keep default picks.
-    _inputs(monkeypatch, ["3", "", "", "", ""])
+    # Toggle model #3 off, confirm, answer "no" to same-for-all, then keep
+    # each tier default.
+    _inputs(monkeypatch, ["3", "", "n", "", "", ""])
     monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (True, "http://x/y"))
 
     with patch.object(onboard_mod, "_refresh_catalog", new_callable=AsyncMock):
