@@ -18,27 +18,27 @@
                     <span class="pulse-indicator" aria-hidden="true"></span>
                 </div>
                 <div id="brand-copy">
-                    <span id="brand-subtitle">Command Center</span>
-                    <span id="brand-caption">Digital Observer runtime for autonomous graph operations</span>
+                    <span id="brand-subtitle">Node Dashboard</span>
+                    <span id="brand-caption">Live agent structure and execution state</span>
                 </div>
             </div>
 
             <div id="stats-group">
-                <div class="stat">
+                <div class="stat stat-primary">
                     <span class="stat-label">Messages</span>
                     <span id="stat-messages" class="stat-value">0</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-label">Budget</span>
-                    <span id="stat-budget" class="stat-value">200</span>
+                    <span class="stat-label">Status</span>
+                    <span id="stat-status" class="stat-value status-waiting">Waiting</span>
                 </div>
                 <div class="stat">
                     <span class="stat-label">Elapsed</span>
                     <span id="stat-elapsed" class="stat-value">0.0s</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-label">Status</span>
-                    <span id="stat-status" class="stat-value status-waiting">Waiting</span>
+                    <span class="stat-label">Budget</span>
+                    <span id="stat-budget" class="stat-value">200</span>
                 </div>
                 <div class="stat">
                     <span class="stat-label">Topology</span>
@@ -50,14 +50,16 @@
                 </div>
             </div>
 
-            <div id="connection-pill">
-                <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
-                <span id="connection-label">Daemon Offline</span>
+            <div id="header-actions">
+                <div id="connection-pill">
+                    <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
+                    <span id="connection-label">Daemon Offline</span>
+                </div>
+                <button id="new-session-button" type="button" title="Start a new session">New Session</button>
+                <button id="traces-button" type="button" title="Browse traces" aria-label="Browse traces">Traces</button>
+                <button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
+                <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
             </div>
-            <button id="new-session-button" type="button" title="Start a new session">New Session</button>
-            <button id="traces-button" type="button" title="Browse traces" aria-label="Browse traces">Traces</button>
-            <button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
-            <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
         </header>
 
         <main id="main-layout">
@@ -142,14 +144,21 @@
 
             <section id="graph-panel">
                 <div id="graph-panel-overlay-top">
-                    <div id="graph-hud">
-                        <div class="graph-hud-pill">
-                            <span class="graph-hud-label">Topology</span>
-                            <span class="graph-hud-value" id="hero-topology-label">Auto</span>
+                    <div id="graph-board-header" class="glass-panel">
+                        <div id="graph-board-copy">
+                            <span class="graph-board-kicker">Org View</span>
+                            <h2 id="graph-board-title">Agent Topology</h2>
+                            <p id="graph-board-caption">A quiet view of the active network.</p>
                         </div>
-                        <div class="graph-hud-pill">
-                            <span class="graph-hud-label">Runtime</span>
-                            <span class="graph-hud-value" id="hero-status-label">Waiting</span>
+                        <div id="graph-hud">
+                            <div class="graph-hud-pill">
+                                <span class="graph-hud-label">Topology</span>
+                                <span class="graph-hud-value" id="hero-topology-label">Auto</span>
+                            </div>
+                            <div class="graph-hud-pill">
+                                <span class="graph-hud-label">Runtime</span>
+                                <span class="graph-hud-value" id="hero-status-label">Waiting</span>
+                            </div>
                         </div>
                     </div>
                 </div>

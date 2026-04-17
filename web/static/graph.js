@@ -13,38 +13,38 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const NODE_W = 136;
-const NODE_H = 56;
-const CORE_NODE_W = 154;
-const CORE_NODE_H = 64;
-const NODE_RADIUS = 16;
-const PARTICLE_DURATION = 900; // ms
+const NODE_W = 156;
+const NODE_H = 44;
+const CORE_NODE_W = 168;
+const CORE_NODE_H = 46;
+const NODE_RADIUS = 14;          // pill-chip corner radius
+const PARTICLE_DURATION = 900;   // ms
 
 const AGENT_COLORS = {
-    coordinator: '#acc7ff',
-    coder:       '#7cb7ff',
-    reviewer:    '#ffd37f',
-    reviewer_a:  '#ffd37f',
-    reviewer_b:  '#ffb47d',
-    tester:      '#7de2a7',
-    user:        '#cdbdff',
+    coordinator: '#94bfff',
+    coder:       '#79a9ff',
+    reviewer:    '#f0c982',
+    reviewer_a:  '#f0c982',
+    reviewer_b:  '#d8a86b',
+    tester:      '#86d8ab',
+    user:        '#b6d0c2',
 };
 
-const FALLBACK_COLORS = ['#cdbdff', '#acc7ff', '#ffd37f', '#7de2a7'];
+const FALLBACK_COLORS = ['#b6d0c2', '#94bfff', '#f0c982', '#86d8ab'];
 
 const STATUS_COLORS = {
-    idle:      '#8e97a8',
-    running:   '#acc7ff',
-    completed: '#7de2a7',
-    error:     '#ffb4ab',
+    idle:      '#8796a7',
+    running:   '#94bfff',
+    completed: '#86d8ab',
+    error:     '#f3afa7',
 };
 
 const STATUS_BADGE = {
-    idle:      { bg: 'rgba(193,198,214,0.12)', fg: '#c1c6d6' },
-    running:   { bg: 'rgba(172,199,255,0.14)', fg: '#acc7ff' },
-    completed: { bg: 'rgba(125,226,167,0.16)', fg: '#7de2a7' },
-    error:     { bg: 'rgba(255,180,171,0.16)', fg: '#ffb4ab' },
-    thinking:  { bg: 'rgba(205,189,255,0.14)', fg: '#cdbdff' },
+    idle:      { bg: 'rgba(196,206,217,0.12)', fg: '#c4ced9' },
+    running:   { bg: 'rgba(148,191,255,0.14)', fg: '#94bfff' },
+    completed: { bg: 'rgba(134,216,171,0.16)', fg: '#86d8ab' },
+    error:     { bg: 'rgba(243,175,167,0.16)', fg: '#f3afa7' },
+    thinking:  { bg: 'rgba(182,208,194,0.14)', fg: '#b6d0c2' },
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -132,6 +132,140 @@ function roundRect(ctx, x, y, w, h, r) {
     ctx.lineTo(x,     y + r);
     ctx.arcTo(x,     y,     x + r, y,         r);
     ctx.closePath();
+}
+
+// Role glyphs drawn line-art style inside the chip.
+// Each glyph is drawn in an 18×18 box; caller translates to desired anchor.
+const ROLE_GLYPHS = {
+    coordinator(ctx) {
+        // Capital "A" — triangle silhouette with horizontal crossbar
+        ctx.beginPath();
+        ctx.moveTo(9, 2.5);
+        ctx.lineTo(15.5, 15.5);
+        ctx.lineTo(2.5, 15.5);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(5.5, 11);
+        ctx.lineTo(12.5, 11);
+        ctx.stroke();
+    },
+    coder(ctx) {
+        // Curly braces { }
+        ctx.beginPath();
+        ctx.moveTo(6, 3);
+        ctx.bezierCurveTo(4, 3, 4, 6, 4, 7.5);
+        ctx.bezierCurveTo(4, 8.5, 3, 9, 3, 9);
+        ctx.bezierCurveTo(3, 9, 4, 9.5, 4, 10.5);
+        ctx.bezierCurveTo(4, 12, 4, 15, 6, 15);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(12, 3);
+        ctx.bezierCurveTo(14, 3, 14, 6, 14, 7.5);
+        ctx.bezierCurveTo(14, 8.5, 15, 9, 15, 9);
+        ctx.bezierCurveTo(15, 9, 14, 9.5, 14, 10.5);
+        ctx.bezierCurveTo(14, 12, 14, 15, 12, 15);
+        ctx.stroke();
+    },
+    reviewer(ctx) {
+        // Eye — lens outline + iris
+        ctx.beginPath();
+        ctx.moveTo(1.5, 9);
+        ctx.bezierCurveTo(4, 4, 14, 4, 16.5, 9);
+        ctx.bezierCurveTo(14, 14, 4, 14, 1.5, 9);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(9, 9, 2.2, 0, Math.PI * 2);
+        ctx.stroke();
+    },
+    tester(ctx) {
+        // Checkbox with tick
+        ctx.beginPath();
+        ctx.moveTo(4.5, 2.5);
+        ctx.lineTo(13.5, 2.5);
+        ctx.arcTo(15.5, 2.5, 15.5, 4.5, 2);
+        ctx.lineTo(15.5, 13.5);
+        ctx.arcTo(15.5, 15.5, 13.5, 15.5, 2);
+        ctx.lineTo(4.5, 15.5);
+        ctx.arcTo(2.5, 15.5, 2.5, 13.5, 2);
+        ctx.lineTo(2.5, 4.5);
+        ctx.arcTo(2.5, 2.5, 4.5, 2.5, 2);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(5.5, 9.2);
+        ctx.lineTo(8, 11.7);
+        ctx.lineTo(13, 6.5);
+        ctx.stroke();
+    },
+    researcher(ctx) {
+        // Magnifier — circle + handle
+        ctx.beginPath();
+        ctx.arc(8, 8, 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(12, 12);
+        ctx.lineTo(15.5, 15.5);
+        ctx.stroke();
+    },
+    generic(ctx) {
+        // Lozenge — fallback glyph
+        ctx.beginPath();
+        ctx.moveTo(9, 2.5);
+        ctx.lineTo(15.5, 9);
+        ctx.lineTo(9, 15.5);
+        ctx.lineTo(2.5, 9);
+        ctx.closePath();
+        ctx.stroke();
+    },
+};
+
+/** Classify a node id or role into a glyph key. */
+function glyphKeyFor(id, role) {
+    const key = `${id} ${role || ''}`.toLowerCase();
+    if (key.includes('coordinator') || key.includes('orchestr') || key.includes('planner')) return 'coordinator';
+    if (key.includes('coder')   || key.includes('implement') || key.includes('writer'))      return 'coder';
+    if (key.includes('review')  || key.includes('critic'))                                   return 'reviewer';
+    if (key.includes('test')    || key.includes('valid'))                                    return 'tester';
+    if (key.includes('research')|| key.includes('search')  || key.includes('investigat'))    return 'researcher';
+    return 'generic';
+}
+
+/** Blend `hex` toward `fallback` by `mix` (0–1). Returns rgb() string or `fallback` on parse fail. */
+function tintColor(hex, mix, fallback) {
+    const m = /^#?([a-f0-9]{6})$/i.exec(hex || '');
+    if (!m) return fallback;
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+    const fm = /^#?([a-f0-9]{6})$/i.exec(fallback || '#000000');
+    const fn = fm ? parseInt(fm[1], 16) : 0;
+    const fr = (fn >> 16) & 0xff, fg = (fn >> 8) & 0xff, fb = fn & 0xff;
+    const tr = Math.round(r * mix + fr * (1 - mix));
+    const tg = Math.round(g * mix + fg * (1 - mix));
+    const tb = Math.round(b * mix + fb * (1 - mix));
+    return `rgb(${tr}, ${tg}, ${tb})`;
+}
+
+/** Convert a #rrggbb hex to rgba() with the given alpha. */
+function alphaHex(hex, alpha) {
+    const m = /^#?([a-f0-9]{6})$/i.exec(hex || '');
+    if (!m) return `rgba(148, 191, 255, ${alpha})`;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}, ${alpha})`;
+}
+
+function drawRoleGlyph(ctx, cx, cy, color, key) {
+    const draw = ROLE_GLYPHS[key] || ROLE_GLYPHS.generic;
+    ctx.save();
+    ctx.translate(cx - 9, cy - 9);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.3;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    draw(ctx);
+    ctx.restore();
 }
 
 // ── GraphRenderer ────────────────────────────────────────────────────────────
@@ -289,7 +423,7 @@ class GraphRenderer {
         const laneBottom = H - 92;
         const rowGap = populatedRows.length === 1
             ? 0
-            : Math.max(100, Math.min(156, (laneBottom - laneTop) / Math.max(populatedRows.length - 1, 1)));
+            : Math.max(116, Math.min(168, (laneBottom - laneTop) / Math.max(populatedRows.length - 1, 1)));
         const top = populatedRows.length === 1 ? H * 0.46 : laneTop;
         const placed = new Set();
         this._layoutRows = [];
@@ -307,12 +441,12 @@ class GraphRenderer {
                 .filter((id) => this.nodes[id]);
             if (!rowNodes.length) return;
             const count = rowNodes.length;
-            const preferredGap = count <= 2 ? 248 : count <= 4 ? 204 : 180;
+            const preferredGap = count <= 2 ? 268 : count <= 4 ? 220 : 194;
             const usedWidth = Math.min(usableWidth, Math.max(180, (count - 1) * preferredGap));
             const startX = W / 2 - usedWidth / 2;
             const step = count === 1 ? 0 : usedWidth / Math.max(count - 1, 1);
             this._layoutRows.push(y);
-            this._layoutBands.push({ y, top: y - 38, bottom: y + 38 });
+            this._layoutBands.push({ y, top: y - 44, bottom: y + 50 });
 
             rowNodes.forEach((id, index) => {
                 const node = this.nodes[id];
@@ -421,7 +555,7 @@ class GraphRenderer {
         const usableHeight = Math.max(180, bottom - top);
         const rowGap = layoutLines.length === 1
             ? 0
-            : Math.max(108, Math.min(164, usableHeight / Math.max(layoutLines.length - 1, 1)));
+            : Math.max(124, Math.min(176, usableHeight / Math.max(layoutLines.length - 1, 1)));
         this._layoutRows = [];
         this._layoutBands = [];
 
@@ -429,7 +563,7 @@ class GraphRenderer {
             const y = layoutLines.length === 1 ? H * 0.48 : top + rowIndex * rowGap;
             const count = row.length;
             this._layoutRows.push(y);
-            this._layoutBands.push({ y, top: y - 38, bottom: y + 38 });
+            this._layoutBands.push({ y, top: y - 44, bottom: y + 50 });
 
             row.forEach((id, index) => {
                 const node = this.nodes[id];
@@ -440,7 +574,7 @@ class GraphRenderer {
             });
         });
 
-        const minGap = 164;
+        const minGap = 186;
         for (let pass = 0; pass < 3; pass++) {
             layoutLines.forEach((row) => {
                 const desired = new Map(row.map((id) => {
@@ -512,6 +646,40 @@ class GraphRenderer {
         // 6. Network state
         this._drawNetworkStatus(ctx, W, H);
 
+        // 7. Legend pinned bottom-left — reads like a key for the graph state glyphs.
+        this._drawLegend(ctx, W, H);
+
+        ctx.restore();
+    }
+
+    _drawLegend(ctx, W, H) {
+        const isLight = this.theme === 'light';
+        const muted     = isLight ? 'rgba(113,130,149,0.9)'  : 'rgba(135,150,167,0.85)';
+        const live      = isLight ? '#2563eb'                : '#94bfff';
+        const legendY   = H - 18;
+        const worldLeft = -this.offsetX / this.zoom;
+        let x = worldLeft + 20;
+
+        const items = [
+            { glyph: '●', color: live,   label: 'live' },
+            { glyph: '○', color: muted,  label: 'idle' },
+            { glyph: '→', color: muted,  label: 'message' },
+            { glyph: '—', color: muted,  label: 'edge' },
+        ];
+
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+        ctx.font = '10px "JetBrains Mono", monospace';
+
+        for (const item of items) {
+            ctx.fillStyle = item.color;
+            ctx.fillText(item.glyph, x, legendY);
+            x += ctx.measureText(item.glyph).width + 5;
+            ctx.fillStyle = muted;
+            ctx.fillText(item.label, x, legendY);
+            x += ctx.measureText(item.label).width + 18;
+        }
         ctx.restore();
     }
 
@@ -622,8 +790,8 @@ class GraphRenderer {
         ctx.save();
 
         const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.42);
-        outer.addColorStop(0, completePulse > 0 ? 'rgba(125, 226, 167, 0.14)' : 'rgba(172, 199, 255, 0.07)');
-        outer.addColorStop(0.45, completePulse > 0 ? 'rgba(125, 226, 167, 0.06)' : 'rgba(38, 73, 116, 0.08)');
+        outer.addColorStop(0, completePulse > 0 ? 'rgba(134, 216, 171, 0.14)' : 'rgba(148, 191, 255, 0.08)');
+        outer.addColorStop(0.45, completePulse > 0 ? 'rgba(134, 216, 171, 0.06)' : 'rgba(42, 70, 112, 0.08)');
         outer.addColorStop(1, 'rgba(10, 15, 19, 0)');
         ctx.fillStyle = outer;
         ctx.beginPath();
@@ -633,15 +801,15 @@ class GraphRenderer {
         for (const band of this._layoutBands || []) {
             const laneGlow = ctx.createLinearGradient(56, band.y, W - 56, band.y);
             laneGlow.addColorStop(0, 'rgba(10, 15, 19, 0)');
-            laneGlow.addColorStop(0.18, completePulse > 0 ? 'rgba(125, 226, 167, 0.04)' : 'rgba(172, 199, 255, 0.025)');
-            laneGlow.addColorStop(0.5, completePulse > 0 ? 'rgba(125, 226, 167, 0.08)' : 'rgba(65, 71, 84, 0.08)');
-            laneGlow.addColorStop(0.82, completePulse > 0 ? 'rgba(125, 226, 167, 0.04)' : 'rgba(172, 199, 255, 0.025)');
+            laneGlow.addColorStop(0.18, completePulse > 0 ? 'rgba(134, 216, 171, 0.04)' : 'rgba(148, 191, 255, 0.025)');
+            laneGlow.addColorStop(0.5, completePulse > 0 ? 'rgba(134, 216, 171, 0.08)' : 'rgba(121, 143, 166, 0.08)');
+            laneGlow.addColorStop(0.82, completePulse > 0 ? 'rgba(134, 216, 171, 0.04)' : 'rgba(148, 191, 255, 0.025)');
             laneGlow.addColorStop(1, 'rgba(10, 15, 19, 0)');
             ctx.fillStyle = laneGlow;
             roundRect(ctx, 58, band.top, W - 116, band.bottom - band.top, 24);
             ctx.fill();
 
-            ctx.strokeStyle = completePulse > 0 ? 'rgba(125, 226, 167, 0.08)' : 'rgba(65, 71, 84, 0.08)';
+            ctx.strokeStyle = completePulse > 0 ? 'rgba(134, 216, 171, 0.08)' : 'rgba(121, 143, 166, 0.08)';
             ctx.lineWidth = 1;
             ctx.setLineDash([10, 14]);
             ctx.beginPath();
@@ -674,7 +842,7 @@ class GraphRenderer {
             fill = this.theme === 'light' ? 'rgba(254,242,242,0.92)' : 'rgba(42, 23, 23, 0.86)';
         }
 
-        const boxW = 172;
+        const boxW = 180;
         const boxH = 34;
         const x = W / 2 - boxW / 2;
         const y = 22;
@@ -772,15 +940,19 @@ class GraphRenderer {
     }
 
     _drawNode(ctx, node, now) {
-        const accent = statusColor(node.thinking ? 'running' : node.status, node.color);
+        const roleAccent = node.color;
         const isSelected = this.selectedNode === node.id;
         const isHovered  = this._hoveredId   === node.id;
         const isCore = node.id === 'coordinator';
         const isComplete = this.runState === 'completed';
+        const isLight = this.theme === 'light';
+        const isLive = node.thinking || node.status === 'running';
+        const isDone = isComplete && node.status === 'completed';
         const width = node.w || (isCore ? CORE_NODE_W : NODE_W);
         const height = node.h || (isCore ? CORE_NODE_H : NODE_H);
         const x = node.x - width / 2;
         const y = node.y - height / 2;
+        const radius = Math.min(NODE_RADIUS, height / 2);
         node.renderRadius = Math.max(width, height) / 2;
 
         // Pulse on message receive
@@ -791,100 +963,176 @@ class GraphRenderer {
             else node.pulseStart = null;
         }
 
-        const runPhase = (now % 2000) / 2000;
-
         ctx.save();
 
-        const completionGlow = isComplete && node.status === 'completed' ? 0.24 : 0;
-        const glowStrength = isSelected ? 34 : isHovered ? 24 : isCore ? 22 : isComplete ? 18 : 14;
-        const glowAlpha = isSelected ? 0.7 : isHovered ? 0.45 : 0.28 + pulse * 0.2 + completionGlow;
-        if (isSelected || isHovered || pulse > 0.08 || isCore || (isComplete && node.status === 'completed')) {
+        // ── 1. Soft role-colored glow halo — live / selected / hover / done ──
+        if (isLive || isSelected || isHovered || pulse > 0.08 || isDone) {
+            const haloColor = isDone
+                ? (isLight ? '#16a34a' : '#86d8ab')
+                : roleAccent;
+            const haloAlpha = isSelected ? 0.32 : isHovered ? 0.22 : isLive ? 0.22 + pulse * 0.12 : 0.16;
             ctx.save();
-            ctx.shadowColor = accent;
-            ctx.shadowBlur = glowStrength;
-            ctx.fillStyle = accent;
-            ctx.globalAlpha = glowAlpha;
-            roundRect(ctx, x - 8, y - 8, width + 16, height + 16, 22);
+            ctx.shadowColor = haloColor;
+            ctx.shadowBlur  = isSelected ? 22 : isLive ? 18 : 14;
+            ctx.globalAlpha = haloAlpha;
+            ctx.fillStyle   = haloColor;
+            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, radius + 4);
             ctx.fill();
             ctx.restore();
         }
 
-        ctx.lineWidth = isCore ? 1.6 : 1.2;
-        ctx.strokeStyle = isSelected ? accent : isComplete && node.status === 'completed' ? 'rgba(125,226,167,0.38)' : 'rgba(65,71,84,0.44)';
-        if (this.theme === 'light') {
-            ctx.fillStyle = isComplete && node.status === 'completed'
-                ? (isCore ? 'rgba(220,252,231,0.96)' : 'rgba(230,255,240,0.97)')
-                : isCore ? 'rgba(255,255,255,0.96)' : 'rgba(248,250,252,0.97)';
-            ctx.strokeStyle = isSelected ? accent : isComplete && node.status === 'completed' ? 'rgba(22,163,74,0.4)' : 'rgba(140,150,175,0.5)';
-        } else {
-            ctx.fillStyle = isComplete && node.status === 'completed'
-                ? (isCore ? 'rgba(22,38,31,0.94)' : 'rgba(18,34,28,0.96)')
-                : isCore ? 'rgba(21,27,32,0.92)' : 'rgba(18,23,29,0.96)';
-        }
-        roundRect(ctx, x, y, width, height, 18);
+        // ── 2. Pill body — very dark fill matching panel tone, crisp 1px border ──
+        const borderColor = isSelected
+            ? roleAccent
+            : isLive
+                ? (isLight ? 'rgba(40,50,68,0.92)' : 'rgba(226,234,246,0.95)')
+                : isDone
+                    ? (isLight ? 'rgba(19,133,77,0.55)' : 'rgba(134,216,171,0.55)')
+                    : (isLight ? 'rgba(129,147,166,0.55)' : 'rgba(148,163,184,0.35)');
+        const fillColor = isLight
+            ? (isLive ? '#ffffff' : isDone ? '#f5fdf9' : '#f7fafc')
+            : (isLive ? '#11181f' : isDone ? '#0f1a16' : '#0d1218');
+
+        ctx.save();
+        ctx.fillStyle = fillColor;
+        roundRect(ctx, x, y, width, height, radius);
         ctx.fill();
+        ctx.lineWidth   = isCore ? 1.4 : 1.1;
+        ctx.strokeStyle = borderColor;
+        roundRect(ctx, x + 0.5, y + 0.5, width - 1, height - 1, radius - 0.5);
         ctx.stroke();
-
-        ctx.save();
-        ctx.fillStyle = `${accent}22`;
-        roundRect(ctx, x + 1.5, y + 1.5, width - 3, Math.max(8, height * 0.24), 16);
-        ctx.fill();
         ctx.restore();
 
-        ctx.save();
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = 10;
-        ctx.fillStyle = accent;
-        ctx.beginPath();
-        ctx.arc(x + 16, node.y, isCore ? 5.5 + pulse * 1.8 : 4.5 + pulse * 1.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+        // ── 3. Inside chip: [glyph] [name] [status dot] ──
+        const padX = 14;
+        const glyphColor = isLive
+            ? (isLight ? '#17202b' : '#e6edf7')
+            : (isLight ? '#41505f' : '#c4cbd6');
+        const labelColor = isLive
+            ? (isLight ? '#0d141d' : '#f0f4fa')
+            : (isLight ? '#17202b' : '#c4ced9');
 
-        if (node.thinking || node.status === 'running') {
-            ctx.save();
-            ctx.strokeStyle = accent;
-            ctx.globalAlpha = 0.4 + 0.25 * Math.sin(runPhase * Math.PI * 2);
-            ctx.lineWidth = 1;
-            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, 20);
-            ctx.stroke();
-            ctx.restore();
-        } else if (isComplete && node.status === 'completed') {
-            ctx.save();
-            ctx.strokeStyle = 'rgba(125,226,167,0.42)';
-            ctx.lineWidth = 1.2;
-            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, 20);
-            ctx.stroke();
-            ctx.restore();
-        }
+        const glyphKey = glyphKeyFor(node.id, node.role);
+        const glyphCx = x + padX + 9;
+        const glyphCy = y + height / 2;
+        drawRoleGlyph(ctx, glyphCx, glyphCy, glyphColor, glyphKey);
 
-        const modelLabel = node.model ? _shortModel(node.model) : 'pending';
+        const textLeft = glyphCx + 14;
+        const dotX = x + width - padX;
+        const textRight = dotX - 12;
+        const maxTextW = Math.max(40, textRight - textLeft);
 
-        ctx.fillStyle = this.theme === 'light' ? '#1a1f2e' : '#eef2f8';
-        ctx.font = isCore ? '700 14px "Space Grotesk", sans-serif' : '700 12px "Space Grotesk", sans-serif';
-        ctx.textAlign = 'center';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(node.role || node.id, node.x, node.y - 7);
+        ctx.fillStyle = labelColor;
+        ctx.font = isCore
+            ? '500 14px "Space Grotesk", sans-serif'
+            : '500 13px "Space Grotesk", sans-serif';
+        const labelText = this._truncate(ctx, node.role || node.id, maxTextW);
+        ctx.fillText(labelText, textLeft, y + height / 2);
 
-        ctx.fillStyle = this.theme === 'light'
-            ? (node.model ? 'rgba(37,99,235,0.9)' : 'rgba(107,118,148,0.9)')
-            : (node.model ? 'rgba(172,199,255,0.95)' : 'rgba(142,151,168,0.92)');
-        ctx.font = '10px "JetBrains Mono", monospace';
-        let modelText = modelLabel;
-        const maxModelWidth = width - 28;
-        while (modelText.length && ctx.measureText(modelText).width > maxModelWidth) modelText = modelText.slice(0, -1);
-        if (modelText !== modelLabel) modelText += '…';
-        ctx.fillText(modelText, node.x, node.y + 10);
-
-        if (isCore) {
-            ctx.fillStyle = 'rgba(142,151,168,0.78)';
-            ctx.font = '9px "JetBrains Mono", monospace';
-            ctx.fillText('ENTRY', node.x, y + height - 10);
+        // Status dot: role-colored on live (with glow), muted on idle
+        const dotColor = isLive
+            ? roleAccent
+            : isDone
+                ? (isLight ? '#16a34a' : '#86d8ab')
+                : (isLight ? '#8796a7' : '#7a8499');
+        ctx.save();
+        if (isLive) {
+            ctx.shadowColor = roleAccent;
+            ctx.shadowBlur = 8 + pulse * 6;
         }
+        ctx.fillStyle = dotColor;
+        ctx.globalAlpha = isLive ? 1 : 0.55;
+        ctx.beginPath();
+        ctx.arc(dotX, y + height / 2, 3.2 + pulse * 1.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // ── 4. Caption line below chip: "ROLE_CAPTION · model" ──
+        const captionColor = isLive
+            ? (isLight ? '#5d6b7c' : '#a5b0bf')
+            : (isLight ? '#718295' : '#8796a7');
+        const caption = (this._roleCaption(node) || '').toUpperCase();
+        const modelLabel = node.model ? _shortModel(node.model) : 'pending';
+        ctx.save();
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.fillStyle = captionColor;
+        const metaY = y + height + 8;
+        const dotSep = '  ·  ';
+        const captionTrack = 0.8;
+        const captionWidth = this._trackedWidth(ctx, caption, captionTrack);
+        const sepWidth = ctx.measureText(dotSep).width;
+        const modelWidth = ctx.measureText(modelLabel).width;
+        const totalMetaW = captionWidth + sepWidth + modelWidth;
+        let metaX = node.x - totalMetaW / 2;
+        this._fillTracked(ctx, caption, metaX, metaY, captionTrack);
+        metaX += captionWidth;
+        ctx.fillText(dotSep, metaX, metaY);
+        metaX += sepWidth;
+        ctx.fillStyle = isLive
+            ? (isLight ? '#41505f' : '#c4ced9')
+            : (isLight ? '#718295' : '#8796a7');
+        ctx.fillText(modelLabel, metaX, metaY);
+        ctx.restore();
 
         if (isSelected || isHovered) this._drawNodeLabel(ctx, node, isCore, isSelected, isHovered);
 
         ctx.restore();
     }
+
+    _roleCaption(node) {
+        const map = {
+            coordinator: 'Orchestrator',
+            coder: 'Writes code',
+            reviewer: 'Critiques',
+            reviewer_a: 'Quality',
+            reviewer_b: 'Security',
+            tester: 'Runs tests',
+            researcher: 'Investigates',
+        };
+        if (map[node.id]) return map[node.id];
+        if (map[node.role?.toLowerCase?.()]) return map[node.role.toLowerCase()];
+        return node.status === 'running' ? 'Working' : node.status === 'completed' ? 'Done' : 'Idle';
+    }
+
+    _truncate(ctx, text, maxWidth) {
+        if (!text) return '';
+        if (ctx.measureText(text).width <= maxWidth) return text;
+        let out = text;
+        while (out.length && ctx.measureText(out + '…').width > maxWidth) out = out.slice(0, -1);
+        return out ? out + '…' : '';
+    }
+
+    /** Measure how wide a string renders with manual letter-spacing. */
+    _trackedWidth(ctx, text, tracking = 0.5) {
+        if (!text) return 0;
+        let total = 0;
+        for (const ch of text) total += ctx.measureText(ch).width + tracking;
+        return total - tracking;
+    }
+
+    /** Fill text with manual letter-spacing for the tracked-kicker aesthetic. */
+    _fillTracked(ctx, text, x, y, tracking = 0.5, align = 'left') {
+        const widths = [];
+        let total = 0;
+        for (const ch of text) {
+            const w = ctx.measureText(ch).width;
+            widths.push(w);
+            total += w + tracking;
+        }
+        total -= tracking;
+        let cursor = align === 'center' ? x - total / 2
+                   : align === 'right'  ? x - total
+                   :                       x;
+        for (let i = 0; i < text.length; i++) {
+            ctx.fillText(text[i], cursor, y);
+            cursor += widths[i] + tracking;
+        }
+    }
+
 
     _drawNodeLabel(ctx, node, isCore, isSelected = false, isHovered = false) {
         const title = node.role || node.id;
@@ -920,24 +1168,26 @@ class GraphRenderer {
 
         ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
         ctx.shadowBlur = isCore ? 22 : 16;
-        ctx.fillStyle = isCore ? 'rgba(28, 34, 40, 0.92)' : 'rgba(20, 25, 30, 0.94)';
+        ctx.fillStyle = this.theme === 'light'
+            ? (isCore ? 'rgba(255,255,255,0.96)' : 'rgba(248,250,252,0.97)')
+            : (isCore ? 'rgba(28, 35, 43, 0.92)' : 'rgba(20, 26, 33, 0.94)');
         roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.fill();
 
         ctx.shadowBlur = 0;
-        ctx.strokeStyle = isSelected ? 'rgba(172, 199, 255, 0.24)' : 'rgba(65, 71, 84, 0.16)';
+        ctx.strokeStyle = isSelected ? 'rgba(148, 191, 255, 0.28)' : 'rgba(121, 143, 166, 0.16)';
         ctx.lineWidth = 1;
         roundRect(ctx, boxX, boxY, boxW, boxH, 14);
         ctx.stroke();
 
-        ctx.fillStyle = '#dee3e9';
+        ctx.fillStyle = this.theme === 'light' ? '#17202b' : '#ecf1f6';
         ctx.font = '700 12px "Space Grotesk", sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText(title, boxX + 12, boxY + 10);
 
         ctx.font = '10px "JetBrains Mono", monospace';
-        ctx.fillStyle = '#8e97a8';
+        ctx.fillStyle = this.theme === 'light' ? '#718295' : '#8796a7';
         let sub = subtitle;
         while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);
         if (sub !== subtitle) sub += '…';
@@ -1135,10 +1385,10 @@ class GraphRenderer {
         offscreen.height = h * this._dpr;
         const ctx = offscreen.getContext('2d');
         ctx.scale(this._dpr, this._dpr);
-        ctx.fillStyle = this.theme === 'light' ? '#eef1f6' : '#0a0f13';
+        ctx.fillStyle = this.theme === 'light' ? '#eef2f4' : '#0b1015';
         ctx.fillRect(0, 0, w, h);
         const spacing = 26;
-        ctx.fillStyle = this.theme === 'light' ? 'rgba(140,150,175,0.42)' : 'rgba(65,71,84,0.32)';
+        ctx.fillStyle = this.theme === 'light' ? 'rgba(129,147,166,0.38)' : 'rgba(121,143,166,0.22)';
         for (let x = spacing / 2; x < w; x += spacing) {
             for (let y = spacing / 2; y < h; y += spacing) {
                 ctx.beginPath();
@@ -1183,4 +1433,16 @@ class GraphRenderer {
         const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
         this._applyZoom(this.zoom * factor, e.clientX, e.clientY);
     }
+}
+
+// Expose helpers for unit tests (Node/Vitest). No-op in the browser.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        GraphRenderer,
+        roundRect,
+        glyphKeyFor,
+        alphaHex,
+        tintColor,
+        NODE_RADIUS,
+    };
 }
