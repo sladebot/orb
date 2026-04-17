@@ -304,9 +304,108 @@ def local_models_enabled() -> bool:
 
 
 def show_config() -> None:
+    """Pretty-printed config dump.
+
+    Top-level scalar keys render as an aligned table; each provider gets
+    its own block showing enabled state, base_url (for local), model
+    catalog with per-model enabled marks, and tier defaults.
+    """
     cfg = load_config()
-    max_len = max((len(k) for k in _DEFAULTS), default=0)
-    for key, default in _DEFAULTS.items():
-        val = cfg.get(key, default)
-        source = "default" if key not in cfg else "config"
-        print(f"  {key:<{max_len}}  =  {str(val).lower():<6}  ({source})")
+
+    print()
+    print("Orb config — " + str(CONFIG_PATH))
+    print()
+
+    print("Settings")
+    scalar_keys = [k for k in _DEFAULTS if k != "providers"]
+    key_width = max((len(k) for k in scalar_keys), default=0)
+    for key in scalar_keys:
+        val = cfg.get(key, _DEFAULTS[key])
+        source = "config" if key in cfg else "default"
+        print(f"  {key:<{key_width}}  =  {_format_scalar(val):<6}  ({source})")
+
+    providers = cfg.get("providers") or {}
+    if not isinstance(providers, dict):
+        print("\nProviders: (invalid)")
+        return
+
+    print("\nProviders")
+    for name in _DEFAULTS["providers"]:
+        entry = providers.get(name) or {}
+        _print_provider_block(name, entry if isinstance(entry, dict) else {})
+
+
+def _format_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _print_provider_block(name: str, entry: dict[str, Any]) -> None:
+    enabled = bool(entry.get("enabled"))
+    mark = "✓" if enabled else " "
+    header = f"  [{mark}] {name}"
+    extras: list[str] = []
+    base_url = entry.get("base_url")
+    if base_url:
+        extras.append(str(base_url))
+    refreshed = entry.get("refreshed_at")
+    if isinstance(refreshed, (int, float)) and refreshed > 0:
+        extras.append(_format_refreshed(refreshed))
+    if extras:
+        header += "   " + " · ".join(extras)
+    print(header)
+
+    models_map = entry.get("models") if isinstance(entry.get("models"), dict) else {}
+    catalog = entry.get("catalog") if isinstance(entry.get("catalog"), list) else []
+    defaults = entry.get("default_models") if isinstance(entry.get("default_models"), dict) else {}
+
+    if catalog:
+        # Use catalog as the source of model rows so we can show labels;
+        # overlay enablement from `models` map.
+        print("        models:")
+        id_width = max((len(str(item.get("id") or "")) for item in catalog), default=0)
+        for item in catalog:
+            mid = str(item.get("id") or "")
+            if not mid:
+                continue
+            status_entry = models_map.get(mid)
+            if isinstance(status_entry, dict):
+                m_enabled = bool(status_entry.get("enabled", True))
+            elif isinstance(status_entry, bool):
+                m_enabled = status_entry
+            else:
+                m_enabled = True
+            m_mark = "✓" if m_enabled else " "
+            label = item.get("label")
+            suffix = f"  — {label}" if label and label != mid else ""
+            print(f"          [{m_mark}] {mid:<{id_width}}{suffix}")
+    elif models_map:
+        # No catalog yet (never refreshed); fall back to the enable map.
+        print("        models:")
+        id_width = max((len(k) for k in models_map), default=0)
+        for mid, value in models_map.items():
+            if isinstance(value, dict):
+                m_enabled = bool(value.get("enabled", True))
+            elif isinstance(value, bool):
+                m_enabled = value
+            else:
+                m_enabled = True
+            m_mark = "✓" if m_enabled else " "
+            print(f"          [{m_mark}] {mid:<{id_width}}")
+    else:
+        print("        models: (no catalog — run `orb onboard` or `orb models refresh`)")
+
+    if defaults:
+        print("        defaults:")
+        tier_width = max((len(str(k)) for k in defaults), default=0)
+        for tier, model_id in defaults.items():
+            print(f"          {str(tier):<{tier_width}}  →  {model_id}")
+
+
+def _format_refreshed(ts: float) -> str:
+    import datetime as _dt
+    try:
+        return "refreshed " + _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "refreshed ?"
