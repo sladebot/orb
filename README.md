@@ -28,12 +28,6 @@ The browser dashboard shows run output, the live agent topology, and the per-nod
 | ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
 | Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
 
-### Legacy demos
-
-Earlier recordings of the same topologies running on the pre-redesign dashboard:
-
-![Triad demo](demo/orb-triad-demo.gif) ![Dual review demo](demo/orb-dual-review-demo.gif) ![Hierarchy demo](demo/orb-hierarchy-demo.gif)
-
 ### TUI
 
 ![Orb TUI](docs/orb-tui.png)
