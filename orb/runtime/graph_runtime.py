@@ -395,76 +395,76 @@ class GraphRuntime:
                 return model_id
         return fallback
 
-    async def refresh_provider_catalogs(self) -> None:
+    async def refresh_provider_catalogs(self) -> dict[str, str]:
+        """Refresh every registered provider's catalog.
+
+        Returns a status map keyed by provider name, with one of:
+
+          • ``"updated:<N>"``   — catalog changed and was persisted.
+          • ``"unchanged:<N>"`` — fetch succeeded but nothing changed.
+          • ``"skipped:not-registered"`` — provider disabled in config /
+            failed its liveness check, so no refresh attempted.
+          • ``"skipped:empty"``  — fetch returned no models (unreachable,
+            401, or misconfigured). See ~/.orb/run.log for the exception.
+
+        Callers (the `orb models refresh` CLI handler) use this to print a
+        line per provider so the user can see exactly which ones moved.
+        """
         cfg = load_config()
         providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+        status: dict[str, str] = {}
         updated = False
 
-        if "anthropic" in self._all_providers:
-            catalog, defaults = await self._fetch_anthropic_catalog()
-            if catalog:
-                entry = dict(providers_cfg.get("anthropic") or {})
-                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
-                    entry["catalog"] = catalog
-                    entry["default_models"] = defaults
-                    entry["refreshed_at"] = int(time.time())
-                    providers_cfg["anthropic"] = entry
-                    updated = True
+        # Static catalog — always succeeds because it's hardcoded.
+        OPENAI_CODEX_CATALOG: list[dict] = [
+            {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
+            {"id": "gpt-5.4",      "label": "GPT-5.4",      "local": False},
+        ]
+        OPENAI_CODEX_DEFAULTS: dict[str, str] = {
+            "cloud_lite":   "gpt-5.4-mini",
+            "cloud_fast":   "gpt-5.4-mini",
+            "cloud_strong": "gpt-5.4",
+        }
 
-        if "openai-codex" in self._all_providers:
-            catalog = [
-                {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
-                {"id": "gpt-5.4", "label": "GPT-5.4", "local": False},
-            ]
-            defaults = {
-                "cloud_lite": "gpt-5.4-mini",
-                "cloud_fast": "gpt-5.4-mini",
-                "cloud_strong": "gpt-5.4",
-            }
-            entry = dict(providers_cfg.get("openai-codex") or {})
-            if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
+        fetchers: list[tuple[str, Any, list[dict] | None, dict[str, str] | None]] = [
+            ("anthropic",    self._fetch_anthropic_catalog, None,                 None),
+            ("openai-codex", None,                          OPENAI_CODEX_CATALOG, OPENAI_CODEX_DEFAULTS),
+            ("ollama",       self._fetch_ollama_catalog,    None,                 None),
+            ("vmlx",         self._fetch_vmlx_catalog,      None,                 None),
+            ("omlx",         self._fetch_omlx_catalog,      None,                 None),
+        ]
+
+        for name, fetcher, static_catalog, static_defaults in fetchers:
+            if name not in self._all_providers:
+                status[name] = "skipped:not-registered"
+                continue
+
+            if static_catalog is not None:
+                catalog, defaults = static_catalog, static_defaults or {}
+            else:
+                catalog, defaults = await fetcher()
+
+            if not catalog:
+                status[name] = "skipped:empty"
+                continue
+
+            entry = dict(providers_cfg.get(name) or {})
+            changed = entry.get("catalog") != catalog or entry.get("default_models") != defaults
+            if changed:
                 entry["catalog"] = catalog
                 entry["default_models"] = defaults
                 entry["refreshed_at"] = int(time.time())
-                providers_cfg["openai-codex"] = entry
+                providers_cfg[name] = entry
                 updated = True
-
-        if "ollama" in self._all_providers:
-            catalog, defaults = await self._fetch_ollama_catalog()
-            if catalog:
-                entry = dict(providers_cfg.get("ollama") or {})
-                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
-                    entry["catalog"] = catalog
-                    entry["default_models"] = defaults
-                    entry["refreshed_at"] = int(time.time())
-                    providers_cfg["ollama"] = entry
-                    updated = True
-
-        if "vmlx" in self._all_providers:
-            catalog, defaults = await self._fetch_vmlx_catalog()
-            if catalog:
-                entry = dict(providers_cfg.get("vmlx") or {})
-                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
-                    entry["catalog"] = catalog
-                    entry["default_models"] = defaults
-                    entry["refreshed_at"] = int(time.time())
-                    providers_cfg["vmlx"] = entry
-                    updated = True
-
-        if "omlx" in self._all_providers:
-            catalog, defaults = await self._fetch_omlx_catalog()
-            if catalog:
-                entry = dict(providers_cfg.get("omlx") or {})
-                if entry.get("catalog") != catalog or entry.get("default_models") != defaults:
-                    entry["catalog"] = catalog
-                    entry["default_models"] = defaults
-                    entry["refreshed_at"] = int(time.time())
-                    providers_cfg["omlx"] = entry
-                    updated = True
+                status[name] = f"updated:{len(catalog)}"
+            else:
+                status[name] = f"unchanged:{len(catalog)}"
 
         if updated:
             cfg["providers"] = providers_cfg
             save_config(cfg)
+
+        return status
 
     async def _fetch_anthropic_catalog(self) -> tuple[list[dict], dict[str, str]]:
         from orb.cli.auth import _anthropic_headers, get_anthropic_key
@@ -540,14 +540,16 @@ class GraphRuntime:
         return catalog, defaults
 
     async def _fetch_vmlx_catalog(self) -> tuple[list[dict], dict[str, str]]:
-        from orb.llm.registry import _vmlx_base_url
+        from orb.llm.registry import _vmlx_base_url, _vmlx_api_key
 
         provider_cfg = self._provider_config_entry("vmlx")
         endpoint = str(provider_cfg.get("base_url") or _vmlx_base_url()).rstrip("/")
         if not endpoint.endswith("/v1"):
             endpoint = f"{endpoint}/v1"
         headers = {}
-        api_key = provider_cfg.get("api_key")
+        # Prefer an explicit config key; fall back to VMLX_API_KEY env var via
+        # the shared helper so `models refresh` behaves like the runtime.
+        api_key = provider_cfg.get("api_key") or _vmlx_api_key()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         try:
@@ -555,7 +557,8 @@ class GraphRuntime:
                 resp = await client.get(f"{endpoint}/models", timeout=5.0, headers=headers or None)
             resp.raise_for_status()
             data = resp.json().get("data") or []
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to refresh vmlx catalog at %s: %s", endpoint, exc)
             return [], {}
 
         catalog = []
@@ -579,14 +582,16 @@ class GraphRuntime:
         return catalog, defaults
 
     async def _fetch_omlx_catalog(self) -> tuple[list[dict], dict[str, str]]:
-        from orb.llm.registry import _omlx_base_url
+        from orb.llm.registry import _omlx_base_url, _omlx_api_key
 
         provider_cfg = self._provider_config_entry("omlx")
         endpoint = str(provider_cfg.get("base_url") or _omlx_base_url()).rstrip("/")
         if not endpoint.endswith("/v1"):
             endpoint = f"{endpoint}/v1"
         headers = {}
-        api_key = provider_cfg.get("api_key")
+        # Prefer an explicit config key; fall back to OMLX_API_KEY env var via
+        # the shared helper so `models refresh` behaves like the runtime.
+        api_key = provider_cfg.get("api_key") or _omlx_api_key()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         try:
@@ -594,7 +599,8 @@ class GraphRuntime:
                 resp = await client.get(f"{endpoint}/models", timeout=5.0, headers=headers or None)
             resp.raise_for_status()
             data = resp.json().get("data") or []
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to refresh omlx catalog at %s: %s", endpoint, exc)
             return [], {}
 
         catalog = []

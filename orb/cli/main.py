@@ -771,22 +771,28 @@ async def async_main() -> None:
                 model_overrides=None,
                 tier_override=None,
             )
-            await runtime.refresh_provider_catalogs()
+            status = await runtime.refresh_provider_catalogs()
 
             cfg = load_config()
             providers_cfg = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-            print("Updated provider catalogs in ~/.orb/config.json")
+            print("Provider catalogs (~/.orb/config.json):")
+            reasons = {
+                "skipped:not-registered": "not registered (disabled in config or liveness check failed)",
+                "skipped:empty":          "fetch returned no models (see ~/.orb/run.log)",
+            }
             for provider_name in ("anthropic", "openai-codex", "ollama", "vmlx", "omlx"):
-                entry = providers_cfg.get(provider_name) if isinstance(providers_cfg, dict) else None
-                if not isinstance(entry, dict):
-                    continue
-                catalog = entry.get("catalog") or []
-                defaults = entry.get("default_models") or {}
-                if catalog:
-                    print(f"  {provider_name:<13} {len(catalog)} models")
-                if isinstance(defaults, dict) and defaults:
-                    summary = ", ".join(f"{k}={v}" for k, v in defaults.items())
-                    print(f"    defaults: {summary}")
+                st = status.get(provider_name, "skipped:not-registered")
+                if st.startswith("updated:") or st.startswith("unchanged:"):
+                    verb, count = st.split(":", 1)
+                    print(f"  {provider_name:<13} {verb:<9} · {count} models")
+                    entry = providers_cfg.get(provider_name) if isinstance(providers_cfg, dict) else None
+                    defaults = entry.get("default_models") if isinstance(entry, dict) else None
+                    if isinstance(defaults, dict) and defaults:
+                        summary = ", ".join(f"{k}={v}" for k, v in defaults.items())
+                        print(f"                defaults: {summary}")
+                else:
+                    reason = reasons.get(st, st)
+                    print(f"  {provider_name:<13} skipped   · {reason}")
             return
         print_error("Unknown models command")
         sys.exit(1)
