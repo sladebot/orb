@@ -30,6 +30,39 @@ def test_show_config_renders_scalar_table(capsys, isolated_config):
     assert "false" in out
 
 
+def test_show_config_hides_disabled_providers(capsys, isolated_config):
+    # Disable every known provider so the "none enabled" path is exercised.
+    _write(
+        isolated_config,
+        {
+            "providers": {
+                name: {"enabled": False} for name in config_mod._DEFAULTS["providers"]
+            },
+        },
+    )
+    config_mod.show_config()
+    out = capsys.readouterr().out
+    for name in config_mod._DEFAULTS["providers"]:
+        assert name not in out
+    assert "none enabled" in out
+
+
+def test_show_config_skips_disabled_providers_when_others_enabled(capsys, isolated_config):
+    _write(
+        isolated_config,
+        {
+            "providers": {
+                "ollama":    {"enabled": True,  "models": {"m": {"enabled": True}}},
+                "anthropic": {"enabled": False, "models": {}},
+            },
+        },
+    )
+    config_mod.show_config()
+    out = capsys.readouterr().out
+    assert "ollama" in out
+    assert "anthropic" not in out
+
+
 def test_show_config_renders_provider_blocks(capsys, isolated_config):
     _write(
         isolated_config,
@@ -78,7 +111,7 @@ def test_show_config_handles_missing_catalog(capsys, isolated_config):
         {
             "providers": {
                 "omlx": {
-                    "enabled": False,
+                    "enabled": True,
                     "models": {"some-model": {"enabled": True}},
                 },
             },
@@ -91,7 +124,7 @@ def test_show_config_handles_missing_catalog(capsys, isolated_config):
 
 
 def test_show_config_notes_when_provider_has_no_catalog(capsys, isolated_config):
-    _write(isolated_config, {"providers": {"vmlx": {"enabled": False}}})
+    _write(isolated_config, {"providers": {"vmlx": {"enabled": True}}})
     config_mod.show_config()
     out = capsys.readouterr().out
     assert "(no catalog" in out

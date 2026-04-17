@@ -329,10 +329,19 @@ def show_config() -> None:
         print("\nProviders: (invalid)")
         return
 
+    enabled_providers = [
+        (name, providers.get(name) or {})
+        for name in _DEFAULTS["providers"]
+        if isinstance(providers.get(name), dict) and providers.get(name, {}).get("enabled")
+    ]
+
+    if not enabled_providers:
+        print("\nProviders: none enabled — run `orb onboard` to configure one.")
+        return
+
     print("\nProviders")
-    for name in _DEFAULTS["providers"]:
-        entry = providers.get(name) or {}
-        _print_provider_block(name, entry if isinstance(entry, dict) else {})
+    for name, entry in enabled_providers:
+        _print_provider_block(name, entry)
 
 
 def _format_scalar(value: Any) -> str:
