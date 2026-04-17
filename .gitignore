@@ -8,3 +8,9 @@ build/
 .venv/
 .orb/
 docs/superpowers/
+
+# Node / frontend test tooling
+node_modules/
+/test-results/
+/playwright-report/
+/playwright/.cache/

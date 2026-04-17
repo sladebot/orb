@@ -143,37 +143,37 @@
             ></div>
 
             <section id="graph-panel">
-                <div id="graph-panel-overlay-top">
+                <header id="graph-panel-header">
                     <div id="graph-board-header" class="glass-panel">
-                        <div id="graph-board-copy">
-                            <span class="graph-board-kicker">Org View</span>
-                            <h2 id="graph-board-title">Agent Topology</h2>
-                            <p id="graph-board-caption">A quiet view of the active network.</p>
+                        <span class="graph-board-kicker">Org View</span>
+                        <h2 id="graph-board-title">Agent Topology</h2>
+                        <p id="graph-board-caption">A quiet view of the active network.</p>
+                    </div>
+                    <div id="graph-hud">
+                        <div class="graph-hud-pill">
+                            <span class="graph-hud-label">Topology</span>
+                            <span class="graph-hud-value" id="hero-topology-label">Auto</span>
                         </div>
-                        <div id="graph-hud">
-                            <div class="graph-hud-pill">
-                                <span class="graph-hud-label">Topology</span>
-                                <span class="graph-hud-value" id="hero-topology-label">Auto</span>
-                            </div>
-                            <div class="graph-hud-pill">
-                                <span class="graph-hud-label">Runtime</span>
-                                <span class="graph-hud-value" id="hero-status-label">Waiting</span>
-                            </div>
+                        <div class="graph-hud-pill">
+                            <span class="graph-hud-label">Runtime</span>
+                            <span class="graph-hud-value" id="hero-status-label">Waiting</span>
                         </div>
                     </div>
-                </div>
+                </header>
 
-                <div id="graph-controls" aria-label="Graph controls">
-                    <button id="graph-zoom-in" class="graph-control-button" type="button" title="Zoom in">+</button>
-                    <button id="graph-zoom-out" class="graph-control-button" type="button" title="Zoom out">−</button>
-                    <button id="graph-reset-view" class="graph-control-button" type="button" title="Reset view">◎</button>
-                </div>
+                <div id="graph-panel-body">
+                    <div id="graph-controls" aria-label="Graph controls">
+                        <button id="graph-zoom-in" class="graph-control-button" type="button" title="Zoom in">+</button>
+                        <button id="graph-zoom-out" class="graph-control-button" type="button" title="Zoom out">−</button>
+                        <button id="graph-reset-view" class="graph-control-button" type="button" title="Reset view">◎</button>
+                    </div>
 
-                <canvas id="graph-canvas"></canvas>
+                    <canvas id="graph-canvas"></canvas>
 
-                <div id="graph-loader" class="hidden">
-                    <div class="loader-ring"></div>
-                    <div id="loader-text">Starting agents…</div>
+                    <div id="graph-loader" class="hidden">
+                        <div class="loader-ring"></div>
+                        <div id="loader-text">Starting agents…</div>
+                    </div>
                 </div>
             </section>
 

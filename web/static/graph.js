@@ -419,7 +419,7 @@ class GraphRenderer {
         const populatedRows = rows.filter((row) => Array.isArray(row) && row.some((item) => item?.node));
         if (!populatedRows.length) return false;
 
-        const laneTop = 116;
+        const laneTop = 72;
         const laneBottom = H - 92;
         const rowGap = populatedRows.length === 1
             ? 0
@@ -550,7 +550,7 @@ class GraphRenderer {
             }
         });
 
-        const top = 118;
+        const top = 78;
         const bottom = H - 88;
         const usableHeight = Math.max(180, bottom - top);
         const rowGap = layoutLines.length === 1
@@ -643,10 +643,8 @@ class GraphRenderer {
         // 5. Nodes
         this._drawNodes(ctx);
 
-        // 6. Network state
-        this._drawNetworkStatus(ctx, W, H);
-
-        // 7. Legend pinned bottom-left — reads like a key for the graph state glyphs.
+        // 6. Legend pinned bottom-left — reads like a key for the graph state glyphs.
+        //    (Runtime state is shown by the dashboard header HUD, not on the canvas.)
         this._drawLegend(ctx, W, H);
 
         ctx.restore();

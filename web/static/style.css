@@ -754,9 +754,30 @@ a {
     box-shadow:
         inset 0 0 0 1px rgba(121, 143, 166, 0.14),
         0 30px 60px -42px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
 }
 
-#graph-panel::before {
+#graph-panel-header {
+    position: relative;
+    z-index: 3;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 14px 22px;
+    border-bottom: 1px solid rgba(121, 143, 166, 0.1);
+}
+
+#graph-panel-body {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+#graph-panel-body::before {
     content: "";
     position: absolute;
     inset: 0;
@@ -768,37 +789,15 @@ a {
     pointer-events: none;
 }
 
-#graph-panel-overlay-top {
-    position: absolute;
-    top: 24px;
-    left: 24px;
-    right: 24px;
-    z-index: 3;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 18px;
-    pointer-events: none;
-}
-
 #graph-board-header {
     display: flex;
-    align-items: center;
-    gap: 14px;
-    width: auto;
-    max-width: calc(100% - 96px);
-    padding: 8px 14px;
-    border-radius: 999px;
-    box-shadow: inset 0 0 0 1px rgba(121, 143, 166, 0.14);
-    pointer-events: auto;
-}
-
-#graph-board-copy {
-    min-width: 0;
-    display: flex;
     align-items: baseline;
-    gap: 10px;
-    flex: 0 1 auto;
+    gap: 12px;
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
 }
 
 .graph-board-kicker {
@@ -808,16 +807,19 @@ a {
     letter-spacing: 0.22em;
     color: var(--text-muted);
     white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 #graph-board-title {
     margin: 0;
     font-family: "Space Grotesk", sans-serif;
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
     line-height: 1;
     letter-spacing: 0.01em;
     white-space: nowrap;
+    color: var(--text-primary);
+    flex: 0 0 auto;
 }
 
 #graph-board-caption {
@@ -872,8 +874,8 @@ a {
 
 #graph-controls {
     position: absolute;
-    top: 124px;
-    right: 24px;
+    top: 18px;
+    right: 18px;
     z-index: 3;
     display: flex;
     flex-direction: column;
@@ -3270,16 +3272,12 @@ pre {
         border-radius: 22px;
     }
 
-    #graph-panel-overlay-top {
-        top: 16px;
-        left: 16px;
-        right: 16px;
-        gap: 12px;
+    #graph-panel-header {
+        padding: 10px 16px;
+        gap: 10px;
     }
 
     #graph-board-header {
-        max-width: calc(100% - 82px);
-        padding: 6px 12px;
         gap: 10px;
     }
 
@@ -3292,8 +3290,8 @@ pre {
     }
 
     #graph-controls {
-        top: 98px;
-        right: 16px;
+        top: 12px;
+        right: 12px;
     }
 
     .graph-control-button {
@@ -3495,14 +3493,15 @@ pre {
         min-height: 520px;
     }
 
-    #graph-panel-overlay-top {
-        flex-direction: column;
-        align-items: stretch;
+    #graph-panel-header {
+        flex-wrap: wrap;
+        align-items: flex-start;
+        padding: 10px 14px;
     }
 
     #graph-board-header {
-        max-width: calc(100% - 24px);
-        padding-right: 56px;
+        min-width: 0;
+        flex: 1 1 100%;
     }
 
     #graph-board-caption {
