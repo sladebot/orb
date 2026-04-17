@@ -362,6 +362,7 @@ def parse_args() -> argparse.Namespace:
     models_sub.add_parser("refresh", help="Fetch latest provider model catalogs into ~/.orb/config.json")
 
     subparsers.add_parser("onboard", help="Interactive onboarding for auth and common settings")
+    subparsers.add_parser("configure", help="Interactive provider + model setup (auth, catalog refresh, per-tier defaults)")
     trace_parser = subparsers.add_parser("trace", help="Inspect persisted run traces")
     trace_sub = trace_parser.add_subparsers(dest="trace_action")
     trace_latest = trace_sub.add_parser("latest", help="Show the latest trace")
@@ -791,6 +792,11 @@ async def async_main() -> None:
     if args.subcommand == "onboard":
         from .onboard import run_onboarding
         await run_onboarding()
+        return
+
+    if args.subcommand == "configure":
+        from .configure import run_configure
+        await run_configure()
         return
 
     if args.subcommand == "trace":
