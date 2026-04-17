@@ -225,6 +225,89 @@ async def test_ensure_authed_local_passes_when_reachable(monkeypatch):
     assert await onboard_mod._ensure_authed("ollama") is True
 
 
+@pytest.mark.asyncio
+async def test_ensure_authed_cloud_skips_when_already_authed_and_user_declines_reauth(monkeypatch):
+    _inputs(monkeypatch, ["n"])
+    monkeypatch.setattr(onboard_mod, "_auth_status", lambda *_a, **_k: "authed")
+    ran: list[str] = []
+
+    async def _should_not_run(provider):
+        ran.append(provider)
+
+    monkeypatch.setattr(onboard_mod, "_run_cloud_auth", _should_not_run)
+    assert await onboard_mod._ensure_authed("anthropic") is True
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_authed_cloud_runs_reauth_when_accepted(monkeypatch):
+    _inputs(monkeypatch, ["y"])
+    monkeypatch.setattr(onboard_mod, "_auth_status", lambda *_a, **_k: "authed")
+    ran: list[str] = []
+
+    async def _spy(provider):
+        ran.append(provider)
+
+    monkeypatch.setattr(onboard_mod, "_run_cloud_auth", _spy)
+    assert await onboard_mod._ensure_authed("anthropic") is True
+    assert ran == ["anthropic"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_authed_cloud_runs_first_time_auth_when_accepted(monkeypatch):
+    _inputs(monkeypatch, ["y"])
+    statuses = iter(["not authed", "authed"])
+    monkeypatch.setattr(onboard_mod, "_auth_status", lambda *_a, **_k: next(statuses))
+    ran: list[str] = []
+
+    async def _spy(provider):
+        ran.append(provider)
+
+    monkeypatch.setattr(onboard_mod, "_run_cloud_auth", _spy)
+    assert await onboard_mod._ensure_authed("openai-codex") is True
+    assert ran == ["openai-codex"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_authed_cloud_returns_false_when_user_declines(monkeypatch):
+    _inputs(monkeypatch, ["n"])
+    monkeypatch.setattr(onboard_mod, "_auth_status", lambda *_a, **_k: "not authed")
+    assert await onboard_mod._ensure_authed("openai-codex") is False
+
+
+@pytest.mark.asyncio
+async def test_run_cloud_auth_openai_api_key_path(monkeypatch):
+    _inputs(monkeypatch, ["2", "sk-test-123"])
+    saved: dict = {}
+
+    def _fake_save(provider, data):
+        saved[provider] = data
+
+    monkeypatch.setattr(onboard_mod.auth_cli, "_save_credentials", _fake_save)
+    # Prevent OAuth from running if branching goes wrong.
+    monkeypatch.setattr(onboard_mod.auth_cli, "auth_openai", AsyncMock())
+
+    await onboard_mod._run_cloud_auth("openai-codex")
+    assert saved == {"openai": {"api_key": "sk-test-123"}}
+
+
+@pytest.mark.asyncio
+async def test_run_cloud_auth_openai_oauth_path(monkeypatch):
+    _inputs(monkeypatch, ["1"])
+    oauth = AsyncMock()
+    monkeypatch.setattr(onboard_mod.auth_cli, "auth_openai", oauth)
+    await onboard_mod._run_cloud_auth("openai-codex")
+    oauth.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_cloud_auth_anthropic_delegates(monkeypatch):
+    anthropic = AsyncMock()
+    monkeypatch.setattr(onboard_mod.auth_cli, "auth_anthropic", anthropic)
+    await onboard_mod._run_cloud_auth("anthropic")
+    anthropic.assert_awaited_once()
+
+
 # ── configure_provider end-to-end ────────────────────────────────────────────
 
 @pytest.mark.asyncio

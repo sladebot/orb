@@ -176,16 +176,55 @@ async def _ensure_authed(provider: str) -> bool:
         proceed = _prompt("Proceed anyway (catalog will likely be empty)? [y/N]", default="n").lower()
         return proceed in {"y", "yes"}
 
+    # Cloud provider — fold the auth step into the onboard flow.
     if _auth_status(provider) == "authed":
-        return True
-    choice = _prompt(f"{provider} is not authenticated. Run auth now? [Y/n]", default="y").lower()
-    if choice not in {"y", "yes"}:
-        return False
+        choice = _prompt(
+            f"{provider} is already authenticated. Re-authenticate? [y/N]",
+            default="n",
+        ).lower()
+        if choice not in {"y", "yes"}:
+            return True
+    else:
+        choice = _prompt(
+            f"{provider} is not authenticated. Run auth now? [Y/n]",
+            default="y",
+        ).lower()
+        if choice not in {"y", "yes"}:
+            return False
+
+    await _run_cloud_auth(provider)
+    return _auth_status(provider) == "authed"
+
+
+async def _run_cloud_auth(provider: str) -> None:
+    """Delegate to the right auth flow for a cloud provider.
+
+    `auth_anthropic` already handles both an Anthropic API key and a Claude
+    setup-token behind one prompt, so no sub-menu is needed there. For
+    `openai-codex` we surface the classic choice between browser OAuth and
+    an API key (parity with the old onboard's OpenAI sub-menu).
+    """
     if provider == "anthropic":
         await auth_cli.auth_anthropic()
-    elif provider == "openai-codex":
+        return
+
+    if provider == "openai-codex":
+        choice = _prompt(
+            "OpenAI auth method — [1] Browser OAuth  [2] Paste API key",
+            default="1",
+        )
+        if choice in {"2", "key", "api", "api-key"}:
+            key = _prompt("OpenAI API key")
+            if not key:
+                print("  No OpenAI API key provided.")
+                return
+            auth_cli._save_credentials("openai", {"api_key": key})
+            print(f"  OpenAI key stored at {auth_cli.CREDS_PATH}")
+            return
         await auth_cli.auth_openai()
-    return _auth_status(provider) == "authed"
+        return
+
+    print(f"  No auth handler for {provider}.")
 
 
 # ── catalog refresh ──────────────────────────────────────────────────────────
