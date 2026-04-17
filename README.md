@@ -8,15 +8,35 @@ It is built around a simple idea: treat coordination as a runtime problem, not j
 
 The browser dashboard shows run output, the live agent topology, and the per-node activity stream side by side. Agents render as rounded-pill chips with a role glyph, the active model, and a role-colored status dot that pulses while the node is working.
 
-![Agent topology panel](docs/orb-dashboard-graph.png)
+### Workflow
+
+1. Open the dashboard (`orb dashboard`), pick a topology from the composer dropdown, type a task, and press **Execute**.
+2. The graph panel renders the chosen topology and lights up nodes as they start work.
+3. Messages stream into the Run Output panel on the left and the per-node Activity panel on the right.
+4. A run finishes with a completion pill and the transcript stays available in the trace browser.
+
+<video src="docs/orb-dashboard-workflow.webm" controls muted playsinline width="820"></video>
+
+<sub>(If the video doesn't render in your viewer, the file lives at `docs/orb-dashboard-workflow.webm`. Regenerate any of these assets with `node scripts/capture-topologies.mjs`.)</sub>
+
+![Composer with topology dropdown](docs/orb-dashboard-composer.png)
+
+### Topologies
+
+| Triad | Dual Review | Hierarchy |
+|---|---|---|
+| ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
+| Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
+
+### Legacy demos
+
+Earlier recordings of the same topologies running on the pre-redesign dashboard:
+
+![Triad demo](demo/orb-triad-demo.gif) ![Dual review demo](demo/orb-dual-review-demo.gif) ![Hierarchy demo](demo/orb-hierarchy-demo.gif)
+
+### TUI
 
 ![Orb TUI](docs/orb-tui.png)
-
-![Triad demo](demo/orb-triad-demo.gif)
-
-![Dual review demo](demo/orb-dual-review-demo.gif)
-
-![Hierarchy demo](demo/orb-hierarchy-demo.gif)
 
 ## What Orb Does
 
