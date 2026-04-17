@@ -164,30 +164,53 @@ def _mock_httpx_get(monkeypatch, responses: dict[str, int | Exception]):
 def test_probe_local_hits_ollama_tags_endpoint(monkeypatch):
     cfg = {"providers": {"ollama": {"base_url": "http://localhost:11434"}}}
     _mock_httpx_get(monkeypatch, {"http://localhost:11434/api/tags": 200})
-    reachable, url = onboard_mod._probe_local("ollama", cfg)
-    assert reachable is True
+    state, url = onboard_mod._probe_local("ollama", cfg)
+    assert state == "ok"
     assert url == "http://localhost:11434/api/tags"
 
 
 def test_probe_local_hits_omlx_models_endpoint(monkeypatch):
     cfg = {"providers": {"omlx": {"base_url": "http://localhost:8000/v1"}}}
     _mock_httpx_get(monkeypatch, {"http://localhost:8000/v1/models": 200})
-    reachable, url = onboard_mod._probe_local("omlx", cfg)
-    assert reachable is True
+    state, url = onboard_mod._probe_local("omlx", cfg)
+    assert state == "ok"
     assert url == "http://localhost:8000/v1/models"
 
 
-def test_probe_local_returns_false_on_connection_error(monkeypatch):
+def test_probe_local_returns_down_on_connection_error(monkeypatch):
     cfg = {"providers": {"vmlx": {"base_url": "http://localhost:1234/v1"}}}
     _mock_httpx_get(monkeypatch, {"http://localhost:1234/v1/models": ConnectionError("down")})
-    reachable, url = onboard_mod._probe_local("vmlx", cfg)
-    assert reachable is False
+    state, url = onboard_mod._probe_local("vmlx", cfg)
+    assert state == "down"
     assert url == "http://localhost:1234/v1/models"
 
 
+def test_probe_local_returns_auth_on_401(monkeypatch):
+    cfg = {"providers": {"omlx": {"base_url": "http://localhost:8000/v1"}}}
+    _mock_httpx_get(monkeypatch, {"http://localhost:8000/v1/models": 401})
+    state, url = onboard_mod._probe_local("omlx", cfg)
+    assert state == "auth"
+    assert url == "http://localhost:8000/v1/models"
+
+
+def test_probe_local_sends_api_key_when_configured(monkeypatch):
+    cfg = {"providers": {"omlx": {"base_url": "http://localhost:8000/v1", "api_key": "sk-x"}}}
+    captured: dict = {}
+
+    def _fake_get(url, *args, **kwargs):
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers")
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(onboard_mod.httpx, "get", _fake_get)
+    state, _ = onboard_mod._probe_local("omlx", cfg)
+    assert state == "ok"
+    assert captured["headers"] == {"Authorization": "Bearer sk-x"}
+
+
 def test_probe_local_rejects_cloud_provider(monkeypatch):
-    reachable, url = onboard_mod._probe_local("anthropic", {})
-    assert reachable is False
+    state, url = onboard_mod._probe_local("anthropic", {})
+    assert state == "down"
     assert url == ""
 
 
@@ -205,24 +228,53 @@ def test_auth_status_local_reports_unreachable(monkeypatch):
     assert "not reachable" in status
 
 
+def test_auth_status_local_reports_auth_required(monkeypatch):
+    cfg = {"providers": {"omlx": {"base_url": "http://localhost:8000/v1"}}}
+    _mock_httpx_get(monkeypatch, {"http://localhost:8000/v1/models": 401})
+    status = onboard_mod._auth_status("omlx", cfg)
+    assert "auth required" in status
+
+
 @pytest.mark.asyncio
 async def test_ensure_authed_local_aborts_when_unreachable(monkeypatch):
     _inputs(monkeypatch, ["n"])  # decline the "proceed anyway" prompt
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (False, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("down", "http://x/y"))
     assert await onboard_mod._ensure_authed("ollama") is False
 
 
 @pytest.mark.asyncio
 async def test_ensure_authed_local_allows_override(monkeypatch):
     _inputs(monkeypatch, ["y"])
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (False, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("down", "http://x/y"))
     assert await onboard_mod._ensure_authed("ollama") is True
 
 
 @pytest.mark.asyncio
 async def test_ensure_authed_local_passes_when_reachable(monkeypatch):
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (True, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("ok", "http://x/y"))
     assert await onboard_mod._ensure_authed("ollama") is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_authed_local_prompts_for_api_key_on_401(isolated_config, monkeypatch):
+    _inputs(monkeypatch, ["sk-test-omlx"])
+
+    # First probe returns auth-required; after the api_key is saved, the
+    # follow-up probe (invoked from `_prompt_local_api_key`) returns ok.
+    probes = iter([("auth", "http://localhost:8000/v1/models"), ("ok", "http://localhost:8000/v1/models")])
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: next(probes))
+
+    result = await onboard_mod._ensure_authed("omlx")
+    assert result is True
+    saved = json.loads(isolated_config.read_text())
+    assert saved["providers"]["omlx"]["api_key"] == "sk-test-omlx"
+
+
+@pytest.mark.asyncio
+async def test_ensure_authed_local_skip_on_empty_api_key(isolated_config, monkeypatch):
+    _inputs(monkeypatch, [""])  # Just hit Enter → skip
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("auth", "http://x/y"))
+    assert await onboard_mod._ensure_authed("omlx") is False
 
 
 @pytest.mark.asyncio
@@ -328,7 +380,7 @@ async def test_configure_provider_saves_catalog_and_defaults(isolated_config, mo
     # Toggle model #3 off, confirm, answer "no" to same-for-all, then keep
     # each tier default.
     _inputs(monkeypatch, ["3", "", "n", "", "", ""])
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (True, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("ok", "http://x/y"))
 
     with patch.object(onboard_mod, "_refresh_catalog", new_callable=AsyncMock):
         await onboard_mod.configure_provider("ollama")
@@ -358,7 +410,7 @@ async def test_configure_provider_disables_when_nothing_selected(isolated_config
     isolated_config.write_text(json.dumps(cfg))
 
     _inputs(monkeypatch, ["n", ""])
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (True, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("ok", "http://x/y"))
     with patch.object(onboard_mod, "_refresh_catalog", new_callable=AsyncMock):
         await onboard_mod.configure_provider("ollama")
 
@@ -370,7 +422,7 @@ async def test_configure_provider_disables_when_nothing_selected(isolated_config
 @pytest.mark.asyncio
 async def test_configure_provider_bails_when_catalog_is_empty(isolated_config, monkeypatch):
     _inputs(monkeypatch, [])  # should abort before any prompt
-    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: (True, "http://x/y"))
+    monkeypatch.setattr(onboard_mod, "_probe_local", lambda *_a, **_k: ("ok", "http://x/y"))
     with patch.object(onboard_mod, "_refresh_catalog", new_callable=AsyncMock):
         await onboard_mod.configure_provider("omlx")
 

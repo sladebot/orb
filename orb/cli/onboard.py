@@ -80,18 +80,25 @@ def _resolve_local_endpoint(provider: str, cfg: dict[str, Any]) -> str:
     return fn().rstrip("/") if fn else ""
 
 
-def _probe_local(provider: str, cfg: dict[str, Any] | None = None) -> tuple[bool, str]:
-    """Return `(reachable, probe_url)` for a local provider.
+def _probe_local(provider: str, cfg: dict[str, Any] | None = None) -> tuple[str, str]:
+    """Probe a local provider's catalog endpoint.
+
+    Returns `(state, probe_url)` where `state` is one of:
+
+      • ``"ok"``       — got a 2xx response.
+      • ``"auth"``     — server is up but rejected us (401/403).
+      • ``"server"``   — server returned 5xx.
+      • ``"down"``     — connection refused / timeout / no base_url.
 
     Hits the same catalog endpoint the runtime uses when refreshing
     (ollama = `/api/tags`, vmlx/omlx = `/v1/models`). A 2s timeout keeps the
     provider list snappy even when a server is down.
     """
     if PROVIDER_META.get(provider, {}).get("kind") != "local":
-        return False, ""
+        return "down", ""
     base = _resolve_local_endpoint(provider, cfg or config_cli.load_config())
     if not base:
-        return False, ""
+        return "down", ""
 
     root = base[:-3].rstrip("/") if base.endswith("/v1") else base
 
@@ -100,11 +107,41 @@ def _probe_local(provider: str, cfg: dict[str, Any] | None = None) -> tuple[bool
     else:  # vmlx, omlx — OpenAI-compatible
         probe_url = f"{root}/v1/models"
 
+    # Send the api_key if we have one so we don't mis-report a reachable
+    # server as "auth" when it'd actually work.
+    api_key = _resolve_local_api_key(provider, cfg or config_cli.load_config())
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+
     try:
-        resp = httpx.get(probe_url, timeout=2.0)
-        return resp.status_code < 500, probe_url
+        resp = httpx.get(probe_url, timeout=2.0, headers=headers)
     except Exception:
-        return False, probe_url
+        return "down", probe_url
+
+    if resp.status_code in (401, 403):
+        return "auth", probe_url
+    if resp.status_code >= 500:
+        return "server", probe_url
+    return "ok", probe_url
+
+
+def _resolve_local_api_key(provider: str, cfg: dict[str, Any]) -> str | None:
+    """Resolve a local provider's api_key, preferring the saved config,
+    then the matching env-var helper (OMLX_API_KEY / VMLX_API_KEY)."""
+    providers = cfg.get("providers") or {}
+    entry = providers.get(provider) or {}
+    existing = entry.get("api_key") if isinstance(entry, dict) else None
+    if existing:
+        return str(existing)
+    try:
+        if provider == "omlx":
+            from orb.llm.registry import _omlx_api_key
+            return _omlx_api_key()
+        if provider == "vmlx":
+            from orb.llm.registry import _vmlx_api_key
+            return _vmlx_api_key()
+    except Exception:
+        return None
+    return None
 
 
 # ── auth / reachability status ───────────────────────────────────────────────
@@ -112,9 +149,13 @@ def _probe_local(provider: str, cfg: dict[str, Any] | None = None) -> tuple[bool
 def _auth_status(provider: str, cfg: dict[str, Any] | None = None) -> str:
     meta = PROVIDER_META[provider]
     if meta["kind"] == "local":
-        reachable, endpoint = _probe_local(provider, cfg)
-        if reachable and endpoint:
+        state, endpoint = _probe_local(provider, cfg)
+        if state == "ok" and endpoint:
             return f"running at {endpoint}"
+        if state == "auth" and endpoint:
+            return f"auth required ({endpoint})"
+        if state == "server" and endpoint:
+            return f"server error ({endpoint})"
         if endpoint:
             return f"not reachable ({endpoint})"
         return "local"
@@ -165,11 +206,17 @@ def _pick_provider() -> str | None:
 async def _ensure_authed(provider: str) -> bool:
     meta = PROVIDER_META[provider]
     if meta["kind"] == "local":
-        reachable, endpoint = _probe_local(provider)
-        if reachable:
+        state, endpoint = _probe_local(provider)
+        if state == "ok":
             print(f"{provider}: reachable at {endpoint}")
             return True
-        if endpoint:
+        if state == "auth":
+            # Server is up but rejected us — offer to collect an api_key and
+            # re-probe. This mirrors the cloud-auth path inside one command.
+            return await _prompt_local_api_key(provider, endpoint)
+        if state == "server" and endpoint:
+            print(f"{provider}: {endpoint} returned a 5xx error.")
+        elif endpoint:
             print(f"{provider}: not reachable at {endpoint}. Start the server and try again.")
         else:
             print(f"{provider}: no base_url configured; set it in ~/.orb/config.json first.")
@@ -194,6 +241,39 @@ async def _ensure_authed(provider: str) -> bool:
 
     await _run_cloud_auth(provider)
     return _auth_status(provider) == "authed"
+
+
+async def _prompt_local_api_key(provider: str, endpoint: str) -> bool:
+    """Collect an api_key for a local provider that rejected us with 401/403.
+
+    On accept: saves `providers.<name>.api_key` to ~/.orb/config.json and
+    re-probes to confirm. On decline: returns False so the caller can skip.
+    """
+    env_var = f"{provider.upper()}_API_KEY"
+    print(
+        f"{provider}: {endpoint} requires authentication (got 401/403).\n"
+        f"  Paste an api_key to save into ~/.orb/config.json, or press Enter to skip.\n"
+        f"  (You can also set the {env_var} env var instead.)"
+    )
+    key = _prompt("api_key")
+    if not key:
+        return False
+
+    cfg = config_cli.load_config()
+    providers = cfg.get("providers") or {}
+    entry = dict(providers.get(provider) or {})
+    entry["api_key"] = key
+    providers[provider] = entry
+    cfg["providers"] = providers
+    config_cli.save_config(cfg)
+
+    state, _ = _probe_local(provider, cfg)
+    if state == "ok":
+        print(f"  {provider}: api_key saved; endpoint now reachable.")
+        return True
+    print(f"  {provider}: api_key saved but probe still returned '{state}'.")
+    proceed = _prompt("Proceed anyway (catalog may be empty)? [y/N]", default="n").lower()
+    return proceed in {"y", "yes"}
 
 
 async def _run_cloud_auth(provider: str) -> None:
