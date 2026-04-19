@@ -834,7 +834,14 @@ class Dashboard {
         // Render lock icon
         const icon = document.getElementById('breadcrumbs-lock-icon');
         if (icon) icon.classList.toggle('on', !!this._sessionLock.topology);
-        // Disable the inline topology dropdown when pinned
+        // Once the session has a locked topology, the composer shouldn't
+        // re-ask for it — it's already determined for the whole session.
+        // Hide the topology dropdown entirely; users change it via the
+        // "New Session" modal if they want a different one.
+        const dropdown = document.getElementById('topology-dropdown');
+        if (dropdown) {
+            dropdown.classList.toggle('hidden', !!this._sessionLock.topology);
+        }
         const trigger = document.getElementById('topology-trigger');
         if (trigger) {
             if (this._sessionLock.topology) {
