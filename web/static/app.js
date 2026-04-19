@@ -858,29 +858,37 @@ class Dashboard {
         const workdir = (workdirInput?.value || '').trim();
         this._sessionConfig.workdir = workdir;
 
-        // If workdir differs from the current lock, start a fresh session
-        // scoped to that path. Otherwise we just stash the UI config.
-        const needsNewSession = workdir && workdir !== this._sessionLock.workdir;
+        // "Apply" always starts a fresh session with the chosen workdir,
+        // topology, and per-node models. The old path only started a new
+        // session when the workdir changed — confusing when the user
+        // switches topology/models but keeps the folder.
         const applyBtn = document.getElementById('session-config-apply');
-        if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Applying…'; }
+        const hint = document.getElementById('session-config-footer-hint');
+        if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Creating…'; }
+        if (hint) hint.textContent = 'Creating a fresh session — transcript and turn count reset.';
         try {
-            if (needsNewSession) {
-                const res = await fetch('/api/session/new', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ workdir }),
-                });
-                const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-                if (!data.ok) {
-                    const hint = document.getElementById('session-config-footer-hint');
-                    if (hint) hint.textContent = data.error || 'Failed to create session';
-                    return;
-                }
-                if (data.session_id) this._updateSessionUrl(data.session_id);
-                if (data.init) this._handleInit(data.init);
+            // Clear the UI's lock state so the subsequent init event treats
+            // this as a brand-new session (re-probes workdir files, etc.).
+            this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
+            this._fileChanges = new Map();
+            this._workspaceFiles = [];
+
+            const res = await fetch('/api/session/new', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(workdir ? { workdir } : {}),
+            });
+            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            if (!data.ok) {
+                if (hint) hint.textContent = data.error || 'Failed to create session';
+                return;
             }
-            // Reflect picked topology in the composer trigger + state so the
-            // next /api/start call sends it through.
+            if (data.session_id) this._updateSessionUrl(data.session_id);
+            if (data.init) this._handleInit(data.init);
+
+            // Reflect picked topology + manual agent_models for the FIRST
+            // /api/start on the fresh session; the server locks them in
+            // after planning, so subsequent messages reuse automatically.
             this._selectedTopology = this._sessionConfig.topology;
             this._userOverrodeTopology = this._sessionConfig.topology !== 'auto';
             this._updateTopologyTrigger?.();
