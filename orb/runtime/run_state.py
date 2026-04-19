@@ -95,14 +95,21 @@ _TRANSITIONS: dict[str, Transition] = {
         ),
         Transition(
             event="orchestrator_succeeded",
-            from_states=frozenset({RunState.RUNNING}),
+            # STOPPING is included for the stop-vs-natural-completion race:
+            # stop_run fires stop_requested (→ STOPPING) then cancels the
+            # task. If the task completed before cancel was delivered, the
+            # actual outcome wins over the late stop request — otherwise the
+            # FSM would be stuck in STOPPING forever.
+            from_states=frozenset({RunState.RUNNING, RunState.STOPPING}),
             to_state=RunState.COMPLETED,
         ),
         Transition(
             event="orchestrator_errored",
             # Planning failures (e.g. classifier unreachable) also land here
             # so we never hold the FSM in PLANNING after an aborted start.
-            from_states=frozenset({RunState.PLANNING, RunState.RUNNING}),
+            # STOPPING is included for the same race reason as
+            # orchestrator_succeeded above.
+            from_states=frozenset({RunState.PLANNING, RunState.RUNNING, RunState.STOPPING}),
             to_state=RunState.ERRORED,
         ),
         Transition(
@@ -129,8 +136,8 @@ _TRANSITIONS: dict[str, Transition] = {
 }
 
 
-# States where a run is "in flight" from the caller's perspective. The
-# legacy `GraphRuntime.running` bool maps to this set.
+# States where a run is "in flight" from the caller's perspective —
+# planning, running, or winding down via stop. Anything else is terminal.
 IN_FLIGHT_STATES: frozenset[RunState] = frozenset(
     {RunState.PLANNING, RunState.RUNNING, RunState.STOPPING}
 )
@@ -164,10 +171,7 @@ class RunStateMachine:
 
     @property
     def is_in_flight(self) -> bool:
-        """True iff a run is active (PLANNING/RUNNING/STOPPING).
-
-        Backward-compatible mirror of the old `GraphRuntime.running` bool.
-        """
+        """True iff a run is active (PLANNING/RUNNING/STOPPING)."""
         return self._state in IN_FLIGHT_STATES
 
     @property

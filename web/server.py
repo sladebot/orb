@@ -237,7 +237,7 @@ class DashboardServer:
 
     async def _run_status_handler(self, request: web.Request) -> web.Response:
         return web.json_response({
-            "running": self.runtime.running,
+            "run_state": self.runtime.run_state.value,
             "message_count": self.state.message_count,
         })
 

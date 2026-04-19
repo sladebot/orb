@@ -1173,8 +1173,8 @@ class Dashboard {
             case 'agent_heartbeat': this._handleAgentHeartbeat(data); break;
             case 'complete':       this._handleComplete(data);       break;
             case 'stats':          this._handleStats(data);          break;
-            case 'stopped':        this._handleStopped();            break;
             case 'run_complete':   this._handleRunComplete(data);    break;
+            case 'run_state_changed': this._handleRunStateChanged(data); break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
             case 'file_write':     this._handleFileWrite(data);      break;
             case 'topologies_reloaded': this._loadTopologyOptions();   break;
@@ -1267,13 +1267,16 @@ class Dashboard {
         if (data.stats) this._handleStats(data.stats);
         this._hydrateLiveCodeChangesFromInit(data);
 
-        // Determine UI state based on run state
-        if (data.run_active === true) {
-            // Mid-run reconnect
+        // Determine UI state from the runtime FSM's run_state. The six
+        // enum values map to two higher-level UI modes: in-flight (the
+        // canvas runs live) vs. terminal (show the last result).
+        this._runState = data.run_state || 'idle';
+        const inFlight = ['planning', 'running', 'stopping'].includes(this._runState);
+        if (inFlight) {
             this._setRunActive(true);
             this.graph.setRunState('running');
             this._hydrateCodeChangesFromInit(data);
-        } else if (data.completed === true) {
+        } else if (this._runState === 'completed') {
             // Reconnect after a finished run: keep the result in the left rail only.
             this._setRunActive(false);
             this.graph.setRunState('completed');
@@ -2850,6 +2853,50 @@ class Dashboard {
         btn.disabled = true;
         if (label) label.textContent = 'Stopping…';
         await fetch('/api/stop', { method: 'POST' });
+    }
+
+    _handleRunStateChanged(data) {
+        // Live FSM transition from the runtime. Authoritative source for
+        // what state the runtime is in right now.
+        const from = data.from || '';
+        const to = data.to || 'idle';
+        const event = data.event || '';
+        this._runState = to;
+        const inFlightStates = new Set(['planning', 'running', 'stopping']);
+        const inFlight = inFlightStates.has(to);
+        if (inFlight !== this._isRunActive) {
+            this._setRunActive(inFlight);
+        }
+        // Drive the graph renderer based on the target state.
+        if (to === 'planning' || to === 'running') {
+            this.graph.setRunState('running');
+        } else if (to === 'completed') {
+            this.graph.setRunState('completed');
+        } else if (to === 'errored') {
+            this.graph.setRunState('idle');
+        } else if (to === 'idle') {
+            this.graph.setRunState('idle');
+        }
+        // Surface the state pill in the summary strip.
+        const el = document.getElementById('stat-status');
+        if (el) {
+            const label = to.charAt(0).toUpperCase() + to.slice(1);
+            el.textContent = label;
+            const cls = ({
+                idle: 'status-waiting',
+                planning: 'status-running',
+                running: 'status-running',
+                stopping: 'status-error',
+                completed: 'status-done',
+                errored: 'status-error',
+            })[to] || 'status-waiting';
+            el.className = `stat-value ${cls}`;
+            this._setText('hero-status-label', label);
+        }
+        // Disable Send while stopping so users don't queue up inject
+        // messages that will just be swallowed by the cancel.
+        const send = document.getElementById('query-send');
+        if (send) send.disabled = (to === 'stopping');
     }
 
     _handleStopped() {

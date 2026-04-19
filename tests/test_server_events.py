@@ -179,7 +179,6 @@ class TestDashboardBridge:
         assert bridge.state.agents == {}
         assert bridge.state.message_count == 0
         assert bridge.state.activity_events == []
-        assert bridge.state.completed is False
 
     def test_to_init_event_structure(self):
         state = DashboardState()

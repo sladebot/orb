@@ -48,6 +48,10 @@ class GraphRuntime:
         self._agents: dict = {}
         self._run_task: asyncio.Task | None = None
         self._fsm = RunStateMachine()
+        # Every FSM transition fans out as a `run_state_changed` broadcast
+        # so dashboards can react to the explicit lifecycle without
+        # reconstructing it from several independent flags.
+        self._fsm.subscribe(self._on_fsm_state_changed)
         self._providers: dict = {}
         self._all_providers: dict = {}
         self._enabled_providers: list[str] = []
@@ -201,13 +205,12 @@ class GraphRuntime:
         return options
 
     @property
-    def running(self) -> bool:
-        """True while a run is planning, executing, or being stopped.
+    def is_run_in_flight(self) -> bool:
+        """True iff the FSM is in PLANNING, RUNNING, or STOPPING.
 
-        Backed by the RunStateMachine. The legacy `_run_task`-based check
-        is still useful for asyncio bookkeeping (see ``stop()`` and
-        ``wait_for_run()``), but external callers should prefer this
-        property or ``run_state`` below.
+        Callers that need a bool (e.g. the /api/run-status endpoint) use
+        this; anyone who cares about *which* in-flight state should read
+        ``run_state`` directly.
         """
         return self._fsm.is_in_flight
 
@@ -241,6 +244,29 @@ class GraphRuntime:
                 stale.append(callback)
         for callback in stale:
             self._subscribers.discard(callback)
+
+    def _on_fsm_state_changed(self, from_state: RunState, to_state: RunState, event: str) -> None:
+        """FSM listener — schedule a ``run_state_changed`` WebSocket broadcast.
+
+        Fired synchronously by RunStateMachine.fire(); we hand off to the
+        asyncio loop so the FSM never waits on IO. If no loop is running
+        (e.g. during unit tests that drive the FSM directly), silently skip
+        the broadcast — there's nobody to notify.
+        """
+        elapsed = time.time() - (self.state.start_time or time.time())
+        payload = json.dumps({
+            "type": "run_state_changed",
+            "from": from_state.value,
+            "to": to_state.value,
+            "event": event,
+            "at": round(elapsed, 3),
+        })
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("run_state_changed suppressed (no running loop): %s -> %s", from_state.value, to_state.value)
+            return
+        loop.create_task(self._broadcast(payload))
 
     def configure(self, providers: dict, config, model_overrides, tier_override) -> None:
         self._all_providers = dict(providers)
@@ -703,12 +729,14 @@ class GraphRuntime:
         file_changes = snapshot.get("file_changes") or []
         return file_changes if isinstance(file_changes, list) else []
 
-    def _dashboard_snapshot_payload(self, *, session_id: str | None = None, run_active: bool | None = None) -> dict:
+    def _dashboard_snapshot_payload(self, *, session_id: str | None = None) -> dict:
         payload = self.state.to_init_event()
         resolved_session_id = session_id or payload.get("session_id") or self._conversation_session.session_id
         payload["session_id"] = resolved_session_id
         payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
-        payload["run_active"] = self.running if run_active is None else bool(run_active)
+        # `run_state` is the single source of truth — callers read the enum
+        # value and decide for themselves what to show (in-flight UI, result
+        # pane, error banner, etc.). No more `run_active: bool` shim.
         payload["run_state"] = self._fsm.state.value
         # Expose session-level lock + workdir so the UI can show "pinned"
         # topology/models and disable re-classification affordances.
@@ -787,13 +815,13 @@ class GraphRuntime:
             self.state.final_diff,
         ))
 
-    def _persist_dashboard_snapshot(self, *, run_active: bool | None = None) -> None:
+    def _persist_dashboard_snapshot(self) -> None:
         session_id = self._conversation_session.session_id
         if not session_id:
             return
         try:
             self._write_dashboard_snapshot(
-                self._dashboard_snapshot_payload(session_id=session_id, run_active=run_active),
+                self._dashboard_snapshot_payload(session_id=session_id),
                 session_id=session_id,
             )
         except OSError as exc:
@@ -933,7 +961,7 @@ class GraphRuntime:
             return
         snapshot = self._load_dashboard_snapshot(session_id) or self._dashboard_snapshot_payload(
             session_id=session_id,
-            run_active=self.running,
+            
         )
         existing = {
             str(change.get("path")): dict(change)
@@ -947,7 +975,6 @@ class GraphRuntime:
             "old_content": old_content,
         }
         snapshot["file_changes"] = list(existing.values())
-        snapshot["run_active"] = self.running
         try:
             self._write_dashboard_snapshot(snapshot, session_id=session_id)
         except OSError as exc:
@@ -959,7 +986,7 @@ class GraphRuntime:
             return
         snapshot = self._load_dashboard_snapshot(resolved_session_id) or self._dashboard_snapshot_payload(
             session_id=resolved_session_id,
-            run_active=self.running,
+            
         )
         snapshot["file_changes"] = []
         try:
@@ -1074,23 +1101,21 @@ class GraphRuntime:
         current_snapshot = self._load_dashboard_snapshot(current_session_id)
 
         if requested_session_id:
-            if requested_session_id != current_session_id or not self.running:
+            if requested_session_id != current_session_id or not self.is_run_in_flight:
                 snapshot = self._load_dashboard_snapshot(requested_session_id)
                 if snapshot:
                     snapshot["type"] = "init"
-                    snapshot["run_active"] = bool(self.running and requested_session_id == current_session_id)
                     return snapshot
 
-        if not self.running and not self._has_live_dashboard_state():
+        if not self.is_run_in_flight and not self._has_live_dashboard_state():
             snapshot = current_snapshot
             if snapshot:
                 snapshot["type"] = "init"
-                snapshot["run_active"] = False
                 return snapshot
 
         live_payload = self._dashboard_snapshot_payload(
             session_id=requested_session_id or current_session_id,
-            run_active=self.running,
+            
         )
         if requested_session_id and requested_session_id == current_session_id:
             return self._merge_dashboard_snapshot(live_payload, current_snapshot)
@@ -1115,12 +1140,22 @@ class GraphRuntime:
         }))
 
     async def stop(self) -> None:
+        """Force-cancel the in-flight task (daemon shutdown path).
+
+        Unlike ``stop_run`` this skips the user-facing broadcast but still
+        drives the FSM through STOPPING → IDLE so downstream listeners see a
+        coherent lifecycle trail on shutdown.
+        """
         if self._run_task and not self._run_task.done():
+            self._fsm.maybe_fire("stop_requested")
             self._run_task.cancel()
             try:
                 await self._run_task
             except asyncio.CancelledError:
                 pass
+            # Defensive: if the orchestrator's CancelledError branch didn't
+            # already drain STOPPING → IDLE, do it here.
+            self._fsm.maybe_fire("stop_finished")
 
     async def wait_for_run(self) -> None:
         if self._run_task:
@@ -1132,7 +1167,7 @@ class GraphRuntime:
     async def inject_message(self, target_id: str, text: str) -> tuple[int, dict]:
         from orb.messaging.message import Message, MessageType
 
-        if not self.running:
+        if not self.is_run_in_flight:
             return 400, {"ok": False, "error": "No run in progress"}
 
         known_targets = {aid.lower() for aid in self._agents}
@@ -1195,7 +1230,7 @@ class GraphRuntime:
 
         if not self._providers:
             return 500, {"ok": False, "error": "Server has no providers configured"}
-        if self.running:
+        if self.is_run_in_flight:
             return 200, {"ok": False, "error": "Run already in progress"}
 
         # Validate the workdir BEFORE announcing PLANNING so a bad path
@@ -1223,6 +1258,31 @@ class GraphRuntime:
                 return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
             self._conversation_session.workdir = resolved_workdir
 
+        # Everything from here through orchestrator_task_created is "planning":
+        # any exception leaves the FSM stuck in PLANNING if we don't catch it,
+        # permanently wedging the runtime. Wrap the whole body so we always
+        # land in ERRORED on unexpected failures.
+        try:
+            return await self._start_run_planning(
+                query=query,
+                topology=topology,
+                model_pin=model_pin,
+                agent_models=agent_models,
+            )
+        except Exception as exc:
+            logger.exception("start_run planning failed session=%s", self._conversation_session.session_id)
+            self._fsm.maybe_fire("orchestrator_errored")
+            return 500, {"ok": False, "error": f"Run planning failed: {exc}"}
+
+    async def _start_run_planning(
+        self,
+        *,
+        query: str,
+        topology: str,
+        model_pin: str,
+        agent_models: dict[str, str] | None,
+    ) -> tuple[int, dict]:
+        from orb.topologies import normalize_topology_id
         self.state.reset()
         self._last_result = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
@@ -1389,7 +1449,7 @@ class GraphRuntime:
         self._persist_run_trace()
         self._persist_dashboard_snapshot()
         self._clear_dashboard_file_changes()
-        planning_init = self.current_init_event(session_id=self._conversation_session.session_id) | {"run_active": True}
+        planning_init = self.current_init_event(session_id=self._conversation_session.session_id)
         await self._broadcast(json.dumps(planning_init))
         self._run_task = asyncio.create_task(
             self._run_orchestrator(
@@ -1418,7 +1478,7 @@ class GraphRuntime:
         }
 
     async def stop_run(self) -> dict:
-        if self.running:
+        if self.is_run_in_flight:
             logger.info("run stop session=%s", self._conversation_session.session_id)
             if self._last_trace is not None:
                 self._last_trace.record_human_override(
@@ -1429,16 +1489,20 @@ class GraphRuntime:
             # PLANNING/RUNNING → STOPPING. The actual IDLE transition
             # happens inside _run_orchestrator's CancelledError branch
             # once the task unwinds.
+            # stop_requested fires an FSM transition which the listener
+            # turns into a `run_state_changed` broadcast — no need for a
+            # separate `{"type": "stopped"}` event. The CancelledError
+            # branch inside _run_orchestrator will fire stop_finished and
+            # drive the FSM back to IDLE.
             self._fsm.maybe_fire("stop_requested")
             if self._run_task is not None:
                 self._run_task.cancel()
-            self._persist_dashboard_snapshot(run_active=False)
-            await self._broadcast(json.dumps({"type": "stopped"}))
+            self._persist_dashboard_snapshot()
             return {"ok": True}
         return {"ok": False, "error": "No run in progress"}
 
     async def new_session(self, *, workdir: str | None = None) -> tuple[int, dict]:
-        if self.running:
+        if self.is_run_in_flight:
             return 409, {"ok": False, "error": "Cannot start a new session while a run is in progress"}
 
         resolved_workdir = ""
@@ -1453,7 +1517,7 @@ class GraphRuntime:
                 return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
 
         # COMPLETED/ERRORED → IDLE (IDLE → IDLE is a no-op). The FSM guard
-        # on ``session_reset`` rejects in-flight states; ``self.running``
+        # on ``session_reset`` rejects in-flight states; ``self.is_run_in_flight``
         # above already short-circuits those, so this fire is safe.
         self._fsm.maybe_fire("session_reset")
 
@@ -1466,7 +1530,7 @@ class GraphRuntime:
         self._run_transcript = RunTranscript(session=self._conversation_session)
         self._persist_session()
         self._sync_session_state()
-        self._persist_dashboard_snapshot(run_active=False)
+        self._persist_dashboard_snapshot()
         logger.info(
             "session new session=%s workdir=%s",
             self._conversation_session.session_id,
@@ -2139,7 +2203,7 @@ class GraphRuntime:
         if self._config:
             bridge.setup_budget(self._config.budget)
 
-        await self._broadcast(json.dumps(self.current_init_event() | {"run_active": True}))
+        await self._broadcast(json.dumps(self.current_init_event()))
         orchestrator.bus.on_event(bridge.on_message_routed)
         orchestrator.bus.on_event(lambda _event, msg: self._run_transcript.add_message(msg))
         orchestrator._transcript = self._run_transcript
@@ -2250,11 +2314,15 @@ class GraphRuntime:
             raise
         except Exception:
             logger.exception("Orchestrator run failed")
+            # `orchestrator_errored` is valid from both RUNNING and STOPPING
+            # (if a cancel race dropped us into STOPPING before the error
+            # surfaced), so maybe_fire covers both cases.
             self._fsm.maybe_fire("orchestrator_errored")
             result = None
         else:
-            self.state.completed = True
-            # RUNNING → COMPLETED; the completion broadcast fires later.
+            # RUNNING → COMPLETED, or STOPPING → COMPLETED if the user
+            # requested stop after the task already finished naturally. The
+            # FSM transition table explicitly allows both.
             self._fsm.maybe_fire("orchestrator_succeeded")
 
         new_carryover: dict[str, list] = {}
@@ -2296,7 +2364,7 @@ class GraphRuntime:
             self.state.final_result = final_result or ""
             self.state.final_diff = diff or ""
             self.state.session_turn = self._conversation_session.user_turn_count()
-            self._persist_dashboard_snapshot(run_active=False)
+            self._persist_dashboard_snapshot()
             if final_result:
                 logger.info(
                     "run complete session=%s agent=%s elapsed=%.2fs routed=%s result=%s",
@@ -2326,5 +2394,5 @@ class GraphRuntime:
                 data={"completed": bool(result), "message_count": self.state.message_count},
             )
             self._persist_run_trace()
-        self._persist_dashboard_snapshot(run_active=False)
+        self._persist_dashboard_snapshot()
         self._last_result = result

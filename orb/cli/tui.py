@@ -1664,11 +1664,18 @@ class OrbTUI(App[None]):
         self._routed       = stats.get("message_count", 0)
         self._last_elapsed = stats.get("elapsed", 0.0)
 
-        run_active = data.get("run_active", False)
-        completed  = data.get("completed", False)
+        # run_state is the single source of truth from the runtime FSM.
+        # In-flight = planning|running|stopping; terminal = idle|completed|errored.
+        run_state = data.get("run_state", "idle")
+        in_flight_states = {"planning", "running", "stopping"}
+        run_active = run_state in in_flight_states
+        completed = run_state == "completed"
+        errored = run_state == "errored"
         if run_active:
             self._run_status = "Running"
             self._run_start  = time() - stats.get("elapsed", 0)
+        elif errored:
+            self._run_status = "Errored"
         elif completed:
             self._run_status = "Idle"
 

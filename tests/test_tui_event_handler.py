@@ -124,8 +124,7 @@ class TestTuiEventHandler:
             "edges": [{"source": "coordinator", "target": "coder"}],
             "messages": [],
             "stats": {"message_count": 0, "budget_remaining": 200, "elapsed": 0},
-            "run_active": False,
-            "completed": False,
+            "run_state": "idle",
         })
         assert "coordinator" in tui._agents
         assert "coder" in tui._agents
@@ -138,7 +137,7 @@ class TestTuiEventHandler:
             "agents": [{"id": "coder", "role": "Coder", "status": "running", "model": ""}],
             "edges": [], "messages": [],
             "stats": {"message_count": 3, "elapsed": 1.5},
-            "run_active": True, "completed": False,
+            "run_state": "running",
         })
         assert tui._run_status == "Running"
 
@@ -150,7 +149,7 @@ class TestTuiEventHandler:
                         "model": "", "completed_result": "Done"}],
             "edges": [], "messages": [],
             "stats": {"message_count": 5, "elapsed": 2.0},
-            "run_active": False, "completed": True,
+            "run_state": "completed",
         })
         assert tui._run_status == "Idle"
         assert "coder" in tui._completions
@@ -166,7 +165,7 @@ class TestTuiEventHandler:
             "plan": {"topology": {"id": "dual-review", "label": "Dual Review"}},
             "edges": [], "messages": [],
             "stats": {"message_count": 0, "elapsed": 0},
-            "run_active": False, "completed": False,
+            "run_state": "idle",
         })
         assert tui._topology_name == "dual-review"
 
@@ -181,8 +180,7 @@ class TestTuiEventHandler:
             "edges": [{"source": "coder", "target": "reviewer"}],
             "messages": [],
             "stats": {"message_count": 0, "elapsed": 0},
-            "run_active": False,
-            "completed": False,
+            "run_state": "idle",
         })
         assert tui._edges == [("coder", "reviewer")]
 
@@ -196,8 +194,7 @@ class TestTuiEventHandler:
                 "edges": [],
                 "messages": [],
                 "stats": {"message_count": 0, "elapsed": 0},
-                "run_active": False,
-                "completed": False,
+                "run_state": "idle",
             })
         create_task.assert_called_once()
         create_task.call_args.args[0].close()
@@ -224,7 +221,7 @@ class TestTuiEventHandler:
             "agents": [],
             "edges": [], "messages": [],
             "stats": {"message_count": 0, "elapsed": 0},
-            "run_active": False, "completed": False,
+            "run_state": "idle",
         })
         assert "old" not in tui._agents
         assert tui._routed == 0

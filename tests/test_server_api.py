@@ -147,7 +147,7 @@ class TestServerAPI:
         resp = await client.get("/api/run-status")
         assert resp.status == 200
         data = await resp.json()
-        assert data["running"] is False
+        assert data["run_state"] == "idle"
 
     async def test_api_models_returns_list(self, client):
         resp = await client.get("/api/models")
@@ -185,7 +185,9 @@ class TestServerAPI:
         data = await resp.json()
         assert data["ok"] is True
         assert data["init"]["type"] == "init"
-        assert data["init"]["run_active"] is True
+        # Init snapshot surfaces the FSM state directly — in-flight means
+        # planning | running | stopping (the three IN_FLIGHT_STATES).
+        assert data["init"]["run_state"] in {"planning", "running", "stopping"}
         assert data["init"]["plan"]["topology"]["id"] == "triad"
         assert data["init"]["plan"]["query"] == "write hello world"
 

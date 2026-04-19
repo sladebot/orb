@@ -74,7 +74,6 @@ class DashboardState:
     budget: int = 200
     budget_remaining: int = 200
     start_time: float = field(default_factory=time.time)
-    completed: bool = False
     run_query: str = ""
     topology_id: str = ""
     topology_label: str = ""
@@ -104,7 +103,6 @@ class DashboardState:
         self.message_count = 0
         self.budget_remaining = self.budget
         self.start_time = time.time()
-        self.completed = False
         self.run_query = ""
         self.topology_id = ""
         self.topology_label = ""
@@ -126,7 +124,6 @@ class DashboardState:
     def to_init_event(self) -> dict:
         return {
             "type": "init",
-            "completed": self.completed,
             "plan": {
                 "query": self.run_query,
                 "topology": {
