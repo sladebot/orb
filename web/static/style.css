@@ -5871,3 +5871,292 @@ body.v2 #topology-mini {
         top: var(--ndp-top, 380px) !important;
     }
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   V2 — Session Config modal
+   Workdir + topology pick + per-node model selection in one place.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+body.v2 #session-config-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+}
+body.v2 #session-config-modal.hidden { display: none; }
+body.v2 #session-config-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(8, 11, 16, 0.62);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+body.v2 #session-config-panel {
+    position: relative;
+    width: min(640px, calc(100vw - 48px));
+    max-height: calc(100vh - 72px);
+    margin: 56px auto 0;
+    background: linear-gradient(180deg, rgba(24, 30, 40, 0.98), rgba(14, 18, 24, 0.98));
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.18),
+                0 48px 120px -60px rgba(0, 0, 0, 0.75);
+    border-radius: 18px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+}
+
+body.v2 #session-config-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid rgba(172, 190, 212, 0.1);
+}
+body.v2 #session-config-header .settings-kicker {
+    font-family: var(--font-display);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+body.v2 #session-config-title {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+    letter-spacing: 0.01em;
+}
+body.v2 #session-config-close {
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    line-height: 1;
+}
+body.v2 #session-config-close:hover {
+    color: var(--text-primary);
+    background: rgba(172, 190, 212, 0.08);
+}
+
+body.v2 #session-config-body {
+    padding: 16px 20px 8px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    flex: 1;
+    min-height: 0;
+}
+
+body.v2 #session-config-lock-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(240, 201, 130, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(240, 201, 130, 0.22);
+    border-radius: 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--warning);
+}
+body.v2 #session-config-lock-banner.hidden { display: none; }
+body.v2 #session-config-lock-banner .lock-icon {
+    color: var(--warning);
+    font-size: 10px;
+}
+body.v2 #session-config-lock-banner .lock-copy {
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+}
+
+body.v2 .sc-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+body.v2 .sc-section-label {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+body.v2 .sc-section-copy {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+body.v2 .sc-section-copy code {
+    background: rgba(172, 190, 212, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+body.v2 .sc-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+body.v2 #session-config-workdir {
+    flex: 1;
+    background: rgba(20, 25, 32, 0.86);
+    border: 0;
+    outline: 0;
+    padding: 9px 11px;
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.18);
+}
+body.v2 #session-config-workdir::placeholder { color: var(--text-muted); }
+body.v2 #session-config-workdir:focus { box-shadow: inset 0 0 0 1.5px rgba(148, 191, 255, 0.35); }
+
+body.v2 .sc-topology-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+body.v2 .sc-topology-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: rgba(172, 190, 212, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.14);
+    color: var(--text-secondary);
+    font-family: var(--font-display);
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+body.v2 .sc-topology-item:hover { color: var(--text-primary); background: rgba(172, 190, 212, 0.08); }
+body.v2 .sc-topology-item.selected {
+    background: rgba(148, 191, 255, 0.12);
+    color: var(--text-primary);
+    box-shadow: inset 0 0 0 1px rgba(148, 191, 255, 0.36);
+}
+body.v2 .sc-topology-item .tid {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+body.v2 .sc-agent-models {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+}
+body.v2 .sc-agent-row {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    background: rgba(172, 190, 212, 0.03);
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.08);
+    border-radius: 8px;
+}
+body.v2 .sc-agent-row .sc-agent-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-display);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+body.v2 .sc-agent-row .role-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: currentColor;
+    flex-shrink: 0;
+}
+body.v2 .sc-agent-row select {
+    appearance: none;
+    -webkit-appearance: none;
+    background: rgba(20, 25, 32, 0.9);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 6px 30px 6px 10px;
+    border: 0;
+    outline: 0;
+    border-radius: 7px;
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.18);
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    width: 100%;
+}
+body.v2 .sc-agent-row select:focus { box-shadow: inset 0 0 0 1.5px rgba(148, 191, 255, 0.35); }
+body.v2 #session-config-agent-models-section.hidden { display: none; }
+body.v2 #session-config-agent-models .sc-empty {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 8px 10px;
+}
+
+body.v2 #session-config-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 14px 20px 18px;
+    border-top: 1px solid rgba(172, 190, 212, 0.1);
+    background: rgba(16, 21, 28, 0.6);
+}
+body.v2 .sc-footer-hint {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+}
+body.v2 .sc-footer-actions { display: flex; gap: 6px; }
+
+/* ─── Lock indicators in chrome + summary strip ──────────────────────── */
+body.v2 .topology-lock-icon {
+    display: none;
+    color: var(--warning);
+    font-size: 9px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+body.v2 .topology-lock-icon.on { display: inline-block; }
+
+body.v2 #topology-trigger.locked {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+body.v2 #topology-trigger.locked .topology-trigger-chevron { opacity: 0.3; }
+
+/* Responsive — stack modal rows on narrow */
+@media (max-width: 720px) {
+    body.v2 #session-config-panel {
+        margin: 16px;
+        width: auto;
+        max-height: calc(100vh - 32px);
+    }
+    body.v2 .sc-agent-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
+}

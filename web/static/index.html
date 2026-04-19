@@ -26,6 +26,7 @@
                 <span id="breadcrumbs-session" class="run-id" title="Session">—</span>
                 <span class="breadcrumbs-sep">·</span>
                 <span id="breadcrumbs-topology" title="Topology">auto</span>
+                <span id="breadcrumbs-lock-icon" class="topology-lock-icon" title="Topology pinned for this session" aria-hidden="true">●</span>
             </div>
             <div class="chrome-spacer"></div>
             <div id="v2-chrome-actions">
@@ -34,7 +35,8 @@
                     <span id="connection-label">Daemon Offline</span>
                 </div>
                 <button id="stop-run-button" class="v2-btn danger" type="button" title="Stop current run">■ Stop</button>
-                <button id="new-session-button" class="v2-btn" type="button" title="Start a new session">↺ New</button>
+                <button id="session-config-button" class="v2-btn" type="button" title="Configure session: workdir, topology, per-node models">⊘ Session</button>
+                <button id="new-session-button" class="v2-btn" type="button" title="Start a fresh auto session">↺ New</button>
                 <button id="traces-button" class="v2-btn" type="button" title="Browse traces">Traces</button>
                 <div class="v2-chrome-divider"></div>
                 <button id="drawer-toggle" class="v2-btn" type="button" title="Toggle conversation drawer" aria-pressed="true">◂ Chat</button>
@@ -332,6 +334,53 @@
                     </div>
                     <div id="provider-settings-list"></div>
                 </section>
+            </div>
+        </div>
+    </div>
+
+    <div id="session-config-modal" class="hidden" aria-hidden="true">
+        <div id="session-config-backdrop"></div>
+        <div id="session-config-panel" role="dialog" aria-modal="true" aria-labelledby="session-config-title">
+            <div id="session-config-header">
+                <div>
+                    <div class="settings-kicker">Session</div>
+                    <h2 id="session-config-title">Configure session</h2>
+                </div>
+                <button id="session-config-close" type="button" title="Close">×</button>
+            </div>
+            <div id="session-config-body">
+                <div id="session-config-lock-banner" class="hidden">
+                    <span class="lock-icon" aria-hidden="true">●</span>
+                    <span class="lock-copy">A topology is already pinned on this session. Changing it starts a fresh session.</span>
+                </div>
+
+                <section class="sc-section">
+                    <div class="sc-section-label">Workspace</div>
+                    <div class="sc-section-copy">Orb will <code>chdir</code> into this folder. File writes and tool calls will operate on it for the whole session.</div>
+                    <div class="sc-row">
+                        <input id="session-config-workdir" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/repo">
+                        <button id="session-config-workdir-cwd" class="v2-btn" type="button" title="Use daemon's current directory">Use current</button>
+                    </div>
+                </section>
+
+                <section class="sc-section">
+                    <div class="sc-section-label">Topology</div>
+                    <div class="sc-section-copy">Pick a topology to run every turn in this session. Auto lets Orb classify each turn (and later turns reuse the first choice).</div>
+                    <div id="session-config-topology-list" class="sc-topology-list"></div>
+                </section>
+
+                <section class="sc-section" id="session-config-agent-models-section">
+                    <div class="sc-section-label">Per-node models</div>
+                    <div class="sc-section-copy">Pin a specific model for each agent. Leave on <code>auto</code> to let Orb allocate.</div>
+                    <div id="session-config-agent-models" class="sc-agent-models"></div>
+                </section>
+            </div>
+            <div id="session-config-footer">
+                <div class="sc-footer-hint" id="session-config-footer-hint">Creating a session resets transcript and turn count.</div>
+                <div class="sc-footer-actions">
+                    <button id="session-config-cancel" class="v2-btn" type="button">Cancel</button>
+                    <button id="session-config-apply" class="v2-btn primary" type="button">Apply</button>
+                </div>
             </div>
         </div>
     </div>

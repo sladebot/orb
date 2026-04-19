@@ -94,6 +94,14 @@ class Dashboard {
         this._repoSelectedPath = null;
         this._throughputSamples = [];
 
+        // Manual session config (set via the Session modal). Persists until
+        // a run starts and the server locks in the choice.
+        this._sessionConfig = { workdir: '', topology: 'auto', agentModels: {} };
+        this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
+
+        this._setupSessionConfigModal();
+        document.getElementById('session-config-button')?.addEventListener('click', () => this._openSessionConfig());
+
         // Desktop grid column resize
         this._setupGridResize();
         this._restoreGridWidths();
@@ -405,6 +413,229 @@ class Dashboard {
         }, 80);
     }
 
+    _setupSessionConfigModal() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        document.getElementById('session-config-close')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-cancel')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-backdrop')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-apply')?.addEventListener('click', () => this._applySessionConfig());
+        document.getElementById('session-config-workdir-cwd')?.addEventListener('click', () => {
+            const input = document.getElementById('session-config-workdir');
+            if (input) input.value = '';
+            const hint = document.getElementById('session-config-footer-hint');
+            if (hint) hint.textContent = 'Leaving workspace blank keeps the daemon\'s current directory.';
+        });
+    }
+
+    async _openSessionConfig() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+
+        // Seed from current session state
+        const workdirInput = document.getElementById('session-config-workdir');
+        if (workdirInput) {
+            workdirInput.value = this._sessionLock.workdir || this._sessionConfig.workdir || '';
+            workdirInput.focus();
+        }
+
+        // Ensure topology + model catalogs are cached, then render
+        await Promise.all([
+            this._ensureTopologyList(),
+            this._ensureModelList(),
+        ]);
+        // Preselect based on what's locked or configured
+        const seedTopology =
+            this._sessionLock.topology
+            || (this._sessionConfig.topology !== 'auto' ? this._sessionConfig.topology : '')
+            || this._plan?.topology?.id
+            || 'auto';
+        this._sessionConfig.topology = seedTopology;
+        if (this._sessionLock.topology && !Object.keys(this._sessionConfig.agentModels).length) {
+            this._sessionConfig.agentModels = { ...this._sessionLock.agentModels };
+        }
+        this._renderSessionConfigTopologies();
+        this._renderSessionConfigAgentModels();
+        this._renderSessionConfigLockBanner();
+    }
+
+    _closeSessionConfig() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+
+    async _ensureTopologyList() {
+        if (this._topologyList && this._topologyList.length) return;
+        try {
+            const res = await fetch('/api/topologies');
+            const data = await res.json();
+            this._topologyList = Array.isArray(data.topologies) ? data.topologies : [];
+        } catch {
+            this._topologyList = [];
+        }
+    }
+
+    async _ensureModelList() {
+        if (this._modelCatalog && this._modelCatalog.length) return;
+        try {
+            const res = await fetch('/api/models');
+            const data = await res.json();
+            this._modelCatalog = Array.isArray(data.models) ? data.models : [];
+        } catch {
+            this._modelCatalog = [];
+        }
+    }
+
+    _renderSessionConfigTopologies() {
+        const host = document.getElementById('session-config-topology-list');
+        if (!host) return;
+        const items = [{ id: 'auto', label: 'Auto' }, ...(this._topologyList || [])];
+        host.innerHTML = items.map((t) => {
+            const selected = this._sessionConfig.topology === t.id ? ' selected' : '';
+            return `<button type="button" class="sc-topology-item${selected}" data-topology="${this._escapeAttr(t.id)}">
+                <span class="tlabel">${this._escapeHtml(t.label || t.id)}</span>
+                ${t.id !== 'auto' ? `<span class="tid">${this._escapeHtml(t.id)}</span>` : ''}
+            </button>`;
+        }).join('');
+        host.querySelectorAll('.sc-topology-item').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const tid = btn.dataset.topology || 'auto';
+                this._sessionConfig.topology = tid;
+                // Reset per-agent models when topology changes — different agent roster
+                if (tid === 'auto') {
+                    this._sessionConfig.agentModels = {};
+                } else {
+                    const topo = (this._topologyList || []).find((t) => t.id === tid);
+                    const validRoles = new Set(topo?.agents || []);
+                    const next = {};
+                    for (const [role, model] of Object.entries(this._sessionConfig.agentModels || {})) {
+                        if (validRoles.has(role)) next[role] = model;
+                    }
+                    this._sessionConfig.agentModels = next;
+                }
+                this._renderSessionConfigTopologies();
+                this._renderSessionConfigAgentModels();
+            });
+        });
+    }
+
+    _renderSessionConfigAgentModels() {
+        const section = document.getElementById('session-config-agent-models-section');
+        const host = document.getElementById('session-config-agent-models');
+        if (!section || !host) return;
+
+        const tid = this._sessionConfig.topology;
+        if (tid === 'auto') {
+            section.classList.add('hidden');
+            host.innerHTML = '';
+            return;
+        }
+        section.classList.remove('hidden');
+        const topo = (this._topologyList || []).find((t) => t.id === tid);
+        const agents = topo?.agents || [];
+        if (!agents.length) {
+            host.innerHTML = `<div class="sc-empty">No agents defined for this topology.</div>`;
+            return;
+        }
+        const models = this._modelCatalog || [];
+        const options = ['<option value="">auto</option>']
+            .concat(models.map((m) => {
+                const id = String(m.id || '');
+                const label = String(m.label || id);
+                return `<option value="${this._escapeAttr(id)}">${this._escapeHtml(label)}</option>`;
+            }))
+            .join('');
+        host.innerHTML = agents.map((role) => {
+            const selected = this._sessionConfig.agentModels[role] || '';
+            const roleClass = (role || 'generic').toLowerCase();
+            return `<div class="sc-agent-row v2-role-${this._escapeAttr(roleClass)}">
+                <div class="sc-agent-name"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(role, role))}</div>
+                <select data-role="${this._escapeAttr(role)}">${options}</select>
+            </div>`;
+        }).join('');
+        host.querySelectorAll('select').forEach((sel) => {
+            const role = sel.dataset.role;
+            sel.value = this._sessionConfig.agentModels[role] || '';
+            sel.addEventListener('change', () => {
+                const val = sel.value.trim();
+                if (val) this._sessionConfig.agentModels[role] = val;
+                else delete this._sessionConfig.agentModels[role];
+            });
+        });
+    }
+
+    _renderSessionConfigLockBanner() {
+        const banner = document.getElementById('session-config-lock-banner');
+        if (!banner) return;
+        if (this._sessionLock.topology) banner.classList.remove('hidden');
+        else banner.classList.add('hidden');
+    }
+
+    async _applySessionConfig() {
+        const workdirInput = document.getElementById('session-config-workdir');
+        const workdir = (workdirInput?.value || '').trim();
+        this._sessionConfig.workdir = workdir;
+
+        // If workdir differs from the current lock, start a fresh session
+        // scoped to that path. Otherwise we just stash the UI config.
+        const needsNewSession = workdir && workdir !== this._sessionLock.workdir;
+        const applyBtn = document.getElementById('session-config-apply');
+        if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Applying…'; }
+        try {
+            if (needsNewSession) {
+                const res = await fetch('/api/session/new', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ workdir }),
+                });
+                const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+                if (!data.ok) {
+                    const hint = document.getElementById('session-config-footer-hint');
+                    if (hint) hint.textContent = data.error || 'Failed to create session';
+                    return;
+                }
+                if (data.session_id) this._updateSessionUrl(data.session_id);
+                if (data.init) this._handleInit(data.init);
+            }
+            // Reflect picked topology in the composer trigger + state so the
+            // next /api/start call sends it through.
+            this._selectedTopology = this._sessionConfig.topology;
+            this._userOverrodeTopology = this._sessionConfig.topology !== 'auto';
+            this._updateTopologyTrigger?.();
+            this._closeSessionConfig();
+        } finally {
+            if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = 'Apply'; }
+        }
+    }
+
+    _applySessionLock(sessionBlock) {
+        if (!sessionBlock || typeof sessionBlock !== 'object') return;
+        this._sessionLock = {
+            topology: String(sessionBlock.locked_topology || ''),
+            agentModels: { ...(sessionBlock.locked_agent_models || {}) },
+            modelPin: String(sessionBlock.locked_model_pin || ''),
+            workdir: String(sessionBlock.workdir || ''),
+        };
+        // Render lock icon
+        const icon = document.getElementById('breadcrumbs-lock-icon');
+        if (icon) icon.classList.toggle('on', !!this._sessionLock.topology);
+        // Disable the inline topology dropdown when pinned
+        const trigger = document.getElementById('topology-trigger');
+        if (trigger) {
+            if (this._sessionLock.topology) {
+                trigger.classList.add('locked');
+                trigger.title = `Pinned to ${this._sessionLock.topology} for this session`;
+            } else {
+                trigger.classList.remove('locked');
+                trigger.title = 'Switch topology';
+            }
+        }
+    }
+
     async _requestStopRun() {
         try {
             await fetch('/api/stop', { method: 'POST' });
@@ -637,6 +868,7 @@ class Dashboard {
         this._renderAgentsList();
         this._renderLiveCodeChanges();
         this._updateTopologyAdaptiveHeight();
+        this._applySessionLock(data.session);
 
         this.graph.setTopology(data.agents, data.edges, this._plan?.graph_view || null);
         this._hideLoader();
@@ -1988,6 +2220,7 @@ class Dashboard {
 
     _toggleTopologyMenu() {
         if (this._isRunActive) return;
+        if (this._sessionLock?.topology) return;
         const dd = document.getElementById('topology-dropdown');
         const menu = document.getElementById('topology-menu');
         if (!dd || !menu) return;
@@ -2153,14 +2386,29 @@ class Dashboard {
             const topologyForStart = this._userOverrodeTopology
                 ? this._selectedTopology
                 : (sessionTopology && sessionTopology !== 'auto' ? sessionTopology : this._selectedTopology);
+            const startBody = {
+                query,
+                topology: topologyForStart,
+                model: this._selectedModel,
+            };
+            // First-run manual config: pass through workdir + agent_models
+            // if the user set them via the Session modal and the session is
+            // not yet locked. After the first successful run the server
+            // persists the lock on the session.
+            const sc = this._sessionConfig || {};
+            if (!this._sessionLock?.topology) {
+                if (sc.workdir) startBody.workdir = sc.workdir;
+                if (sc.topology && sc.topology !== 'auto') {
+                    startBody.topology = sc.topology;
+                    if (sc.agentModels && Object.keys(sc.agentModels).length) {
+                        startBody.agent_models = { ...sc.agentModels };
+                    }
+                }
+            }
             res = await fetch('/api/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    query,
-                    topology: topologyForStart,
-                    model: this._selectedModel,
-                }),
+                body: JSON.stringify(startBody),
             });
             const text = await res.text();
             try { data = JSON.parse(text); }
