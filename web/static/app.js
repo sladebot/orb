@@ -73,9 +73,9 @@ class Dashboard {
         document.getElementById('communications-panel-toggle')?.addEventListener('click', () => this._togglePanel('communications-panel'));
         this._setupPanelResize();
 
-        // V2 drawer + repo wiring — default open (composer lives in the drawer)
-        const storedDrawer = window.localStorage.getItem('orb:drawer:open');
-        this._drawerOpen = storedDrawer === null ? true : storedDrawer !== 'false';
+        // Drawer is always open now — the conversation + composer is the
+        // primary surface. Toggle + close buttons were removed from the UI.
+        this._drawerOpen = true;
         this._applyDrawerState();
         document.getElementById('drawer-toggle')?.addEventListener('click', () => this._toggleDrawer());
         document.getElementById('drawer-close-inline')?.addEventListener('click', () => this._setDrawerOpen(false));
@@ -192,17 +192,22 @@ class Dashboard {
         const savedTheme = window.localStorage.getItem('orb:theme') || 'dark';
         this._applyTheme(savedTheme);
 
-        // Topology dropdown toggle
-        document.getElementById('topology-trigger').addEventListener('click', (e) => {
-            e.stopPropagation();
-            this._toggleTopologyMenu();
-        });
-        // Close dropdown on outside click
+        // Topology dropdown — only wire if the legacy inline dropdown is
+        // still in the DOM. The composer no longer renders it by default;
+        // topology is owned by the Session Config modal.
+        const topologyTrigger = document.getElementById('topology-trigger');
+        if (topologyTrigger) {
+            topologyTrigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._toggleTopologyMenu();
+            });
+        }
         document.addEventListener('click', (e) => {
             const dd = document.getElementById('topology-dropdown');
-            if (!dd.contains(e.target)) {
+            const menu = document.getElementById('topology-menu');
+            if (dd && !dd.contains(e.target)) {
                 dd.classList.remove('open');
-                document.getElementById('topology-menu').classList.add('hidden');
+                if (menu) menu.classList.add('hidden');
             }
         });
         window.addEventListener('resize', () => {
@@ -2410,29 +2415,25 @@ class Dashboard {
         const count = document.getElementById('topology-trigger-count');
         const statEl = document.getElementById('stat-topology');
 
+        const setAll = (labelText, countText, statText) => {
+            if (label) label.textContent = labelText;
+            if (count) count.textContent = countText;
+            if (statEl) statEl.textContent = statText;
+            this._setText('hero-topology-label', statText);
+        };
+
         if (this._selectedTopology === 'auto') {
-            label.textContent = 'Auto';
-            count.textContent = '';
-            statEl.textContent = 'Auto';
-            this._setText('hero-topology-label', 'Auto');
+            setAll('Auto', '', 'Auto');
         } else {
             const topo = this._topologyList.find(t => t.id === this._selectedTopology);
             if (topo) {
-                label.textContent = topo.label;
-                count.textContent = `\u2014 ${topo.agents.length} agents`;
-                statEl.textContent = topo.label;
-                this._setText('hero-topology-label', topo.label);
+                setAll(topo.label, `\u2014 ${topo.agents.length} agents`, topo.label);
             } else {
-                label.textContent = this._selectedTopology;
-                count.textContent = '';
-                statEl.textContent = this._selectedTopology;
-                this._setText('hero-topology-label', this._selectedTopology);
+                setAll(this._selectedTopology, '', this._selectedTopology);
             }
         }
 
-        // Disable trigger while running
-        const trigger = document.getElementById('topology-trigger');
-        trigger.classList.toggle('disabled', this._isRunActive);
+        document.getElementById('topology-trigger')?.classList.toggle('disabled', this._isRunActive);
         this._refreshMentionTargets();
     }
 
@@ -2517,10 +2518,10 @@ class Dashboard {
         this.graph.setRunState(active ? 'running' : (this._statusText() === 'Done' ? 'completed' : 'idle'));
 
         // Close and disable/enable topology dropdown
-        document.getElementById('topology-trigger').classList.toggle('disabled', active);
+        document.getElementById('topology-trigger')?.classList.toggle('disabled', active);
         if (active) {
-            document.getElementById('topology-dropdown').classList.remove('open');
-            document.getElementById('topology-menu').classList.add('hidden');
+            document.getElementById('topology-dropdown')?.classList.remove('open');
+            document.getElementById('topology-menu')?.classList.add('hidden');
         }
         this._updateMentionSuggestions();
     }

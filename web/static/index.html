@@ -34,12 +34,12 @@
                     <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
                     <span id="connection-label">Daemon Offline</span>
                 </div>
-                <button id="stop-run-button" class="v2-btn danger" type="button" title="Stop current run">■ Stop</button>
                 <button id="session-config-button" class="v2-btn" type="button" title="Start a new session: workdir, topology, per-node models">⊘ New Session</button>
                 <button id="new-session-button" class="v2-btn hidden" type="button" title="Start a fresh auto session">↺ New</button>
+                <button id="stop-run-button" class="v2-btn danger hidden" type="button" title="Stop current run">■ Stop</button>
                 <button id="traces-button" class="v2-btn" type="button" title="Browse traces">Traces</button>
                 <div class="v2-chrome-divider"></div>
-                <button id="drawer-toggle" class="v2-btn" type="button" title="Toggle conversation drawer" aria-pressed="true">◂ Chat</button>
+                <button id="drawer-toggle" class="v2-btn hidden" type="button" title="Toggle conversation drawer" aria-pressed="true">◂ Chat</button>
                 <button id="theme-toggle" class="v2-btn icon" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
                 <button id="settings-button" class="v2-btn icon" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
             </div>
@@ -173,7 +173,7 @@
                         <span id="conv-count" class="count">0 msgs</span>
                         <span class="spacer"></span>
                         <div id="session-pill">Session idle</div>
-                        <button id="drawer-close-inline" class="v2-btn icon" type="button" title="Collapse">▸</button>
+                        <button id="drawer-close-inline" class="v2-btn icon hidden" type="button" title="Collapse">▸</button>
                     </div>
 
                     <div id="workspace-meta" aria-label="Workspace metadata" class="hidden">
@@ -282,20 +282,8 @@
                             <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
                             <div id="query-mentions" class="hidden"></div>
                             <div id="query-toolbar">
-                                <div id="query-topology-row">
-                                    <div id="topology-dropdown">
-                                        <button id="topology-trigger" title="Switch topology">
-                                            <span class="topology-trigger-copy">
-                                                <span class="topology-trigger-kicker">Topology</span>
-                                                <span id="topology-trigger-label">Auto</span>
-                                            </span>
-                                            <span id="topology-trigger-count"></span>
-                                            <span class="topology-trigger-chevron">▾</span>
-                                        </button>
-                                        <div id="topology-menu" class="hidden"></div>
-                                    </div>
-                                </div>
                                 <div id="composer-workdir" title="Current workspace">—</div>
+                                <span id="composer-session-hint" class="composer-session-hint" title="Change topology via New Session"></span>
                             </div>
                             <div id="query-actions">
                                 <button id="query-send" class="v2-btn primary" type="button" title="Run (⌘↵)">
