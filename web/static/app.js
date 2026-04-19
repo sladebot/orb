@@ -81,8 +81,8 @@ class Dashboard {
         document.getElementById('drawer-close-inline')?.addEventListener('click', () => this._setDrawerOpen(false));
         document.getElementById('drawer-open')?.addEventListener('click', () => this._setDrawerOpen(true));
         document.getElementById('stop-run-button')?.addEventListener('click', () => this._requestStopRun());
-        document.getElementById('repo-sync-button')?.addEventListener('click', () => this._renderLiveCodeChanges());
-        document.getElementById('repo-pr-button')?.addEventListener('click', () => this._announcePrStub());
+        document.getElementById('repo-sync-button')?.addEventListener('click', () => this._syncWorkspace());
+        document.getElementById('repo-pr-button')?.addEventListener('click', () => this._openPullRequest());
         document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((btn) => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((b) => b.classList.toggle('on', b === btn));
@@ -418,6 +418,42 @@ class Dashboard {
         }, 80);
     }
 
+    async _probeGitStatus(path) {
+        const host = document.getElementById('session-config-git-status');
+        if (!host) return;
+        if (!path) { host.innerHTML = ''; return; }
+        host.innerHTML = `<span class="git-pill">checking…</span>`;
+        try {
+            const res = await fetch(`/api/git/status?path=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (!data.ok) { host.innerHTML = `<span class="git-pill">—</span>`; return; }
+            if (data.is_git_repo) {
+                const unc = data.has_uncommitted ? ' · uncommitted' : '';
+                const behind = data.behind ? ` · ${data.behind} behind` : '';
+                host.innerHTML = `<span class="git-pill git-ok">✓ git repo · <code>${this._escapeHtml(data.branch || '(detached)')}</code>${unc}${behind}</span>`;
+            } else {
+                host.innerHTML = `<span class="git-pill git-missing">✗ Not a git repo</span><button class="v2-btn" type="button" id="sc-git-init">Initialize git</button>`;
+                document.getElementById('sc-git-init')?.addEventListener('click', () => this._initGitRepo(path));
+            }
+        } catch (err) {
+            host.innerHTML = `<span class="git-pill">—</span>`;
+        }
+    }
+
+    async _initGitRepo(path) {
+        const btn = document.getElementById('sc-git-init');
+        if (btn) { btn.disabled = true; btn.textContent = 'Initializing…'; }
+        try {
+            await fetch('/api/git/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        } finally {
+            this._probeGitStatus(path);
+        }
+    }
+
     _setupSessionConfigModal() {
         const modal = document.getElementById('session-config-modal');
         if (!modal) return;
@@ -430,7 +466,17 @@ class Dashboard {
             if (input) input.value = '';
             const hint = document.getElementById('session-config-footer-hint');
             if (hint) hint.textContent = 'Leaving workspace blank keeps the daemon\'s current directory.';
+            this._probeGitStatus('');
         });
+        // Probe git status whenever the user edits the workdir field
+        const workdirInput = document.getElementById('session-config-workdir');
+        if (workdirInput) {
+            let debounceTimer = null;
+            workdirInput.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => this._probeGitStatus(workdirInput.value.trim()), 300);
+            });
+        }
 
         // FS picker wiring
         document.getElementById('session-config-workdir-browse')?.addEventListener('click', () => this._toggleFsPicker());
@@ -660,6 +706,35 @@ class Dashboard {
         this._renderSessionConfigAgentModels();
         this._renderTopologyPreview();
         this._renderSessionConfigLockBanner();
+
+        // Seed the git status badge from whatever path is currently in the input
+        const seedPath = (document.getElementById('session-config-workdir')?.value || '').trim();
+        this._probeGitStatus(seedPath);
+    }
+
+    async _loadWorkspaceFiles(workdir) {
+        if (!workdir) { this._workspaceFiles = []; this._renderLiveCodeChanges(); return; }
+        try {
+            const res = await fetch(`/api/fs/files?path=${encodeURIComponent(workdir)}`);
+            const data = await res.json();
+            if (data.ok) {
+                this._workspaceFiles = (data.files || []).map((p) => ({
+                    path: p,
+                    agent: '',
+                    content: '',
+                    oldContent: '',
+                    status: 'U',  // "unchanged" — existing file from disk
+                    added: 0,
+                    removed: 0,
+                    _tracked: true,
+                }));
+            } else {
+                this._workspaceFiles = [];
+            }
+        } catch {
+            this._workspaceFiles = [];
+        }
+        this._renderLiveCodeChanges();
     }
 
     _closeSessionConfig() {
@@ -825,6 +900,12 @@ class Dashboard {
             workdir: String(sessionBlock.workdir || ''),
         };
 
+        // Load the workspace's existing files into the repo tree whenever
+        // the session workdir changes (including the initial mount).
+        if (this._sessionLock.workdir && this._sessionLock.workdir !== previousWorkdir) {
+            this._loadWorkspaceFiles(this._sessionLock.workdir);
+        }
+
         // First-load prompt: if this is the initial init we've seen and the
         // session has no workdir yet, pop the Session modal so the user can
         // scope it to their repo. Suppress if they've dismissed the prompt
@@ -865,13 +946,68 @@ class Dashboard {
         } catch (err) { /* ignore */ }
     }
 
-    _announcePrStub() {
+    async _syncWorkspace() {
+        const btn = document.getElementById('repo-sync-button');
+        const original = btn?.textContent;
+        if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+        try {
+            const workdir = this._sessionLock?.workdir || '';
+            if (workdir) {
+                await Promise.all([
+                    this._loadWorkspaceFiles(workdir),
+                    this._refreshRepoBranch(workdir),
+                ]);
+            } else {
+                this._renderLiveCodeChanges();
+            }
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = original || '↻ Sync'; }
+        }
+    }
+
+    async _refreshRepoBranch(workdir) {
+        try {
+            const res = await fetch(`/api/git/status?path=${encodeURIComponent(workdir)}`);
+            const data = await res.json();
+            if (!data.ok || !data.is_git_repo) return;
+            const branchEl = document.getElementById('repo-branch');
+            if (branchEl) {
+                branchEl.textContent = data.branch || 'HEAD';
+                branchEl.title = data.remote_url || '';
+            }
+            const baseEl = document.getElementById('repo-base-branch');
+            if (baseEl && data.github_slug) baseEl.title = data.github_slug;
+        } catch {
+            /* ignore */
+        }
+    }
+
+    async _openPullRequest() {
+        const workdir = this._sessionLock?.workdir || '';
         const btn = document.getElementById('repo-pr-button');
-        if (!btn) return;
-        const original = btn.textContent;
-        btn.textContent = 'Not wired yet';
-        btn.disabled = true;
-        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1600);
+        const original = btn?.textContent;
+        if (!workdir) {
+            if (btn) { btn.textContent = 'Set workdir first'; btn.disabled = true; }
+            setTimeout(() => { if (btn) { btn.textContent = original || 'Open PR →'; btn.disabled = false; } }, 1800);
+            return;
+        }
+        if (btn) { btn.disabled = true; btn.textContent = 'Opening…'; }
+        try {
+            const res = await fetch('/api/git/pr-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: workdir }),
+            });
+            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            if (!data.ok) {
+                if (btn) btn.textContent = (data.error || 'PR not available').slice(0, 28);
+                setTimeout(() => { if (btn) btn.textContent = original || 'Open PR →'; }, 2400);
+                return;
+            }
+            window.open(data.compare_url, '_blank', 'noopener');
+        } finally {
+            if (btn) { btn.disabled = false; if (btn.textContent === 'Opening…') btn.textContent = original || 'Open PR →'; }
+        }
     }
 
     _restorePanelWidths() {
@@ -2867,17 +3003,23 @@ class Dashboard {
     }
 
     _renderLiveCodeChanges() {
-        const files = Array.from(this._fileChanges.values()).map((f) => {
+        const changedFiles = Array.from(this._fileChanges.values()).map((f) => {
             const diff = this._buildUnifiedDiff(f.path, f.oldContent, f.content);
             const stats = this._countDiffStats(diff);
             const status = (f.oldContent || '').length === 0 ? 'A' : 'M';
             return { ...f, diff, added: stats.added, removed: stats.removed, status };
         });
 
+        // Overlay workspace (unchanged) files — agent writes win if both exist.
+        const changedByPath = new Map(changedFiles.map((f) => [f.path, f]));
+        const workspace = (this._workspaceFiles || []).filter((f) => !changedByPath.has(f.path));
+        const files = [...changedFiles, ...workspace];
+
         this._renderRepoTree(files);
         this._renderRepoDiff(files);
         this._renderRepoToolbar(files);
-        this._updateFilesStat(files);
+        // Stats strip only counts agent-authored changes.
+        this._updateFilesStat(changedFiles);
     }
 
     _renderRepoTree(files) {
@@ -2907,19 +3049,25 @@ class Dashboard {
                 <div class="repo-folder">${this._escapeHtml(label)}</div>
                 ${items.map((f) => {
                     const shortName = folder ? f.path.slice(folder.length) || f.path : f.path;
-                    const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
                     const sel = f.path === selected ? ' sel' : '';
+                    let byline;
+                    if (f.status === 'U') {
+                        byline = `<span class="byline"><span class="track-label">tracked</span></span>`;
+                    } else {
+                        const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                        byline = `<span class="byline">
+                                <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
+                                <span class="sep">·</span>
+                                <span class="stat-add">+${f.added || 0}</span>
+                                ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
+                            </span>`;
+                    }
                     return `
                         <div class="repo-file${sel}" data-path="${this._escapeAttr(f.path)}" title="${this._escapeAttr(f.path)}">
                             <span class="badge ${f.status}">${f.status}</span>
                             <div class="main">
                                 <span class="pth">${this._escapeHtml(shortName)}</span>
-                                <span class="byline">
-                                    <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
-                                    <span class="sep">·</span>
-                                    <span class="stat-add">+${f.added || 0}</span>
-                                    ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
-                                </span>
+                                ${byline}
                             </div>
                         </div>
                     `;
@@ -2964,11 +3112,42 @@ class Dashboard {
             authorEl.innerHTML = `<span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(selected.agent, selected.agent))}`;
         }
 
+        if (selected.status === 'U') {
+            // Unchanged file from the workspace — fetch and show its content.
+            this._renderUnchangedFile(selected, diffHost);
+            return;
+        }
         if (this._repoView === 'raw') {
             diffHost.innerHTML = `<pre class="repo-raw" style="padding:12px 16px; margin:0; color:var(--text-secondary);">${this._escapeHtml(selected.content || '')}</pre>`;
             return;
         }
         diffHost.innerHTML = this._renderV2Diff(selected);
+    }
+
+    async _renderUnchangedFile(file, host) {
+        const workdir = this._sessionLock?.workdir || this._sessionConfig?.workdir || '';
+        if (!workdir) {
+            host.innerHTML = `<div class="repo-empty">Workspace unknown — can't read file content.</div>`;
+            return;
+        }
+        host.innerHTML = `<div class="repo-empty">Loading ${this._escapeHtml(file.path)}…</div>`;
+        try {
+            const res = await fetch(`/api/fs/read?workdir=${encodeURIComponent(workdir)}&path=${encodeURIComponent(file.path)}`);
+            const data = await res.json();
+            if (!data.ok) {
+                host.innerHTML = `<div class="repo-empty">${this._escapeHtml(data.error || 'Could not read file')}</div>`;
+                return;
+            }
+            const lines = (data.content || '').split('\n');
+            const rows = [`<div class="diff-hunk-hdr"><span class="at">@@ tracked @@</span><span>${this._escapeHtml(file.path)}</span></div>`];
+            lines.forEach((line, idx) => {
+                const n = idx + 1;
+                rows.push(`<div class="diff-line ctx"><span class="ln">${n}</span><span class="ln">${n}</span><span class="code">${this._escapeHtml(line)}</span></div>`);
+            });
+            host.innerHTML = rows.join('');
+        } catch (err) {
+            host.innerHTML = `<div class="repo-empty">Network error loading file.</div>`;
+        }
     }
 
     _renderV2Diff(file) {

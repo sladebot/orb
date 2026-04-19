@@ -6309,3 +6309,53 @@ body.v2 .sc-topology-preview .sc-edge {
     fill: none;
 }
 body.v2 .sc-topology-preview .sc-edge.dim { stroke: rgba(121, 143, 166, 0.28); stroke-dasharray: 3 3; }
+
+/* V2 — Git status badge inside the Session modal */
+body.v2 .sc-git-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    min-height: 24px;
+}
+body.v2 .sc-git-status:empty { display: none; }
+body.v2 .sc-git-status .git-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: rgba(172, 190, 212, 0.05);
+    box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.12);
+}
+body.v2 .sc-git-status .git-pill.git-ok {
+    color: var(--success);
+    background: rgba(134, 216, 171, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(134, 216, 171, 0.25);
+}
+body.v2 .sc-git-status .git-pill.git-missing {
+    color: var(--warning);
+    background: rgba(240, 201, 130, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(240, 201, 130, 0.25);
+}
+body.v2 .sc-git-status code {
+    background: rgba(172, 190, 212, 0.08);
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--text-secondary);
+}
+
+/* V2 — unchanged file badge in repo tree (existing files from disk) */
+body.v2 .repo-file .badge.U,
+body.v2 .repo-diff-badge.U {
+    color: var(--text-muted);
+    background: rgba(172, 190, 212, 0.08);
+}
+body.v2 .repo-file .byline .track-label {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--text-muted);
+}

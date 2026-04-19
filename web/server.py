@@ -60,6 +60,8 @@ class DashboardServer:
         self._app.router.add_get("/api/settings", self._settings_get_handler)
         self._app.router.add_get("/api/topologies", self._topologies_handler)
         self._app.router.add_get("/api/fs/list", self._fs_list_handler)
+        self._app.router.add_get("/api/fs/files", self._fs_files_handler)
+        self._app.router.add_get("/api/fs/read", self._fs_read_handler)
         self._app.router.add_get("/api/git/status", self._git_status_handler)
         self._app.router.add_post("/api/git/init", self._git_init_handler)
         self._app.router.add_post("/api/git/pr-url", self._git_pr_url_handler)
@@ -375,6 +377,97 @@ class DashboardServer:
         if not match:
             return ""
         return f"{match.group(1)}/{match.group(2)}"
+
+    async def _fs_files_handler(self, request: web.Request) -> web.Response:
+        """List workspace files so the dashboard can seed the Repository
+        Changes panel with the user's existing repo state. Prefers
+        `git ls-files` when available (respects .gitignore); otherwise
+        walks the tree with a size cap and a standard ignore list.
+        """
+        raw = request.rel_url.query.get("path") or ""
+        path = self._resolve_workdir(raw)
+        if path is None:
+            return web.json_response({"ok": False, "error": "path must point to an existing directory"}, status=400)
+        limit = 800
+        files: list[str] = []
+        used_git = False
+        try:
+            result = self._run_git(["ls-files", "-z"], path)
+            if result.returncode == 0:
+                used_git = True
+                files = [
+                    name for name in result.stdout.split("\0")
+                    if name and not name.startswith(".git/")
+                ][:limit]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        if not used_git:
+            ignore_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build", ".next", ".turbo", ".DS_Store"}
+            for root, dirs, entries in __import__("os").walk(str(path)):
+                dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+                root_path = Path(root)
+                for entry in entries:
+                    if entry.startswith("."):
+                        continue
+                    full = root_path / entry
+                    try:
+                        rel = full.relative_to(path)
+                    except ValueError:
+                        continue
+                    files.append(str(rel))
+                    if len(files) >= limit:
+                        break
+                if len(files) >= limit:
+                    break
+            files.sort()
+        return web.json_response({
+            "ok": True,
+            "path": str(path),
+            "source": "git" if used_git else "walk",
+            "files": files,
+            "truncated": len(files) >= limit,
+        })
+
+    async def _fs_read_handler(self, request: web.Request) -> web.Response:
+        """Return the text content of a file inside the session's workdir so
+        the diff pane can show unchanged files. Refuses binary content and
+        anything over 512KB to keep the browser responsive.
+        """
+        workdir_raw = request.rel_url.query.get("workdir") or ""
+        rel_raw = request.rel_url.query.get("path") or ""
+        if not rel_raw:
+            return web.json_response({"ok": False, "error": "path is required"}, status=400)
+        workdir = self._resolve_workdir(workdir_raw)
+        if workdir is None:
+            return web.json_response({"ok": False, "error": "workdir must point to an existing directory"}, status=400)
+        try:
+            target = (workdir / rel_raw).resolve(strict=False)
+        except (OSError, ValueError):
+            return web.json_response({"ok": False, "error": "invalid path"}, status=400)
+        # Prevent path traversal outside the workdir
+        try:
+            target.relative_to(workdir)
+        except ValueError:
+            return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
+        if not target.exists() or not target.is_file():
+            return web.json_response({"ok": False, "error": "not a file"}, status=404)
+        size = target.stat().st_size
+        if size > 512 * 1024:
+            return web.json_response({
+                "ok": False,
+                "error": f"file is too large ({size} bytes) to preview",
+            }, status=413)
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return web.json_response({"ok": False, "error": "binary file"}, status=415)
+        return web.json_response({
+            "ok": True,
+            "path": str(target),
+            "relative": rel_raw,
+            "content": content,
+            "size": size,
+        })
 
     async def _git_status_handler(self, request: web.Request) -> web.Response:
         raw = request.rel_url.query.get("path") or ""
