@@ -6,20 +6,38 @@ It is built around a simple idea: treat coordination as a runtime problem, not j
 
 ![Orb dashboard](docs/orb-dashboard.png)
 
-The browser dashboard shows run output, the live agent topology, and the per-node activity stream side by side. Agents render as rounded-pill chips with a role glyph, the active model, and a role-colored status dot that pulses while the node is working.
+The browser dashboard is a three-column workbench: a topology minimap and
+agents list on the left, **Repository changes** (file tree + unified diff) as
+the hero in the middle, and a conversation drawer on the right. Agents render
+as compact pill chips with a role-colored status dot; a summary strip across
+the top tracks status, elapsed, messages, files touched, topology, and a
+live throughput sparkline.
 
 ### Workflow
 
-1. Open the dashboard (`orb dashboard`), pick a topology from the composer dropdown, type a task, and press **Execute**.
-2. The graph panel renders the chosen topology and lights up nodes as they start work.
-3. Messages stream into the Run Output panel on the left and the per-node Activity panel on the right.
-4. A run finishes with a completion pill and the transcript stays available in the trace browser.
+1. Open the dashboard (`orb dashboard`) and optionally scope it to a repo: `orb dashboard --workdir /path/to/repo`.
+2. Click **⊘ Session** to configure the workspace, pick a topology, and pin models per node — or leave everything on Auto and type a task.
+3. Type a task in the composer and press **Send** (⌘↵).
+4. The topology panel lights up as nodes start working; file writes stream into the Repository changes panel with per-author attribution; the Conversation drawer streams agent-to-agent messages live.
+5. When planning completes, Orb pins the topology + per-node model map onto the session — follow-up turns reuse that allocation instead of re-classifying.
 
-<video src="docs/orb-dashboard-workflow.webm" controls muted playsinline width="820"></video>
+### Session config
 
-<sub>(If the video doesn't render in your viewer, the file lives at `docs/orb-dashboard-workflow.webm`. Regenerate any of these assets with `node scripts/capture-topologies.mjs`.)</sub>
+![Session configuration modal](docs/orb-session-modal.png)
 
-![Composer with topology dropdown](docs/orb-dashboard-composer.png)
+The Session modal is the one place to set **workspace**, **topology**, and
+**per-node model** pins before a run. Workspaces are validated and the daemon
+`chdir`s into them; topology and model pins carry through to the first
+`/api/start` call and then stay locked for the rest of the session.
+
+### Repository changes
+
+![Repository changes panel](docs/orb-dashboard-repo.png)
+
+Every file write the crew performs lands in the middle panel. The file tree
+groups by folder, shows each file's +/− line counts, and attributes the
+change to the agent that made it. Clicking a file renders a unified diff
+with per-hunk author chips.
 
 ### Topologies
 
@@ -27,6 +45,14 @@ The browser dashboard shows run output, the live agent topology, and the per-nod
 |---|---|---|
 | ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
 | Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
+
+### Mobile
+
+![Orb dashboard on mobile](docs/orb-dashboard-mobile.png)
+
+The dashboard stacks into a single column under 720 CSS px — topology first,
+agents list, repository changes, then conversation — with the composer pinned
+to the bottom of the viewport so it's always reachable on a phone.
 
 ### TUI
 
@@ -179,6 +205,27 @@ orb tui --port 5000 "fix the failing tests"
 orb dashboard --connect http://127.0.0.1:5000 "review the current diff"
 ```
 
+Scope a dashboard session to a specific folder (the daemon `chdir`s into it
+for the whole session):
+
+```bash
+orb dashboard --workdir ~/projects/url-shortener
+```
+
+Pick a topology and pin a specific model per node for a fully-manual run:
+
+```bash
+orb dashboard \
+  --topology triad \
+  --agent-model coder=claude-opus-4-7 \
+  --agent-model reviewer=claude-sonnet-4-6 \
+  "add a rate limit to /shorten"
+```
+
+The dashboard also exposes the same three controls from the **⊘ Session**
+button in the chrome — workspace path, topology pill list, and a model
+`<select>` per agent.
+
 ## CLI Overview
 
 ```bash
@@ -270,22 +317,18 @@ The dashboard surfaces those planned assignments before the run and the active m
 
 The dashboard is event-driven and is intended to show the run as it happens.
 
-It now:
+It currently:
 
 - renders planning state as soon as topology and per-node model allocation are known
-- keeps activity feed cards ordered by event elapsed time
-- shows which node each activity card came from
-- preserves live websocket updates instead of replacing them with a later bulk snapshot
-- reattaches more reliably after refresh to the current run/session
-- shows structured activity details in both the main feed and node detail panel
+- lays out agents and edges in the topology minimap on the left, adapting panel height to the number of rows in the topology graph
+- surfaces `file_write` events in the Repository Changes panel as a file tree + unified diff with per-author attribution
+- streams agent-to-agent messages into the Conversation drawer with routing arrows, msg-type badges, and role-colored dots
+- tracks stats (status, elapsed, messages, files touched, topology, throughput) in the top summary strip
+- opens a compact agent detail overlay in the left column when you click an agent row — toggles off when clicked again
+- supports draggable column resize handles on desktop and a fixed-bottom composer on mobile
+- locks the topology + per-node model allocation on the session after the first run; subsequent messages reuse the same graph instead of re-classifying
 
-For `send_message` activity cards, the dashboard can show:
-
-- destination node
-- payload content
-- context slice
-
-The daemon also writes more descriptive run and dashboard event logs to `~/.orb/run.log`.
+The daemon writes more descriptive run and dashboard event logs to `~/.orb/run.log`.
 
 ## Providers and Model Selection
 
