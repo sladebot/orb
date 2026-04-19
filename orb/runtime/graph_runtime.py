@@ -1204,16 +1204,29 @@ class GraphRuntime:
             default_target="coordinator",
         )
 
-        # Session topology lock — if the session has already settled on a
-        # topology (first run committed), reuse it unless the caller passes
-        # an explicit topology override. Manual `agent_models` also implies
-        # the caller is driving topology, so we do not apply the lock there.
+        # Session topology lock — once the session has planned its first
+        # run, follow-ups should reuse the same topology AND per-node model
+        # map without re-running the classifier. This also handles the
+        # common UI case where a follow-up /api/start passes the locked
+        # topology id explicitly rather than "auto": we still want to skip
+        # re-classification in that case.
         explicit_topology = topology != "auto"
         manual_models = bool(agent_models)
-        if self._conversation_session.locked_topology and not explicit_topology and not manual_models:
-            topology = self._conversation_session.locked_topology
-            if not model_pin or model_pin == "auto":
-                model_pin = self._conversation_session.locked_model_pin or "auto"
+        if self._conversation_session.locked_topology and not manual_models:
+            same_as_lock = (
+                not explicit_topology
+                or topology == self._conversation_session.locked_topology
+            )
+            if same_as_lock:
+                topology = self._conversation_session.locked_topology
+                explicit_topology = True
+                if not model_pin or model_pin == "auto":
+                    model_pin = self._conversation_session.locked_model_pin or "auto"
+                # Feed the locked per-agent model map through manual mode so
+                # _manual_prediction runs instead of predict_topology.
+                if self._conversation_session.locked_agent_models:
+                    agent_models = dict(self._conversation_session.locked_agent_models)
+                    manual_models = True
 
         logger.info(
             "run start session=%s requested_topology=%s requested_target=%s model_pin=%s manual_models=%s workdir=%s query=%s",

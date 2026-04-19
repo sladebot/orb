@@ -676,7 +676,7 @@ class GraphRenderer {
         ctx.save();
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'left';
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
 
         for (const item of items) {
             ctx.fillStyle = item.color;
@@ -875,7 +875,7 @@ class GraphRenderer {
         ctx.arc(x + 16, y + boxH / 2, 4.5, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.font = '700 11px "Space Grotesk", sans-serif';
+        ctx.font = '700 11px "Geist", ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = textColor || accent;
@@ -1044,8 +1044,8 @@ class GraphRenderer {
         ctx.textBaseline = 'middle';
         ctx.fillStyle = labelColor;
         ctx.font = isCore
-            ? '500 12px "Space Grotesk", sans-serif'
-            : '500 11px "Space Grotesk", sans-serif';
+            ? '500 12px "Geist", ui-sans-serif, system-ui, sans-serif'
+            : '500 11px "Geist", ui-sans-serif, system-ui, sans-serif';
         const labelText = this._truncate(ctx, this._displayName(node), maxTextW);
         ctx.fillText(labelText, textLeft, y + height / 2);
 
@@ -1119,9 +1119,9 @@ class GraphRenderer {
         if (!detailVisible) return;
 
         ctx.save();
-        ctx.font = '700 12px "Space Grotesk", sans-serif';
+        ctx.font = '700 12px "Geist", ui-sans-serif, system-ui, sans-serif';
         const titleW = ctx.measureText(title).width;
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
         const subW = ctx.measureText(subtitle).width;
         const contentW = Math.max(titleW, subW);
         const padX = 12;
@@ -1158,12 +1158,12 @@ class GraphRenderer {
         ctx.stroke();
 
         ctx.fillStyle = this.theme === 'light' ? '#17202b' : '#ecf1f6';
-        ctx.font = '700 12px "Space Grotesk", sans-serif';
+        ctx.font = '700 12px "Geist", ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText(title, boxX + 12, boxY + 10);
 
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
         ctx.fillStyle = this.theme === 'light' ? '#718295' : '#8796a7';
         let sub = subtitle;
         while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);

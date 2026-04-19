@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -58,6 +60,9 @@ class DashboardServer:
         self._app.router.add_get("/api/settings", self._settings_get_handler)
         self._app.router.add_get("/api/topologies", self._topologies_handler)
         self._app.router.add_get("/api/fs/list", self._fs_list_handler)
+        self._app.router.add_get("/api/git/status", self._git_status_handler)
+        self._app.router.add_post("/api/git/init", self._git_init_handler)
+        self._app.router.add_post("/api/git/pr-url", self._git_pr_url_handler)
         self._app.router.add_get("/api/admin/traces/sessions", self._trace_sessions_handler)
         self._app.router.add_get("/api/admin/traces/session/{session_id}", self._trace_session_runs_handler)
         self._app.router.add_get("/api/admin/traces/run/{run_id}", self._trace_run_handler)
@@ -295,6 +300,142 @@ class DashboardServer:
                 {"ok": False, "error": f"Failed to list path: {exc}"},
                 status=500,
             )
+
+    @staticmethod
+    def _resolve_workdir(raw: str | None) -> Path | None:
+        if not raw:
+            return None
+        try:
+            path = Path(str(raw)).expanduser().resolve(strict=False)
+        except (OSError, ValueError):
+            return None
+        if not path.exists() or not path.is_dir():
+            return None
+        return path
+
+    @staticmethod
+    def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def _git_status(self, path: Path) -> dict:
+        """Inspect a folder for git repo state — used by the dashboard."""
+        info: dict = {
+            "ok": True,
+            "path": str(path),
+            "is_git_repo": False,
+            "branch": "",
+            "remote_url": "",
+            "github_slug": "",
+            "has_uncommitted": False,
+            "ahead": 0,
+            "behind": 0,
+        }
+        try:
+            inside = self._run_git(["rev-parse", "--is-inside-work-tree"], path)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            info["ok"] = False
+            info["error"] = "git CLI unavailable or timed out"
+            return info
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return info
+
+        info["is_git_repo"] = True
+        branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], path)
+        if branch.returncode == 0:
+            info["branch"] = branch.stdout.strip()
+        remote = self._run_git(["remote", "get-url", "origin"], path)
+        if remote.returncode == 0:
+            info["remote_url"] = remote.stdout.strip()
+            info["github_slug"] = self._github_slug_from_remote(info["remote_url"])
+        porcelain = self._run_git(["status", "--porcelain"], path)
+        info["has_uncommitted"] = bool(porcelain.stdout.strip())
+        ahead_behind = self._run_git(
+            ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+            path,
+        )
+        if ahead_behind.returncode == 0 and ahead_behind.stdout.strip():
+            parts = ahead_behind.stdout.strip().split()
+            if len(parts) == 2:
+                info["ahead"] = int(parts[0])
+                info["behind"] = int(parts[1])
+        return info
+
+    @staticmethod
+    def _github_slug_from_remote(url: str) -> str:
+        """Return owner/repo from an origin URL, or '' if not a GitHub remote."""
+        if not url:
+            return ""
+        match = re.match(r"(?:git@github\.com:|https?://github\.com/)([^/]+)/(.+?)(?:\.git)?/?$", url.strip())
+        if not match:
+            return ""
+        return f"{match.group(1)}/{match.group(2)}"
+
+    async def _git_status_handler(self, request: web.Request) -> web.Response:
+        raw = request.rel_url.query.get("path") or ""
+        path = self._resolve_workdir(raw) or Path.cwd()
+        info = self._git_status(path)
+        return web.json_response(info)
+
+    async def _git_init_handler(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except (JSONDecodeError, UnicodeDecodeError, ValueError):
+            return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+        path = self._resolve_workdir(body.get("path"))
+        if path is None:
+            return web.json_response({"ok": False, "error": "path must point to an existing directory"}, status=400)
+        try:
+            result = self._run_git(["init"], path)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return web.json_response({"ok": False, "error": f"git CLI failed: {exc}"}, status=500)
+        if result.returncode != 0:
+            return web.json_response({"ok": False, "error": result.stderr.strip() or "git init failed"}, status=500)
+        return web.json_response({"ok": True, "status": self._git_status(path)})
+
+    async def _git_pr_url_handler(self, request: web.Request) -> web.Response:
+        """Return a GitHub compare URL for the current branch vs. the repo's
+        default remote branch. No push, no commit — callers open the URL in
+        a new tab and finish the PR in GitHub. If the workdir isn't a GitHub
+        repo, we return an error the dashboard can surface.
+        """
+        try:
+            body = await request.json()
+        except (JSONDecodeError, UnicodeDecodeError, ValueError):
+            return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+        path = self._resolve_workdir(body.get("path"))
+        if path is None:
+            return web.json_response({"ok": False, "error": "path must point to an existing directory"}, status=400)
+        status = self._git_status(path)
+        if not status.get("is_git_repo"):
+            return web.json_response({"ok": False, "error": "Not a git repo"}, status=400)
+        slug = status.get("github_slug")
+        if not slug:
+            return web.json_response({"ok": False, "error": f"Origin is not a GitHub remote: {status.get('remote_url') or '(none)'}"}, status=400)
+        branch = status.get("branch") or "HEAD"
+        # Try to resolve the default branch via `gh` if present, otherwise fall
+        # back to `main`.
+        default_branch = "main"
+        try:
+            rev = self._run_git(["symbolic-ref", "refs/remotes/origin/HEAD"], path)
+            if rev.returncode == 0 and rev.stdout.strip():
+                default_branch = rev.stdout.strip().split("/")[-1]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        compare_url = f"https://github.com/{slug}/compare/{default_branch}...{branch}?expand=1"
+        return web.json_response({
+            "ok": True,
+            "compare_url": compare_url,
+            "branch": branch,
+            "default_branch": default_branch,
+            "github_slug": slug,
+            "has_uncommitted": status.get("has_uncommitted", False),
+        })
 
     async def _topologies_handler(self, request: web.Request) -> web.Response:
         from orb.topologies import get_loader
