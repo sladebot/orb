@@ -3,206 +3,178 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ORB Command Center</title>
+    <title>ORB · Workbench</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-    <div class="app-shell">
-        <header id="stats-bar">
+<body class="v2">
+    <div class="app-shell v2-shell">
+        <header id="v2-chrome">
             <div id="brand">
                 <div id="brand-badge-wrap">
-                    <span id="brand-badge">ORB</span>
+                    <span id="brand-glyph" aria-hidden="true"></span>
+                    <span id="brand-badge">Orb</span>
                     <span class="pulse-indicator" aria-hidden="true"></span>
                 </div>
-                <div id="brand-copy">
-                    <span id="brand-subtitle">Node Dashboard</span>
-                    <span id="brand-caption">Live agent structure and execution state</span>
-                </div>
             </div>
-
-            <div id="stats-group">
-                <div class="stat stat-primary">
-                    <span class="stat-label">Messages</span>
-                    <span id="stat-messages" class="stat-value">0</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Status</span>
-                    <span id="stat-status" class="stat-value status-waiting">Waiting</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Elapsed</span>
-                    <span id="stat-elapsed" class="stat-value">0.0s</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Budget</span>
-                    <span id="stat-budget" class="stat-value">200</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Topology</span>
-                    <span id="stat-topology" class="stat-value">Auto</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Model</span>
-                    <span id="stat-model" class="stat-value">Auto</span>
-                </div>
+            <div class="v2-chrome-divider"></div>
+            <div id="breadcrumbs">
+                <span id="breadcrumbs-workdir" title="Workspace">—</span>
+                <span class="breadcrumbs-sep">/</span>
+                <span id="breadcrumbs-session" class="run-id" title="Session">—</span>
+                <span class="breadcrumbs-sep">·</span>
+                <span id="breadcrumbs-topology" title="Topology">auto</span>
             </div>
-
-            <div id="header-actions">
+            <div class="chrome-spacer"></div>
+            <div id="v2-chrome-actions">
                 <div id="connection-pill">
                     <div id="connection-indicator" class="disconnected" title="WebSocket status"></div>
                     <span id="connection-label">Daemon Offline</span>
                 </div>
-                <button id="new-session-button" type="button" title="Start a new session">New Session</button>
-                <button id="traces-button" type="button" title="Browse traces" aria-label="Browse traces">Traces</button>
-                <button id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
-                <button id="settings-button" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
+                <button id="stop-run-button" class="v2-btn danger" type="button" title="Stop current run">■ Stop</button>
+                <button id="new-session-button" class="v2-btn" type="button" title="Start a new session">↺ New</button>
+                <button id="traces-button" class="v2-btn" type="button" title="Browse traces">Traces</button>
+                <div class="v2-chrome-divider"></div>
+                <button id="drawer-toggle" class="v2-btn" type="button" title="Toggle conversation drawer" aria-pressed="true">◂ Chat</button>
+                <button id="theme-toggle" class="v2-btn icon" type="button" title="Toggle light/dark theme" aria-label="Toggle theme">☀</button>
+                <button id="settings-button" class="v2-btn icon" type="button" title="Dashboard settings" aria-label="Dashboard settings">⚙</button>
             </div>
         </header>
 
-        <main id="main-layout">
-            <section id="changes-panel" class="side-column">
-                <div class="side-column-header">
-                    <div class="side-column-heading">
-                        <div class="side-column-copy">
-                            <span class="side-column-kicker">Neural Feed</span>
-                            <h2 class="side-column-title">Run Output</h2>
-                        </div>
-                        <button id="changes-panel-toggle" class="panel-toggle" type="button" title="Collapse run output panel" aria-expanded="true" aria-controls="changes-panel">
-                            <span class="panel-toggle-icon">−</span>
-                        </button>
-                    </div>
-                    <p class="side-column-intro">Planning telemetry, file writes, final results, and live graph traffic converge here.</p>
+        <main id="main-layout" class="a-grid">
+            <!-- SUMMARY STRIP -->
+            <section id="stats-bar" class="a-sum sum-strip">
+                <div class="sum-cell">
+                    <span class="l">Status</span>
+                    <span id="stat-status" class="v status-waiting">Waiting</span>
+                    <span class="sub" id="stat-status-sub">Session idle</span>
                 </div>
-
-                <div id="changes-panel-body">
-                    <div id="changes-log"></div>
+                <div class="sum-cell">
+                    <span class="l">Elapsed</span>
+                    <span id="stat-elapsed" class="v">0.0s</span>
+                    <span class="sub" id="stat-elapsed-sub">—</span>
                 </div>
+                <div class="sum-cell">
+                    <span class="l">Messages</span>
+                    <span id="stat-messages" class="v">0</span>
+                    <span class="sub" id="stat-budget-sub">Budget <span id="stat-budget">200</span></span>
+                </div>
+                <div class="sum-cell">
+                    <span class="l">Files touched</span>
+                    <span id="stat-files" class="v">0</span>
+                    <span class="sub" id="stat-files-sub">+0 −0 loc</span>
+                </div>
+                <div class="sum-cell">
+                    <span class="l">Topology</span>
+                    <span id="stat-topology" class="v">Auto</span>
+                    <span class="sub" id="stat-model">Model · Auto</span>
+                </div>
+                <div class="sum-cell sparkpair">
+                    <span class="l">Throughput · msg/s</span>
+                    <svg id="stat-throughput-spark" class="spark" viewBox="0 0 100 22" preserveAspectRatio="none">
+                        <path class="spark-fill" d=""></path>
+                        <path class="spark-line" d="" fill="none" stroke="var(--primary)" stroke-width="1.2" vector-effect="non-scaling-stroke"></path>
+                    </svg>
+                    <span class="sub" id="stat-throughput-sub">peak — · avg —</span>
+                </div>
+            </section>
 
-                <div id="question-panel" class="hidden">
-                    <div id="question-header">
-                        <span id="question-from">agent is asking</span>
-                        <button id="question-dismiss" title="Dismiss">×</button>
+            <div id="left-resize-handle" class="grid-resize-handle" data-target="left" role="separator" aria-orientation="vertical" aria-label="Resize left rail" title="Drag to resize"></div>
+            <div id="right-resize-handle" class="grid-resize-handle" data-target="right" role="separator" aria-orientation="vertical" aria-label="Resize conversation drawer" title="Drag to resize"></div>
+
+            <!-- LEFT RAIL: agents + mini topology -->
+            <aside id="left-rail" class="a-left">
+                <section id="topology-mini" class="v2-panel">
+                    <div class="v2-panel-hdr">
+                        <span class="title">Topology</span>
+                        <span id="topology-count" class="count">auto</span>
+                        <span class="spacer"></span>
+                        <button id="graph-reset-view" class="v2-btn icon" type="button" title="Reset view">◎</button>
                     </div>
-                    <div id="question-body"></div>
-                    <div id="question-reply-row">
-                        <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
-                        <button id="question-send">Reply</button>
+                    <div id="graph-panel-body" class="minimap-body">
+                        <canvas id="graph-canvas"></canvas>
+                        <div id="graph-controls" aria-label="Graph controls">
+                            <button id="graph-zoom-in" class="graph-control-button" type="button" title="Zoom in">+</button>
+                            <button id="graph-zoom-out" class="graph-control-button" type="button" title="Zoom out">−</button>
+                        </div>
+                        <div id="graph-loader" class="hidden">
+                            <div class="loader-ring"></div>
+                            <div id="loader-text">Starting agents…</div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="agents-panel" class="v2-panel">
+                    <div class="v2-panel-hdr">
+                        <span class="title">Agents</span>
+                        <span id="agents-count" class="count">0</span>
+                    </div>
+                    <div id="agents-list" class="v2-panel-body flush"></div>
+                </section>
+            </aside>
+
+            <!-- MAIN HERO: repository changes -->
+            <section id="repo-panel" class="a-main v2-panel">
+                <div class="v2-panel-hdr">
+                    <span class="title">Repository changes</span>
+                    <span id="repo-panel-count" class="count">0 files</span>
+                    <span class="spacer"></span>
+                    <button id="repo-sync-button" class="v2-btn" type="button" title="Rescan workspace">↻ Sync</button>
+                    <button id="repo-pr-button" class="v2-btn primary" type="button" title="Open a PR with the current changes">Open PR →</button>
+                </div>
+                <div id="repo-toolbar">
+                    <span class="repo-toolbar-label">branch</span>
+                    <span id="repo-branch" class="branch">run</span>
+                    <span class="repo-arrow">→</span>
+                    <span id="repo-base-branch" class="branch branch-main">main</span>
+                    <span class="repo-sep">·</span>
+                    <span id="repo-stat-add" class="stat-add">+0</span>
+                    <span id="repo-stat-del" class="stat-del">−0</span>
+                    <span class="repo-sep">·</span>
+                    <span id="repo-contrib">0 agents contributed</span>
+                    <span class="spacer"></span>
+                    <div id="repo-view-toggle" class="seg">
+                        <button class="seg-btn on" data-view="unified" type="button">Unified</button>
+                        <button class="seg-btn" data-view="split" type="button">Split</button>
+                        <button class="seg-btn" data-view="raw" type="button">Raw</button>
                     </div>
                 </div>
-
-                <div id="query-bar">
-                    <div id="query-bar-header">
-                        <div class="query-bar-heading">
-                            <span class="query-bar-kicker">Composer</span>
-                        </div>
-                        <div id="composer-workdir" title="Current workspace">—</div>
+                <div id="repo-split">
+                    <div id="repo-tree">
+                        <div id="repo-tree-empty" class="repo-empty">No file writes yet. Start a task to see diffs here.</div>
                     </div>
-                    <div id="query-samples" aria-label="Sample prompts">
-                        <button class="query-sample" type="button" data-prompt="Inspect this repo and explain how auth works.">Explain auth flow</button>
-                        <button class="query-sample" type="button" data-prompt="Review the current changes for bugs, regressions, and missing tests.">Review changes</button>
-                        <button class="query-sample" type="button" data-prompt="Make a URL shortener.">Make a URL shortener</button>
-                    </div>
-                    <div id="query-container">
-                        <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
-                        <div id="query-mentions" class="hidden"></div>
-                        <div id="query-toolbar">
-                            <div id="query-topology-row">
-                                <div id="topology-dropdown">
-                                    <button id="topology-trigger" title="Switch topology">
-                                        <span class="topology-trigger-copy">
-                                            <span class="topology-trigger-kicker">Topology</span>
-                                            <span id="topology-trigger-label">Auto</span>
-                                        </span>
-                                        <span id="topology-trigger-count"></span>
-                                        <span class="topology-trigger-chevron">▾</span>
-                                    </button>
-                                    <div id="topology-menu" class="hidden"></div>
-                                </div>
-                            </div>
+                    <div id="repo-diff-wrap">
+                        <div id="repo-diff-filebar" class="diff-filebar hidden">
+                            <span id="repo-diff-status" class="repo-diff-badge">M</span>
+                            <span id="repo-diff-path" class="pth">—</span>
+                            <span id="repo-diff-add" class="stat-add">+0</span>
+                            <span id="repo-diff-del" class="stat-del">−0</span>
+                            <span class="spacer"></span>
+                            <span id="repo-diff-author" class="diff-gutter-author"></span>
                         </div>
-                        <div id="query-actions">
-                            <button id="query-send" title="Run (Enter)">
-                                <span class="query-action-label">Execute</span>
-                            </button>
+                        <div id="repo-diff" class="repo-diff">
+                            <div id="repo-diff-empty" class="repo-empty">Select a file from the tree to see its diff.</div>
                         </div>
+                        <!-- LEGACY mount: app.js writes into #changes-log; we route that render into #repo-tree/#repo-diff -->
+                        <div id="changes-log" class="hidden"></div>
                     </div>
                 </div>
             </section>
 
-            <div
-                id="changes-resize-handle"
-                class="panel-resize-handle"
-                data-panel-id="changes-panel"
-                data-side="left"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize run output panel"
-            ></div>
-
-            <section id="graph-panel">
-                <header id="graph-panel-header">
-                    <div id="graph-board-header" class="glass-panel">
-                        <span class="graph-board-kicker">Org View</span>
-                        <h2 id="graph-board-title">Agent Topology</h2>
-                        <p id="graph-board-caption">A quiet view of the active network.</p>
-                    </div>
-                    <div id="graph-hud">
-                        <div class="graph-hud-pill">
-                            <span class="graph-hud-label">Topology</span>
-                            <span class="graph-hud-value" id="hero-topology-label">Auto</span>
-                        </div>
-                        <div class="graph-hud-pill">
-                            <span class="graph-hud-label">Runtime</span>
-                            <span class="graph-hud-value" id="hero-status-label">Waiting</span>
-                        </div>
-                    </div>
-                </header>
-
-                <div id="graph-panel-body">
-                    <div id="graph-controls" aria-label="Graph controls">
-                        <button id="graph-zoom-in" class="graph-control-button" type="button" title="Zoom in">+</button>
-                        <button id="graph-zoom-out" class="graph-control-button" type="button" title="Zoom out">−</button>
-                        <button id="graph-reset-view" class="graph-control-button" type="button" title="Reset view">◎</button>
+            <!-- RIGHT DRAWER: conversation -->
+            <aside id="right-drawer" class="a-right">
+                <div id="drawer-open-body" class="v2-panel drawer-body">
+                    <div class="v2-panel-hdr">
+                        <span class="title">Conversation</span>
+                        <span id="conv-count" class="count">0 msgs</span>
+                        <span class="spacer"></span>
+                        <div id="session-pill">Session idle</div>
+                        <button id="drawer-close-inline" class="v2-btn icon" type="button" title="Collapse">▸</button>
                     </div>
 
-                    <canvas id="graph-canvas"></canvas>
-
-                    <div id="graph-loader" class="hidden">
-                        <div class="loader-ring"></div>
-                        <div id="loader-text">Starting agents…</div>
-                    </div>
-                </div>
-            </section>
-
-            <div
-                id="communications-resize-handle"
-                class="panel-resize-handle"
-                data-panel-id="communications-panel"
-                data-side="right"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize runtime context panel"
-            ></div>
-
-            <section id="communications-panel" class="side-column">
-                <div class="side-column-header">
-                    <div class="side-column-heading">
-                        <div class="side-column-copy">
-                            <span class="side-column-kicker">Live Stream</span>
-                            <h2 class="side-column-title">Activity</h2>
-                        </div>
-                        <div class="side-column-actions">
-                            <div id="session-pill">Session idle</div>
-                            <button id="communications-panel-toggle" class="panel-toggle" type="button" title="Collapse runtime panel" aria-expanded="true" aria-controls="communications-panel">
-                                <span class="panel-toggle-icon">−</span>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div id="workspace-meta" aria-label="Workspace metadata">
+                    <div id="workspace-meta" aria-label="Workspace metadata" class="hidden">
                         <div class="meta-card meta-card-workdir">
                             <span class="meta-label">Workspace</span>
                             <span id="workdir-banner" class="meta-value">—</span>
@@ -222,81 +194,126 @@
                             </div>
                         </div>
                     </div>
-                </div>
 
-                <div id="communications-panel-body">
-                    <div id="node-detail-panel" class="ndp-closed">
-                        <div id="ndp-header">
-                            <div id="ndp-accent"></div>
-                            <div id="ndp-header-body">
-                                <div id="ndp-title-row">
-                                    <span id="ndp-role"></span>
-                                    <span id="ndp-status-badge"></span>
+                    <div id="drawer-stream">
+                        <div id="node-detail-panel" class="ndp-closed">
+                            <div id="ndp-header">
+                                <div id="ndp-accent"></div>
+                                <div id="ndp-header-body">
+                                    <div id="ndp-title-row">
+                                        <span id="ndp-role"></span>
+                                        <span id="ndp-status-badge"></span>
+                                    </div>
+                                    <div id="ndp-meta"></div>
+                                    <div id="ndp-summary"></div>
                                 </div>
-                                <div id="ndp-meta"></div>
-                                <div id="ndp-summary"></div>
+                                <button id="ndp-close" title="Close">×</button>
                             </div>
-                            <button id="ndp-close" title="Close">×</button>
-                        </div>
-
-                        <div id="ndp-body">
-                            <div id="ndp-overview-section" class="ndp-section">
-                                <div class="ndp-section-label">Overview</div>
-                                <div id="ndp-overview-grid"></div>
+                            <div id="ndp-body">
+                                <div id="ndp-overview-section" class="ndp-section">
+                                    <div class="ndp-section-label">Overview</div>
+                                    <div id="ndp-overview-grid"></div>
+                                </div>
+                                <div id="ndp-topology-section" class="ndp-section">
+                                    <div class="ndp-section-label">Topology Position</div>
+                                    <div id="ndp-topology-map"></div>
+                                </div>
+                                <div id="ndp-activity-section" class="ndp-section hidden">
+                                    <div class="ndp-section-label">Activity Timeline</div>
+                                    <div id="ndp-activity-log"></div>
+                                </div>
+                                <div id="ndp-comm-section" class="ndp-section">
+                                    <div class="ndp-section-label">Communication</div>
+                                    <div id="ndp-comm-grid"></div>
+                                </div>
+                                <div id="ndp-messages-section" class="ndp-section">
+                                    <div class="ndp-section-label">Recent Messages</div>
+                                    <div id="ndp-message-list"></div>
+                                </div>
+                                <div id="ndp-result-section" class="ndp-section hidden">
+                                    <div class="ndp-section-label">Result</div>
+                                    <div id="ndp-result-body"></div>
+                                </div>
                             </div>
-
-                            <div id="ndp-topology-section" class="ndp-section">
-                                <div class="ndp-section-label">Topology Position</div>
-                                <div id="ndp-topology-map"></div>
-                            </div>
-
-                            <div id="ndp-activity-section" class="ndp-section hidden">
-                                <div class="ndp-section-label">Activity Timeline</div>
-                                <div id="ndp-activity-log"></div>
-                            </div>
-
-                            <div id="ndp-comm-section" class="ndp-section">
-                                <div class="ndp-section-label">Communication</div>
-                                <div id="ndp-comm-grid"></div>
-                            </div>
-
-                            <div id="ndp-messages-section" class="ndp-section">
-                                <div class="ndp-section-label">Recent Messages</div>
-                                <div id="ndp-message-list"></div>
-                            </div>
-
-                            <div id="ndp-result-section" class="ndp-section hidden">
-                                <div class="ndp-section-label">Result</div>
-                                <div id="ndp-result-body"></div>
+                            <div id="ndp-chat-row">
+                                <div id="ndp-chat-label">Send input directly to this node</div>
+                                <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
+                                <button id="ndp-chat-send">Send</button>
                             </div>
                         </div>
 
-                        <div id="ndp-chat-row">
-                            <div id="ndp-chat-label">Send input directly to this node</div>
-                            <input id="ndp-chat-input" type="text" placeholder="Send a message to this agent…" autocomplete="off">
-                            <button id="ndp-chat-send">Send</button>
+                        <div id="result-panel" class="hidden">
+                            <div id="result-header">
+                                <span id="result-badge">✓ Complete</span>
+                                <span id="result-agent"></span>
+                                <span id="result-elapsed"></span>
+                                <button id="result-copy" title="Copy to clipboard">Copy</button>
+                                <button id="result-close" title="Dismiss">×</button>
+                            </div>
+                            <div id="result-body-wrap">
+                                <div id="result-body"></div>
+                            </div>
+                        </div>
+
+                        <div id="message-log"></div>
+                    </div>
+
+                    <div id="question-panel" class="hidden">
+                        <div id="question-header">
+                            <span id="question-from">agent is asking</span>
+                            <button id="question-dismiss" title="Dismiss">×</button>
+                        </div>
+                        <div id="question-body"></div>
+                        <div id="question-reply-row">
+                            <input id="question-reply" type="text" placeholder="Type your answer…" autocomplete="off">
+                            <button id="question-send">Reply</button>
                         </div>
                     </div>
 
-                    <div id="result-panel" class="hidden">
-                        <div id="result-header">
-                            <span id="result-badge">✓ Complete</span>
-                            <span id="result-agent"></span>
-                            <span id="result-elapsed"></span>
-                            <button id="result-copy" title="Copy to clipboard">Copy</button>
-                            <button id="result-close" title="Dismiss">×</button>
+                    <div id="query-bar">
+                        <div id="query-samples" aria-label="Sample prompts">
+                            <button class="query-sample" type="button" data-prompt="Inspect this repo and explain how auth works.">Explain auth flow</button>
+                            <button class="query-sample" type="button" data-prompt="Review the current changes for bugs, regressions, and missing tests.">Review changes</button>
+                            <button class="query-sample" type="button" data-prompt="Make a URL shortener.">Make a URL shortener</button>
                         </div>
-                        <div id="result-body-wrap">
-                            <div id="result-body"></div>
+                        <div id="query-container">
+                            <textarea id="query-input" placeholder="Describe a task for the agents…" rows="1" autocomplete="off"></textarea>
+                            <div id="query-mentions" class="hidden"></div>
+                            <div id="query-toolbar">
+                                <div id="query-topology-row">
+                                    <div id="topology-dropdown">
+                                        <button id="topology-trigger" title="Switch topology">
+                                            <span class="topology-trigger-copy">
+                                                <span class="topology-trigger-kicker">Topology</span>
+                                                <span id="topology-trigger-label">Auto</span>
+                                            </span>
+                                            <span id="topology-trigger-count"></span>
+                                            <span class="topology-trigger-chevron">▾</span>
+                                        </button>
+                                        <div id="topology-menu" class="hidden"></div>
+                                    </div>
+                                </div>
+                                <div id="composer-workdir" title="Current workspace">—</div>
+                            </div>
+                            <div id="query-actions">
+                                <button id="query-send" class="v2-btn primary" type="button" title="Run (⌘↵)">
+                                    <span class="query-action-label">Send</span>
+                                    <span class="v2-kbd">⌘↵</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
-
-                    <div id="message-log"></div>
                 </div>
-            </section>
+
+                <div id="drawer-closed-rail" class="drawer-closed-rail hidden">
+                    <button id="drawer-open" type="button" title="Open conversation">Conversation</button>
+                    <span id="drawer-unread" class="unread">0</span>
+                </div>
+            </aside>
         </main>
     </div>
 
+    <!-- MODALS (unchanged) -->
     <div id="settings-modal" class="hidden" aria-hidden="true">
         <div id="settings-backdrop"></div>
         <div id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">

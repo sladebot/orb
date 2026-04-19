@@ -69,9 +69,38 @@ class Dashboard {
             if (this._handleMentionKeydown(e)) return;
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submitQuery(); }
         });
-        document.getElementById('changes-panel-toggle').addEventListener('click', () => this._togglePanel('changes-panel'));
-        document.getElementById('communications-panel-toggle').addEventListener('click', () => this._togglePanel('communications-panel'));
+        document.getElementById('changes-panel-toggle')?.addEventListener('click', () => this._togglePanel('changes-panel'));
+        document.getElementById('communications-panel-toggle')?.addEventListener('click', () => this._togglePanel('communications-panel'));
         this._setupPanelResize();
+
+        // V2 drawer + repo wiring — default open (composer lives in the drawer)
+        const storedDrawer = window.localStorage.getItem('orb:drawer:open');
+        this._drawerOpen = storedDrawer === null ? true : storedDrawer !== 'false';
+        this._applyDrawerState();
+        document.getElementById('drawer-toggle')?.addEventListener('click', () => this._toggleDrawer());
+        document.getElementById('drawer-close-inline')?.addEventListener('click', () => this._setDrawerOpen(false));
+        document.getElementById('drawer-open')?.addEventListener('click', () => this._setDrawerOpen(true));
+        document.getElementById('stop-run-button')?.addEventListener('click', () => this._requestStopRun());
+        document.getElementById('repo-sync-button')?.addEventListener('click', () => this._renderLiveCodeChanges());
+        document.getElementById('repo-pr-button')?.addEventListener('click', () => this._announcePrStub());
+        document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((b) => b.classList.toggle('on', b === btn));
+                this._repoView = btn.dataset.view || 'unified';
+                this._renderLiveCodeChanges();
+            });
+        });
+        this._repoView = 'unified';
+        this._repoSelectedPath = null;
+        this._throughputSamples = [];
+
+        // Desktop grid column resize
+        this._setupGridResize();
+        this._restoreGridWidths();
+
+        // Move node detail panel into the left rail (below agents) so it
+        // doesn't overlay the conversation drawer on the right.
+        this._relocateNodePanel();
 
         const qi = document.getElementById('query-input');
         qi.addEventListener('input', () => {
@@ -223,9 +252,172 @@ class Dashboard {
 
     _restorePanelState() {
         for (const panelId of ['changes-panel', 'communications-panel']) {
+            if (!document.getElementById(panelId)) continue;
             const collapsed = window.localStorage.getItem(`orb:${panelId}:collapsed`) === 'true';
             this._setPanelCollapsed(panelId, collapsed);
         }
+    }
+
+    _toggleDrawer() { this._setDrawerOpen(!this._drawerOpen); }
+
+    _setDrawerOpen(open) {
+        this._drawerOpen = !!open;
+        this._drawerManuallyOpened = this._drawerOpen;
+        this._applyDrawerState();
+        window.localStorage.setItem('orb:drawer:open', String(this._drawerOpen));
+        setTimeout(() => this.graph._resize?.(), 160);
+    }
+
+    _applyDrawerState() {
+        const grid = document.getElementById('main-layout');
+        if (grid) grid.classList.toggle('drawer-closed', !this._drawerOpen);
+        const toggle = document.getElementById('drawer-toggle');
+        if (toggle) {
+            toggle.setAttribute('aria-pressed', String(this._drawerOpen));
+            toggle.textContent = this._drawerOpen ? '▸ Chat' : '◂ Chat';
+        }
+        this._updateDrawerUnread();
+    }
+
+    _updateDrawerUnread() {
+        const pill = document.getElementById('drawer-unread');
+        if (!pill) return;
+        const n = this._rawMessages?.length || 0;
+        pill.textContent = String(n);
+        pill.classList.toggle('empty', n === 0);
+    }
+
+    _relocateNodePanel() {
+        const panel = document.getElementById('node-detail-panel');
+        const leftRail = document.getElementById('left-rail');
+        if (!panel || !leftRail || panel.parentElement === leftRail) return;
+        leftRail.appendChild(panel);
+    }
+
+    _positionNodePanel() {
+        const panel = document.getElementById('node-detail-panel');
+        const topo = document.getElementById('topology-mini');
+        const leftRail = document.getElementById('left-rail');
+        if (!panel || !topo || !leftRail) return;
+        // Use bounding rects so transforms/scroll are accounted for correctly.
+        const railRect = leftRail.getBoundingClientRect();
+        const topoRect = topo.getBoundingClientRect();
+        const top = Math.max(0, Math.round(topoRect.bottom - railRect.top + 10));
+        // Clear any stale inline top so the CSS rule (using --ndp-top) wins.
+        panel.style.removeProperty('top');
+        panel.style.setProperty('--ndp-top', top + 'px');
+    }
+
+    _setupGridResize() {
+        const grid = document.getElementById('main-layout');
+        if (!grid) return;
+        const handles = [
+            { id: 'left-resize-handle', varName: '--left-col', side: 'left', min: 260, max: 640 },
+            { id: 'right-resize-handle', varName: '--right-col', side: 'right', min: 280, max: 600 },
+        ];
+        const positionHandle = (h) => {
+            const el = document.getElementById(h.id);
+            if (!el) return;
+            const gridRect = grid.getBoundingClientRect();
+            if (h.side === 'left') {
+                const leftW = parseFloat(getComputedStyle(grid).getPropertyValue('--left-col')) || 400;
+                el.style.left = (leftW + 10) + 'px';
+            } else {
+                const rightW = parseFloat(getComputedStyle(grid).getPropertyValue('--right-col')) || 380;
+                el.style.left = (gridRect.width - rightW - 10) + 'px';
+            }
+        };
+        const reposition = () => {
+            handles.forEach(positionHandle);
+            this._positionNodePanel?.();
+        };
+        this._gridResizeReposition = reposition;
+        reposition();
+        window.addEventListener('resize', reposition);
+
+        handles.forEach((h) => {
+            const el = document.getElementById(h.id);
+            if (!el) return;
+            el.addEventListener('pointerdown', (ev) => {
+                if (window.innerWidth <= 720) return;
+                ev.preventDefault();
+                el.setPointerCapture(ev.pointerId);
+                el.classList.add('dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+
+                const startX = ev.clientX;
+                const gridRect = grid.getBoundingClientRect();
+                const startVal = parseFloat(getComputedStyle(grid).getPropertyValue(h.varName)) || (h.side === 'left' ? 400 : 380);
+
+                const onMove = (e) => {
+                    const dx = e.clientX - startX;
+                    let next = h.side === 'left' ? startVal + dx : startVal - dx;
+                    next = Math.max(h.min, Math.min(h.max, next));
+                    grid.style.setProperty(h.varName, next + 'px');
+                    positionHandle(h);
+                    positionHandle(h.side === 'left' ? handles[1] : handles[0]);
+                    this.graph._resize?.();
+                };
+                const onUp = () => {
+                    el.releasePointerCapture(ev.pointerId);
+                    el.classList.remove('dragging');
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    const cs = getComputedStyle(grid);
+                    window.localStorage.setItem('orb:v2-left-col', cs.getPropertyValue('--left-col').trim());
+                    window.localStorage.setItem('orb:v2-right-col', cs.getPropertyValue('--right-col').trim());
+                };
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+        });
+    }
+
+    _restoreGridWidths() {
+        const grid = document.getElementById('main-layout');
+        if (!grid) return;
+        const left = window.localStorage.getItem('orb:v2-left-col');
+        const right = window.localStorage.getItem('orb:v2-right-col');
+        if (left) grid.style.setProperty('--left-col', left);
+        if (right) grid.style.setProperty('--right-col', right);
+        if (this._gridResizeReposition) this._gridResizeReposition();
+    }
+
+    _updateTopologyAdaptiveHeight() {
+        const el = document.getElementById('topology-mini');
+        if (!el) return;
+        const rows = this._plan?.graph_view?.rows;
+        let count = Array.isArray(rows) && rows.length ? rows.length : 3;
+        // If graphView not present, estimate from agent count (layered layout)
+        if (!rows || !rows.length) {
+            const n = Object.keys(this.agents || {}).length;
+            count = n <= 2 ? 2 : n <= 4 ? 3 : n <= 6 ? 4 : 5;
+        }
+        count = Math.max(2, Math.min(4, count));
+        el.style.setProperty('--topo-rows', String(count));
+        // Resize canvas + reposition NDP after DOM reflows
+        setTimeout(() => {
+            this.graph._resize?.();
+            this._positionNodePanel();
+        }, 80);
+    }
+
+    async _requestStopRun() {
+        try {
+            await fetch('/api/stop', { method: 'POST' });
+        } catch (err) { /* ignore */ }
+    }
+
+    _announcePrStub() {
+        const btn = document.getElementById('repo-pr-button');
+        if (!btn) return;
+        const original = btn.textContent;
+        btn.textContent = 'Not wired yet';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1600);
     }
 
     _restorePanelWidths() {
@@ -417,6 +609,8 @@ class Dashboard {
         if (this._plan?.topology?.label) {
             document.getElementById('stat-topology').textContent = this._plan.topology.label;
             this._setText('hero-topology-label', this._plan.topology.label);
+            this._setText('breadcrumbs-topology', this._plan.topology.id || this._plan.topology.label);
+            this._setText('topology-count', this._plan.topology.id || this._plan.topology.label);
         }
 
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
@@ -440,6 +634,9 @@ class Dashboard {
             };
         }
         this._refreshMentionTargets();
+        this._renderAgentsList();
+        this._renderLiveCodeChanges();
+        this._updateTopologyAdaptiveHeight();
 
         this.graph.setTopology(data.agents, data.edges, this._plan?.graph_view || null);
         this._hideLoader();
@@ -585,6 +782,7 @@ class Dashboard {
         // Keep graph node model in sync (agent_stats fires for both sender and receiver)
         if (data.model) this.graph.updateAgentStatus(data.agent, data.status || '', data.model);
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
+        this._renderAgentsList();
     }
 
     _handleAgentHeartbeat(data) {
@@ -617,6 +815,87 @@ class Dashboard {
         document.getElementById('stat-budget').textContent   = data.budget_remaining;
         document.getElementById('stat-elapsed').textContent  = data.elapsed.toFixed(1) + 's';
         this._lastElapsed = data.elapsed;
+        this._sampleThroughput(data.message_count, data.elapsed);
+        const sub = document.getElementById('stat-elapsed-sub');
+        if (sub) sub.textContent = this._isRunActive ? 'live' : 'idle';
+        this._updateDrawerUnread();
+    }
+
+    _sampleThroughput(count, elapsed) {
+        const samples = this._throughputSamples || (this._throughputSamples = []);
+        samples.push({ count, t: elapsed });
+        while (samples.length > 60) samples.shift();
+        const points = [];
+        for (let i = 1; i < samples.length; i++) {
+            const a = samples[i - 1], b = samples[i];
+            const dt = Math.max(0.0001, b.t - a.t);
+            points.push(Math.max(0, (b.count - a.count) / dt));
+        }
+        const spark = document.getElementById('stat-throughput-spark');
+        if (!spark || points.length === 0) return;
+        const line = spark.querySelector('.spark-line');
+        const fill = spark.querySelector('.spark-fill');
+        const W = 100, H = 22;
+        const min = 0, max = Math.max(1, ...points);
+        const rng = max - min || 1;
+        const pts = points.map((p, i) => [
+            (i / Math.max(1, points.length - 1)) * W,
+            H - ((p - min) / rng) * (H - 2) - 1,
+        ]);
+        const d = pts.map(([x, y], i) => (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1)).join(' ');
+        if (line) line.setAttribute('d', d);
+        if (fill) fill.setAttribute('d', d + ` L ${W} ${H} L 0 ${H} Z`);
+        const avg = points.reduce((s, v) => s + v, 0) / points.length;
+        const peak = Math.max(...points);
+        const sub = document.getElementById('stat-throughput-sub');
+        if (sub) sub.textContent = `peak ${peak.toFixed(1)} · avg ${avg.toFixed(1)}`;
+    }
+
+    _renderAgentsList() {
+        const host = document.getElementById('agents-list');
+        if (!host) return;
+        const entries = Object.values(this.agents || {});
+        const count = document.getElementById('agents-count');
+        if (count) count.textContent = String(entries.length);
+        if (entries.length === 0) {
+            host.innerHTML = `<div class="repo-empty" style="padding:18px 14px;">No agents yet. Start a task to spin up the crew.</div>`;
+            return;
+        }
+        host.innerHTML = entries.map((a) => {
+            const role = (a.role || 'generic').toLowerCase();
+            const selected = this.selectedAgent === a.id ? ' active' : '';
+            const statusDim = (a.status === 'completed' || a.status === 'idle') ? 'opacity:.55;' : '';
+            return `
+                <div class="agent-row v2-role-${this._escapeAttr(role)}${selected}" data-agent-id="${this._escapeAttr(a.id)}">
+                    <span class="v2-role-dot" style="${statusDim}"></span>
+                    <div class="agent-body">
+                        <span class="agent-name">${this._escapeHtml(this._roleDisplayName(a.role, a.id))}</span>
+                        <span class="agent-meta">
+                            <span>${this._escapeHtml(a.model || '—')}</span>
+                            <span class="sep">·</span>
+                            <span>${this._escapeHtml(a.status || 'idle')}</span>
+                        </span>
+                    </div>
+                    <span class="msg-count">${a.msg_count || 0}</span>
+                </div>
+            `;
+        }).join('');
+        host.querySelectorAll('.agent-row').forEach((row) => {
+            row.addEventListener('click', () => {
+                const id = row.dataset.agentId;
+                if (id) this._selectAgent(id);
+            });
+        });
+    }
+
+    _roleDisplayName(role, fallback) {
+        if (!role) return fallback || 'agent';
+        const r = String(role);
+        return r.charAt(0).toUpperCase() + r.slice(1);
+    }
+
+    _escapeAttr(s) {
+        return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
     _handleFileWrite(data) {
@@ -753,23 +1032,27 @@ class Dashboard {
         const generationEl = document.getElementById('session-generation-banner');
         const turnEl = document.getElementById('session-turn-banner');
         const pillEl = document.getElementById('session-pill');
-        if (!workdirEl || !sessionEl || !generationEl || !turnEl || !pillEl) return;
+        const breadcrumbWorkdir = document.getElementById('breadcrumbs-workdir');
+        const breadcrumbSession = document.getElementById('breadcrumbs-session');
+        if (!pillEl) return;
 
         const workspaceName = workdir ? workdir.split('/').filter(Boolean).pop() || workdir : '—';
         const shortSession = sessionId ? sessionId.slice(0, 8) : '—';
 
-        workdirEl.textContent = workspaceName;
-        workdirEl.title = workdir || '';
+        if (workdirEl) { workdirEl.textContent = workspaceName; workdirEl.title = workdir || ''; }
         if (composerWorkdirEl) {
             composerWorkdirEl.textContent = workspaceName;
             composerWorkdirEl.title = workdir || '';
         }
+        if (breadcrumbWorkdir) { breadcrumbWorkdir.textContent = workspaceName; breadcrumbWorkdir.title = workdir || ''; }
+        if (breadcrumbSession) {
+            breadcrumbSession.textContent = sessionId ? `run_${shortSession}` : '—';
+            breadcrumbSession.title = sessionId || '';
+        }
 
-        sessionEl.textContent = shortSession;
-        sessionEl.title = sessionId || '';
-
-        generationEl.textContent = String(generation || 1);
-        turnEl.textContent = String(sessionTurn || 0);
+        if (sessionEl) { sessionEl.textContent = shortSession; sessionEl.title = sessionId || ''; }
+        if (generationEl) generationEl.textContent = String(generation || 1);
+        if (turnEl) turnEl.textContent = String(sessionTurn || 0);
 
         if (sessionId) {
             pillEl.textContent = sessionTurn > 0 ? 'Session Active' : 'Session Ready';
@@ -879,16 +1162,25 @@ class Dashboard {
     }
 
     _selectAgent(agentId) {
-        this.selectedAgent = agentId;
+        // Toggle: clicking the currently selected agent closes the panel.
+        const panel = document.getElementById('node-detail-panel');
+        const isOpen = panel && !panel.classList.contains('ndp-closed');
+        if (agentId && this.selectedAgent === agentId && isOpen) {
+            this._hideNodePanel();
+            this._renderAgentsList();
+            return;
+        }
 
-        // Update graph selection
+        this.selectedAgent = agentId;
         this.graph.selectedNode = agentId;
 
-        // Show node detail panel (replaces old chat panel for graph clicks)
         if (agentId) {
+            this._positionNodePanel();
             this._showNodePanel(agentId);
+            this._renderAgentsList();
         } else {
             this._hideNodePanel();
+            this._renderAgentsList();
         }
     }
 
@@ -1653,6 +1945,7 @@ class Dashboard {
         item.addEventListener('click', () => {
             if (this._isRunActive) return;
             this._selectedTopology = t.id;
+            this._userOverrodeTopology = t.id !== 'auto';
             this._renderTopologyMenu();
             this._updateTopologyTrigger();
             document.getElementById('topology-dropdown').classList.remove('open');
@@ -1852,22 +2145,35 @@ class Dashboard {
         input.value = '';
         input.style.height = 'auto';
         this._hideMentionSuggestions();
-        const res = await fetch('/api/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                query,
-                topology: this._selectedTopology,
-                model: this._selectedModel,
-            }),
-        });
-        const data = await res.json();
+        let res, data;
+        try {
+            // When the current session already has a topology, reuse it for
+            // follow-ups so we don't re-classify and rebuild the graph mid-session.
+            const sessionTopology = this._plan?.topology?.id;
+            const topologyForStart = this._userOverrodeTopology
+                ? this._selectedTopology
+                : (sessionTopology && sessionTopology !== 'auto' ? sessionTopology : this._selectedTopology);
+            res = await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query,
+                    topology: topologyForStart,
+                    model: this._selectedModel,
+                }),
+            });
+            const text = await res.text();
+            try { data = JSON.parse(text); }
+            catch { data = { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 300)}` }; }
+        } catch (err) {
+            data = { ok: false, error: `Network error: ${err?.message || err}` };
+        }
         if (!data.ok) {
             this._setRunActive(false);
             this._hideLoader();
             document.getElementById('result-agent').textContent = 'Error';
             document.getElementById('result-elapsed').textContent = '';
-            document.getElementById('result-body').textContent = data.error || 'Failed to start run.';
+            document.getElementById('result-body').textContent = data.error || `Failed to start run (HTTP ${res?.status || '?'}).`;
             document.getElementById('result-panel').classList.remove('hidden');
             return;
         }
@@ -1978,6 +2284,16 @@ class Dashboard {
             elapsed: data.elapsed || 0,
             result,
         });
+
+        // V2: surface the final result in the drawer's result panel since #changes-log is hidden
+        const resAgentEl = document.getElementById('result-agent');
+        const resElapsedEl = document.getElementById('result-elapsed');
+        const resBodyEl = document.getElementById('result-body');
+        const resPanel = document.getElementById('result-panel');
+        if (resAgentEl) resAgentEl.textContent = this._roleDisplayName(data.agent, data.agent || 'run');
+        if (resElapsedEl) resElapsedEl.textContent = elapsed;
+        if (resBodyEl) resBodyEl.innerHTML = this._renderResult(result);
+        if (resPanel) resPanel.classList.remove('hidden');
     }
 
     _renderInitialCodeChanges(result, diff, elapsed = '', sessionTurn = 0) {
@@ -2084,35 +2400,167 @@ class Dashboard {
     }
 
     _renderLiveCodeChanges() {
-        if (!this.changesLog) return;
-        const empty = this.changesLog.querySelector('.empty-state');
-        if (empty) empty.remove();
+        const files = Array.from(this._fileChanges.values()).map((f) => {
+            const diff = this._buildUnifiedDiff(f.path, f.oldContent, f.content);
+            const stats = this._countDiffStats(diff);
+            const status = (f.oldContent || '').length === 0 ? 'A' : 'M';
+            return { ...f, diff, added: stats.added, removed: stats.removed, status };
+        });
 
-        let card = document.getElementById('live-diff-card');
-        if (!card) {
-            card = document.createElement('div');
-            card.id = 'live-diff-card';
-            card.className = 'final-result-card live-diff-card';
-            this.changesLog.prepend(card);
+        this._renderRepoTree(files);
+        this._renderRepoDiff(files);
+        this._renderRepoToolbar(files);
+        this._updateFilesStat(files);
+    }
+
+    _renderRepoTree(files) {
+        const host = document.getElementById('repo-tree');
+        if (!host) return;
+        if (files.length === 0) {
+            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">No file writes yet. Start a task to see diffs here.</div>`;
+            return;
+        }
+        // Group by top-level folder (or "(root)")
+        const groups = new Map();
+        for (const f of files) {
+            const slash = f.path.indexOf('/');
+            const folder = slash >= 0 ? f.path.slice(0, slash + 1) : '';
+            if (!groups.has(folder)) groups.set(folder, []);
+            groups.get(folder).push(f);
+        }
+        const sortedFolders = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+        const selected = this._repoSelectedPath || files[0].path;
+        this._repoSelectedPath = selected;
+
+        host.innerHTML = sortedFolders.map((folder) => {
+            const items = groups.get(folder) || [];
+            items.sort((a, b) => a.path.localeCompare(b.path));
+            const label = folder || '(root)';
+            return `
+                <div class="repo-folder">${this._escapeHtml(label)}</div>
+                ${items.map((f) => {
+                    const shortName = folder ? f.path.slice(folder.length) || f.path : f.path;
+                    const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                    const sel = f.path === selected ? ' sel' : '';
+                    return `
+                        <div class="repo-file${sel}" data-path="${this._escapeAttr(f.path)}" title="${this._escapeAttr(f.path)}">
+                            <span class="badge ${f.status}">${f.status}</span>
+                            <div class="main">
+                                <span class="pth">${this._escapeHtml(shortName)}</span>
+                                <span class="byline">
+                                    <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
+                                    <span class="sep">·</span>
+                                    <span class="stat-add">+${f.added || 0}</span>
+                                    ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
+                                </span>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            `;
+        }).join('');
+
+        host.querySelectorAll('.repo-file').forEach((row) => {
+            row.addEventListener('click', () => {
+                this._repoSelectedPath = row.dataset.path;
+                this._renderLiveCodeChanges();
+            });
+        });
+    }
+
+    _renderRepoDiff(files) {
+        const filebar = document.getElementById('repo-diff-filebar');
+        const pathEl = document.getElementById('repo-diff-path');
+        const addEl = document.getElementById('repo-diff-add');
+        const delEl = document.getElementById('repo-diff-del');
+        const badgeEl = document.getElementById('repo-diff-status');
+        const authorEl = document.getElementById('repo-diff-author');
+        const diffHost = document.getElementById('repo-diff');
+        if (!diffHost) return;
+
+        if (files.length === 0) {
+            if (filebar) filebar.classList.add('hidden');
+            diffHost.innerHTML = `<div id="repo-diff-empty" class="repo-empty">Select a file from the tree to see its diff.</div>`;
+            return;
+        }
+        const selected = files.find((f) => f.path === this._repoSelectedPath) || files[0];
+        this._repoSelectedPath = selected.path;
+
+        if (filebar) filebar.classList.remove('hidden');
+        if (pathEl) pathEl.textContent = selected.path;
+        if (addEl) addEl.textContent = `+${selected.added || 0}`;
+        if (delEl) { delEl.textContent = `−${selected.removed || 0}`; delEl.style.display = (selected.removed || 0) > 0 ? '' : 'none'; }
+        if (badgeEl) { badgeEl.textContent = selected.status; badgeEl.className = `repo-diff-badge ${selected.status}`; }
+        if (authorEl) {
+            const role = (this._roleOf(selected.agent) || 'generic').toLowerCase();
+            authorEl.className = `diff-gutter-author v2-role-${role}`;
+            authorEl.innerHTML = `<span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(selected.agent, selected.agent))}`;
         }
 
-        const files = Array.from(this._fileChanges.values());
-        const total = files.length;
-        card.innerHTML = `
-            <div class="final-result-header">
-                <span class="final-result-title">Live Workspace Diff</span>
-                <span class="final-result-elapsed">${total} file${total === 1 ? '' : 's'}</span>
-            </div>
-            <div class="live-diff-summary">Captured from runtime file writes. This is the current overall code delta for the run.</div>
-            <div class="live-diff-files">
-                ${files.map((file) => this._renderCodeChangeCard({
-                    path: file.path,
-                    agent: file.agent || '',
-                    diff: this._buildUnifiedDiff(file.path, file.oldContent, file.content),
-                    ...this._countDiffStats(this._buildUnifiedDiff(file.path, file.oldContent, file.content)),
-                })).join('')}
-            </div>
-        `;
+        if (this._repoView === 'raw') {
+            diffHost.innerHTML = `<pre class="repo-raw" style="padding:12px 16px; margin:0; color:var(--text-secondary);">${this._escapeHtml(selected.content || '')}</pre>`;
+            return;
+        }
+        diffHost.innerHTML = this._renderV2Diff(selected);
+    }
+
+    _renderV2Diff(file) {
+        const oldLines = (file.oldContent || '').split('\n');
+        const newLines = (file.content || '').split('\n');
+        const ops = this._diffLineOps(oldLines, newLines);
+        const rows = [];
+        rows.push(`<div class="diff-hunk-hdr"><span class="at">@@ ${file.status === 'A' ? 'new file' : 'modified'} @@</span><span>${this._escapeHtml(file.path)}</span></div>`);
+        let oldLn = 0, newLn = 0;
+        for (const op of ops) {
+            if (op.type === 'equal') {
+                oldLn++; newLn++;
+                rows.push(`<div class="diff-line ctx"><span class="ln">${oldLn}</span><span class="ln">${newLn}</span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            } else if (op.type === 'add') {
+                newLn++;
+                rows.push(`<div class="diff-line add"><span class="ln"></span><span class="ln">${newLn}</span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            } else {
+                oldLn++;
+                rows.push(`<div class="diff-line del"><span class="ln">${oldLn}</span><span class="ln"></span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            }
+        }
+        return rows.join('');
+    }
+
+    _renderRepoToolbar(files) {
+        const countEl = document.getElementById('repo-panel-count');
+        const addEl = document.getElementById('repo-stat-add');
+        const delEl = document.getElementById('repo-stat-del');
+        const contribEl = document.getElementById('repo-contrib');
+        const branchEl = document.getElementById('repo-branch');
+        const totalAdd = files.reduce((s, f) => s + (f.added || 0), 0);
+        const totalDel = files.reduce((s, f) => s + (f.removed || 0), 0);
+        const authors = new Set(files.map((f) => f.agent).filter(Boolean));
+        if (countEl) countEl.textContent = `${files.length} file${files.length === 1 ? '' : 's'}`;
+        if (addEl) addEl.textContent = `+${totalAdd}`;
+        if (delEl) delEl.textContent = `−${totalDel}`;
+        if (contribEl) contribEl.textContent = `${authors.size} agent${authors.size === 1 ? '' : 's'} contributed`;
+        if (branchEl) {
+            const short = (this._wsSessionId || '').slice(0, 6);
+            branchEl.textContent = short ? `orb/run_${short}` : 'orb/run';
+        }
+    }
+
+    _updateFilesStat(files) {
+        const el = document.getElementById('stat-files');
+        const sub = document.getElementById('stat-files-sub');
+        if (el) el.textContent = String(files.length);
+        if (sub) {
+            const add = files.reduce((s, f) => s + (f.added || 0), 0);
+            const del = files.reduce((s, f) => s + (f.removed || 0), 0);
+            sub.textContent = `+${add} −${del} loc`;
+        }
+    }
+
+    _roleOf(agentId) {
+        if (!agentId) return 'generic';
+        const agent = this.agents[agentId];
+        if (agent?.role) return agent.role;
+        return agentId;
     }
 
     _renderCodeChangeCard(file) {
