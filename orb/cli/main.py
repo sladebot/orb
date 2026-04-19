@@ -393,10 +393,12 @@ def parse_args() -> argparse.Namespace:
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     tui_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     tui_parser.add_argument("--port", type=int, default=None, help="Orb daemon port shorthand for localhost connects")
-    tui_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
+    tui_parser.add_argument("--topology", choices=topology_choices, default=None, help="Requested topology when starting a new run (default: prompt interactively)")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
     tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
+    tui_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (default: current working directory)")
+    tui_parser.add_argument("--no-prompt", action="store_true", help="Skip the startup topology prompt and use --topology (or 'auto')")
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
@@ -469,6 +471,45 @@ def _resolve_connect_url(url: str | None, port: int | None = None) -> str:
     if port is not None:
         return _normalize_connect_url(f"http://127.0.0.1:{port}")
     return _normalize_connect_url(None)
+
+
+def _prompt_topology_choice(topology_choices: list[str]) -> str:
+    """Interactive prompt used by `orb tui` when no --topology is set.
+
+    Returns the selected topology id. Always offers "auto" as the first
+    option. EOF / empty input defaults to "auto".
+    """
+    print()
+    print("  How should Orb route turns in this session?")
+    print()
+    # "auto" first, then every other topology in loader order
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for tid in ["auto", *topology_choices]:
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ordered.append(tid)
+    for i, tid in enumerate(ordered, 1):
+        if tid == "auto":
+            print(f"    {i}. auto            — let Orb classify every turn (first choice locks in)")
+        else:
+            print(f"    {i}. {tid}")
+    print()
+    while True:
+        try:
+            raw = input(f"  Pick [1-{len(ordered)}] or press Enter for auto: ").strip()
+        except EOFError:
+            return "auto"
+        if not raw:
+            return "auto"
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(ordered):
+                return ordered[idx - 1]
+        if raw in ordered:
+            return raw
+        print(f"  Please enter a number 1-{len(ordered)}, a topology id, or blank for auto.")
 
 
 def _init_topologies_file(force: bool = False) -> Path:
@@ -949,10 +990,44 @@ async def async_main() -> None:
 
     if args.subcommand == "tui":
         from .tui import attach_tui
+        import aiohttp
+
+        connect_url = _resolve_connect_url(args.connect, getattr(args, "port", None))
+
+        # Default workdir to the shell's current directory so the session is
+        # scoped to the repo the user invoked `orb tui` from.
+        workdir = args.workdir or str(Path.cwd())
+        workdir = str(Path(workdir).expanduser().resolve())
+
+        # Ask the user how they'd like to route runs unless --topology was set
+        # or --no-prompt was passed.
+        topology = args.topology
+        if topology is None and not getattr(args, "no_prompt", False) and sys.stdin.isatty():
+            from orb.topologies import get_loader
+            topo_choices = ["auto"] + get_loader().list_ids()
+            topology = _prompt_topology_choice(topo_choices)
+        if topology is None:
+            topology = "auto"
+
+        # Create a workdir-scoped session before attaching the TUI so every
+        # run we launch lands in the right folder. Soft-fail if the daemon
+        # isn't reachable — attach_tui will surface the real error.
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(f"{connect_url}/api/session/new", json={"workdir": workdir}) as resp:
+                    payload = await resp.json()
+                    if payload.get("ok"):
+                        print(f"  Session scoped to: {workdir}")
+                        print(f"  Topology: {topology}")
+                    else:
+                        print(f"  Warning: couldn't scope session to {workdir}: {payload.get('error', 'unknown')}")
+        except aiohttp.ClientError:
+            # Daemon unreachable at this point — leave it to attach_tui to fail loudly.
+            pass
 
         await attach_tui(
-            connect_url=_resolve_connect_url(args.connect, getattr(args, "port", None)),
-            topology=args.topology,
+            connect_url=connect_url,
+            topology=topology,
             budget=args.budget,
             show_logs=args.logs,
             initial_query=args.query,

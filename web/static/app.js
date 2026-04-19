@@ -426,6 +426,201 @@ class Dashboard {
             const hint = document.getElementById('session-config-footer-hint');
             if (hint) hint.textContent = 'Leaving workspace blank keeps the daemon\'s current directory.';
         });
+
+        // FS picker wiring
+        document.getElementById('session-config-workdir-browse')?.addEventListener('click', () => this._toggleFsPicker());
+        document.getElementById('session-config-fs-cancel')?.addEventListener('click', () => this._closeFsPicker());
+        document.getElementById('session-config-fs-select')?.addEventListener('click', () => this._confirmFsSelection());
+        const picker = document.getElementById('session-config-fs-picker');
+        picker?.querySelector('.sc-fs-up')?.addEventListener('click', () => this._fsNavigateParent());
+        picker?.querySelector('.sc-fs-home')?.addEventListener('click', () => this._loadFsPath(''));
+        picker?.querySelector('.sc-fs-hidden-check')?.addEventListener('change', (e) => {
+            this._fsShowHidden = !!e.target.checked;
+            this._loadFsPath(this._fsCurrentPath || '');
+        });
+    }
+
+    _toggleFsPicker() {
+        const picker = document.getElementById('session-config-fs-picker');
+        if (!picker) return;
+        if (picker.classList.contains('hidden')) {
+            picker.classList.remove('hidden');
+            const seed = (document.getElementById('session-config-workdir')?.value || '').trim();
+            this._loadFsPath(seed);
+        } else {
+            this._closeFsPicker();
+        }
+    }
+
+    _closeFsPicker() {
+        document.getElementById('session-config-fs-picker')?.classList.add('hidden');
+    }
+
+    async _loadFsPath(path) {
+        const list = document.getElementById('session-config-fs-list');
+        const pathEl = document.getElementById('session-config-fs-path');
+        const selEl = document.getElementById('session-config-fs-selected');
+        if (!list) return;
+        list.innerHTML = `<div class="sc-fs-loading">Loading…</div>`;
+        try {
+            const qs = new URLSearchParams();
+            if (path) qs.set('path', path);
+            if (this._fsShowHidden) qs.set('hidden', '1');
+            const res = await fetch(`/api/fs/list?${qs.toString()}`);
+            const data = await res.json();
+            if (!data.ok) {
+                list.innerHTML = `<div class="sc-fs-error">${this._escapeHtml(data.error || 'Failed to list')}</div>`;
+                return;
+            }
+            this._fsCurrentPath = data.path;
+            this._fsParentPath = data.parent || '';
+            if (pathEl) {
+                pathEl.textContent = data.path;
+                pathEl.title = data.path;
+            }
+            if (selEl) selEl.textContent = data.path;
+            if (!data.entries.length) {
+                list.innerHTML = `<div class="sc-fs-empty">No subdirectories.</div>`;
+                return;
+            }
+            list.innerHTML = data.entries.map((e) => `
+                <div class="sc-fs-item" data-path="${this._escapeAttr(e.path)}">
+                    <span class="sc-fs-glyph">▸</span>
+                    <span class="sc-fs-name">${this._escapeHtml(e.name)}</span>
+                </div>
+            `).join('');
+            list.querySelectorAll('.sc-fs-item').forEach((row) => {
+                row.addEventListener('click', () => this._loadFsPath(row.dataset.path || ''));
+            });
+        } catch (err) {
+            list.innerHTML = `<div class="sc-fs-error">Network error: ${this._escapeHtml(String(err.message || err))}</div>`;
+        }
+    }
+
+    _fsNavigateParent() {
+        if (this._fsParentPath) this._loadFsPath(this._fsParentPath);
+    }
+
+    _confirmFsSelection() {
+        const input = document.getElementById('session-config-workdir');
+        if (input && this._fsCurrentPath) {
+            input.value = this._fsCurrentPath;
+        }
+        this._closeFsPicker();
+    }
+
+    _renderTopologyPreview() {
+        const preview = document.getElementById('session-config-topology-preview');
+        const svg = document.getElementById('session-config-topology-svg');
+        const desc = document.getElementById('session-config-topology-desc');
+        if (!preview || !svg) return;
+        const tid = this._sessionConfig.topology;
+        if (tid === 'auto') {
+            preview.classList.add('hidden');
+            return;
+        }
+        const topo = (this._topologyList || []).find((t) => t.id === tid);
+        if (!topo) { preview.classList.add('hidden'); return; }
+        preview.classList.remove('hidden');
+        if (desc) desc.textContent = topo.description || '';
+
+        // Layer the agents via BFS from coordinator (or first agent)
+        const agents = topo.agents || [];
+        const edges = topo.edges || [];
+        const out = new Map(agents.map((a) => [a, []]));
+        for (const e of edges) {
+            if (out.has(e.source)) out.get(e.source).push(e.target);
+        }
+        const layer = new Map();
+        const root = agents.includes('coordinator') ? 'coordinator' : (agents[0] || '');
+        if (root) {
+            const queue = [root]; layer.set(root, 0);
+            while (queue.length) {
+                const cur = queue.shift();
+                for (const next of out.get(cur) || []) {
+                    if (!layer.has(next)) { layer.set(next, (layer.get(cur) || 0) + 1); queue.push(next); }
+                }
+            }
+        }
+        for (const a of agents) if (!layer.has(a)) layer.set(a, 1);
+
+        // Group by layer
+        const byLayer = new Map();
+        for (const [a, l] of layer.entries()) {
+            if (!byLayer.has(l)) byLayer.set(l, []);
+            byLayer.get(l).push(a);
+        }
+        const layers = Array.from(byLayer.keys()).sort((a, b) => a - b);
+
+        // Lay out
+        const W = 360, H = 180;
+        const nodeW = 96, nodeH = 24, radius = 6;
+        const ySlots = layers.length;
+        const positions = new Map();
+        layers.forEach((l, li) => {
+            const row = byLayer.get(l);
+            const y = (H / (ySlots + 1)) * (li + 1);
+            row.forEach((a, ai) => {
+                const x = (W / (row.length + 1)) * (ai + 1);
+                positions.set(a, { x, y });
+            });
+        });
+
+        const ROLE_COLOR = {
+            coordinator: '#94bfff',
+            coder: '#c4ced9',
+            reviewer: '#f0c982',
+            reviewer_a: '#f0c982',
+            reviewer_b: '#f5b56b',
+            tester: '#86d8ab',
+            researcher: '#cdbdff',
+        };
+
+        // Build SVG
+        // Keep defs (marker), replace everything else
+        const defs = svg.querySelector('defs');
+        while (svg.lastChild && svg.lastChild !== defs) svg.removeChild(svg.lastChild);
+
+        // Edges first
+        for (const e of edges) {
+            const a = positions.get(e.source);
+            const b = positions.get(e.target);
+            if (!a || !b) continue;
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            // curved bezier
+            const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            const d = `M ${a.x} ${a.y + nodeH / 2} C ${a.x} ${mid.y}, ${b.x} ${mid.y}, ${b.x} ${b.y - nodeH / 2}`;
+            line.setAttribute('d', d);
+            line.setAttribute('class', 'sc-edge');
+            line.setAttribute('marker-end', 'url(#sc-arrow)');
+            svg.appendChild(line);
+        }
+
+        for (const [id, p] of positions.entries()) {
+            const color = ROLE_COLOR[id] || ROLE_COLOR[id.split('_')[0]] || '#c4ced9';
+            const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.setAttribute('transform', `translate(${p.x - nodeW / 2}, ${p.y - nodeH / 2})`);
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('width', String(nodeW));
+            rect.setAttribute('height', String(nodeH));
+            rect.setAttribute('rx', String(radius));
+            rect.setAttribute('class', 'sc-node-rect');
+            rect.setAttribute('style', `color: ${color};`);
+            g.appendChild(rect);
+            const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            dot.setAttribute('cx', '10'); dot.setAttribute('cy', String(nodeH / 2));
+            dot.setAttribute('r', '3.2');
+            dot.setAttribute('class', 'sc-node-dot');
+            dot.setAttribute('style', `color: ${color};`);
+            g.appendChild(dot);
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', '20');
+            label.setAttribute('y', String(nodeH / 2 + 0.5));
+            label.setAttribute('class', 'sc-node-label');
+            label.textContent = this._roleDisplayName(id, id);
+            g.appendChild(label);
+            svg.appendChild(g);
+        }
     }
 
     async _openSessionConfig() {
@@ -458,6 +653,7 @@ class Dashboard {
         }
         this._renderSessionConfigTopologies();
         this._renderSessionConfigAgentModels();
+        this._renderTopologyPreview();
         this._renderSessionConfigLockBanner();
     }
 
@@ -466,6 +662,7 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+        window.localStorage.setItem('orb:session-modal-dismissed', '1');
     }
 
     async _ensureTopologyList() {
@@ -519,6 +716,7 @@ class Dashboard {
                 }
                 this._renderSessionConfigTopologies();
                 this._renderSessionConfigAgentModels();
+                this._renderTopologyPreview();
             });
         });
     }
@@ -614,12 +812,25 @@ class Dashboard {
 
     _applySessionLock(sessionBlock) {
         if (!sessionBlock || typeof sessionBlock !== 'object') return;
+        const previousWorkdir = this._sessionLock?.workdir;
         this._sessionLock = {
             topology: String(sessionBlock.locked_topology || ''),
             agentModels: { ...(sessionBlock.locked_agent_models || {}) },
             modelPin: String(sessionBlock.locked_model_pin || ''),
             workdir: String(sessionBlock.workdir || ''),
         };
+
+        // First-load prompt: if this is the initial init we've seen and the
+        // session has no workdir yet, pop the Session modal so the user can
+        // scope it to their repo. Suppress if they've dismissed the prompt
+        // in this browser before.
+        if (previousWorkdir === undefined) {
+            const dismissed = window.localStorage.getItem('orb:session-modal-dismissed') === '1';
+            const modal = document.getElementById('session-config-modal');
+            if (!this._sessionLock.workdir && !dismissed && modal?.classList.contains('hidden')) {
+                setTimeout(() => this._openSessionConfig(), 200);
+            }
+        }
         // Render lock icon
         const icon = document.getElementById('breadcrumbs-lock-icon');
         if (icon) icon.classList.toggle('on', !!this._sessionLock.topology);

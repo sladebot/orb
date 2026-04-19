@@ -35,8 +35,8 @@
                     <span id="connection-label">Daemon Offline</span>
                 </div>
                 <button id="stop-run-button" class="v2-btn danger" type="button" title="Stop current run">■ Stop</button>
-                <button id="session-config-button" class="v2-btn" type="button" title="Configure session: workdir, topology, per-node models">⊘ Session</button>
-                <button id="new-session-button" class="v2-btn" type="button" title="Start a fresh auto session">↺ New</button>
+                <button id="session-config-button" class="v2-btn" type="button" title="Start a new session: workdir, topology, per-node models">⊘ New Session</button>
+                <button id="new-session-button" class="v2-btn hidden" type="button" title="Start a fresh auto session">↺ New</button>
                 <button id="traces-button" class="v2-btn" type="button" title="Browse traces">Traces</button>
                 <div class="v2-chrome-divider"></div>
                 <button id="drawer-toggle" class="v2-btn" type="button" title="Toggle conversation drawer" aria-pressed="true">◂ Chat</button>
@@ -359,7 +359,26 @@
                     <div class="sc-section-copy">Orb will <code>chdir</code> into this folder. File writes and tool calls will operate on it for the whole session.</div>
                     <div class="sc-row">
                         <input id="session-config-workdir" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/repo">
+                        <button id="session-config-workdir-browse" class="v2-btn" type="button" title="Browse the daemon's filesystem">Browse…</button>
                         <button id="session-config-workdir-cwd" class="v2-btn" type="button" title="Use daemon's current directory">Use current</button>
+                    </div>
+                    <div id="session-config-fs-picker" class="sc-fs-picker hidden">
+                        <div class="sc-fs-toolbar">
+                            <button class="sc-fs-up v2-btn icon" type="button" title="Parent directory">↑</button>
+                            <button class="sc-fs-home v2-btn icon" type="button" title="Home">⌂</button>
+                            <span class="sc-fs-path" id="session-config-fs-path">~</span>
+                            <span class="spacer"></span>
+                            <label class="sc-fs-hidden-toggle">
+                                <input type="checkbox" class="sc-fs-hidden-check"> show hidden
+                            </label>
+                        </div>
+                        <div id="session-config-fs-list" class="sc-fs-list"></div>
+                        <div class="sc-fs-actions">
+                            <span id="session-config-fs-selected" class="sc-fs-selected">—</span>
+                            <span class="spacer"></span>
+                            <button id="session-config-fs-cancel" class="v2-btn" type="button">Cancel</button>
+                            <button id="session-config-fs-select" class="v2-btn primary" type="button">Select this folder</button>
+                        </div>
                     </div>
                 </section>
 
@@ -367,6 +386,16 @@
                     <div class="sc-section-label">Topology</div>
                     <div class="sc-section-copy">Pick a topology to run every turn in this session. Auto lets Orb classify each turn (and later turns reuse the first choice).</div>
                     <div id="session-config-topology-list" class="sc-topology-list"></div>
+                    <div id="session-config-topology-preview" class="sc-topology-preview hidden">
+                        <svg id="session-config-topology-svg" viewBox="0 0 360 180" preserveAspectRatio="xMidYMid meet" aria-label="Topology preview">
+                            <defs>
+                                <marker id="sc-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                                    <path d="M0,0 L0,6 L6,3 Z" fill="rgba(148,191,255,0.7)"/>
+                                </marker>
+                            </defs>
+                        </svg>
+                        <div id="session-config-topology-desc" class="sc-topology-desc"></div>
+                    </div>
                 </section>
 
                 <section class="sc-section" id="session-config-agent-models-section">

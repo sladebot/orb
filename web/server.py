@@ -57,6 +57,7 @@ class DashboardServer:
         self._app.router.add_get("/api/models", self._models_handler)
         self._app.router.add_get("/api/settings", self._settings_get_handler)
         self._app.router.add_get("/api/topologies", self._topologies_handler)
+        self._app.router.add_get("/api/fs/list", self._fs_list_handler)
         self._app.router.add_get("/api/admin/traces/sessions", self._trace_sessions_handler)
         self._app.router.add_get("/api/admin/traces/session/{session_id}", self._trace_session_runs_handler)
         self._app.router.add_get("/api/admin/traces/run/{run_id}", self._trace_run_handler)
@@ -244,6 +245,57 @@ class DashboardServer:
     async def _settings_get_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.settings_payload())
 
+    async def _fs_list_handler(self, request: web.Request) -> web.Response:
+        """Directory listing endpoint for the dashboard's workspace picker.
+
+        Returns subdirectories of the given `?path=` (defaulting to the user's
+        home directory). Files are filtered out because only folders can be a
+        workdir. Paths are always resolved, so the client receives absolute
+        canonical paths it can send back to /api/session/new verbatim.
+        """
+        raw = (request.rel_url.query.get("path") or "").strip()
+        show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")
+        try:
+            root = Path(raw).expanduser() if raw else Path.home()
+            root = root.resolve(strict=False)
+            if not root.exists() or not root.is_dir():
+                return web.json_response(
+                    {"ok": False, "error": f"Not a directory: {root}"},
+                    status=400,
+                )
+            entries: list[dict] = []
+            for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                try:
+                    if not child.is_dir():
+                        continue
+                except OSError:
+                    continue
+                if not show_hidden and child.name.startswith("."):
+                    continue
+                entries.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": True,
+                })
+            parent = str(root.parent) if root.parent != root else ""
+            return web.json_response({
+                "ok": True,
+                "path": str(root),
+                "parent": parent,
+                "home": str(Path.home()),
+                "entries": entries,
+            })
+        except PermissionError as exc:
+            return web.json_response(
+                {"ok": False, "error": f"Permission denied: {exc}"},
+                status=403,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response(
+                {"ok": False, "error": f"Failed to list path: {exc}"},
+                status=500,
+            )
+
     async def _topologies_handler(self, request: web.Request) -> web.Response:
         from orb.topologies import get_loader
 
@@ -251,11 +303,16 @@ class DashboardServer:
         topologies = []
         for tid in loader.list_ids():
             topo = loader.get(tid)
+            edges = [
+                {"source": a, "target": b}
+                for a, b in (topo.edges or [])
+            ]
             topologies.append({
                 "id": tid,
                 "label": topo.label,
                 "description": topo.description,
                 "agents": list(topo.agents.keys()),
+                "edges": edges,
             })
         return web.json_response({"topologies": topologies})
 

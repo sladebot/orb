@@ -43,6 +43,8 @@ def _base_args(**overrides) -> Namespace:
         host=None,
         port=None,
         workdir=None,
+        no_prompt=True,
+        agent_model=[],
     )
     data.update(overrides)
     return Namespace(**data)
