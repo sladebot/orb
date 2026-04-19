@@ -131,6 +131,10 @@ class TestGraphRuntimeSession:
             "coordinator": _DummyAgent(),
             "coder": _DummyAgent(),
         }
+        # Drive the FSM into RUNNING so the .running property is True —
+        # the refactor made the FSM authoritative instead of inferring from _run_task.
+        runtime._fsm.fire("start_run_begin")  # noqa: SLF001
+        runtime._fsm.fire("orchestrator_task_created")  # noqa: SLF001
 
         status, payload = await runtime.inject_message("coordinator", "@coder fix src/app.py")
 

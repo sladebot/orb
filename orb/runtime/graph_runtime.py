@@ -17,6 +17,7 @@ from orb.cli.config import get as get_config, load_config, save_config
 from orb.messaging.channel import ChannelClosed
 from orb.tracing.run_trace import RunTrace
 from web.state import DashboardState
+from .run_state import InvalidTransitionError, RunState, RunStateMachine
 from .topology_classifier import ProviderBackedTopologyClassifier, TopologyClassifier
 from .transcript import ConversationSession, RunTranscript
 
@@ -46,6 +47,7 @@ class GraphRuntime:
         self._subscribers: set[BroadcastFn] = set()
         self._agents: dict = {}
         self._run_task: asyncio.Task | None = None
+        self._fsm = RunStateMachine()
         self._providers: dict = {}
         self._all_providers: dict = {}
         self._enabled_providers: list[str] = []
@@ -200,7 +202,25 @@ class GraphRuntime:
 
     @property
     def running(self) -> bool:
-        return self._run_task is not None and not self._run_task.done()
+        """True while a run is planning, executing, or being stopped.
+
+        Backed by the RunStateMachine. The legacy `_run_task`-based check
+        is still useful for asyncio bookkeeping (see ``stop()`` and
+        ``wait_for_run()``), but external callers should prefer this
+        property or ``run_state`` below.
+        """
+        return self._fsm.is_in_flight
+
+    @property
+    def run_state(self) -> RunState:
+        """Current lifecycle state of the runtime.
+
+        One of ``idle`` / ``planning`` / ``running`` / ``stopping`` /
+        ``completed`` / ``errored``. Prefer this over ``running`` when
+        the caller needs to distinguish between "in the middle of a run"
+        and "finished with a result ready".
+        """
+        return self._fsm.state
 
     @property
     def last_result(self):
@@ -689,6 +709,7 @@ class GraphRuntime:
         payload["session_id"] = resolved_session_id
         payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
         payload["run_active"] = self.running if run_active is None else bool(run_active)
+        payload["run_state"] = self._fsm.state.value
         # Expose session-level lock + workdir so the UI can show "pinned"
         # topology/models and disable re-classification affordances.
         payload["session"] = {
@@ -1177,20 +1198,30 @@ class GraphRuntime:
         if self.running:
             return 200, {"ok": False, "error": "Run already in progress"}
 
-        # If a workdir is supplied for this run (or the session already has
-        # one pinned), chdir the daemon to it so tools + file writes land in
-        # the right repo. Empty string means "use wherever we are now".
+        # Validate the workdir BEFORE announcing PLANNING so a bad path
+        # leaves the FSM resting in a terminal state.
         target_workdir = (workdir or self._conversation_session.workdir or "").strip()
+        resolved_workdir: str | None = None
         if target_workdir:
             expanded = Path(target_workdir).expanduser()
             if not expanded.exists() or not expanded.is_dir():
                 return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
-            resolved = str(expanded.resolve())
+            resolved_workdir = str(expanded.resolve())
+
+        # Move the FSM to PLANNING. From here on any failure must fire
+        # ``orchestrator_errored`` so we never strand the runtime.
+        try:
+            self._fsm.fire("start_run_begin")
+        except InvalidTransitionError as exc:
+            return 409, {"ok": False, "error": f"Cannot start a run: {exc}"}
+
+        if resolved_workdir:
             try:
-                os.chdir(resolved)
+                os.chdir(resolved_workdir)
             except OSError as exc:
-                return 500, {"ok": False, "error": f"Failed to chdir to {resolved}: {exc}"}
-            self._conversation_session.workdir = resolved
+                self._fsm.maybe_fire("orchestrator_errored")
+                return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
+            self._conversation_session.workdir = resolved_workdir
 
         self.state.reset()
         self._last_result = None
@@ -1372,6 +1403,8 @@ class GraphRuntime:
                 trace_recorder=self._last_trace,
             )
         )
+        # PLANNING → RUNNING. The orchestrator task now owns the lifecycle.
+        self._fsm.fire("orchestrator_task_created")
         self._run_task.add_done_callback(
             lambda t: logger.error("Run task failed: %s", t.exception())
             if not t.cancelled() and t.exception() else None
@@ -1393,7 +1426,12 @@ class GraphRuntime:
                     message="run stopped by user",
                 )
                 self._persist_run_trace()
-            self._run_task.cancel()
+            # PLANNING/RUNNING → STOPPING. The actual IDLE transition
+            # happens inside _run_orchestrator's CancelledError branch
+            # once the task unwinds.
+            self._fsm.maybe_fire("stop_requested")
+            if self._run_task is not None:
+                self._run_task.cancel()
             self._persist_dashboard_snapshot(run_active=False)
             await self._broadcast(json.dumps({"type": "stopped"}))
             return {"ok": True}
@@ -1413,6 +1451,11 @@ class GraphRuntime:
                 os.chdir(resolved_workdir)
             except OSError as exc:
                 return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
+
+        # COMPLETED/ERRORED → IDLE (IDLE → IDLE is a no-op). The FSM guard
+        # on ``session_reset`` rejects in-flight states; ``self.running``
+        # above already short-circuits those, so this fire is safe.
+        self._fsm.maybe_fire("session_reset")
 
         self.state.reset()
         self._agents = {}
@@ -2199,11 +2242,20 @@ class GraphRuntime:
         try:
             run_target = initial_target if initial_target in orchestrator.agents else orchestrator.config.entry_agent
             result = await orchestrator.run(query, entry_agent=run_target)
+        except asyncio.CancelledError:
+            # stop_run() cancelled us; land the FSM in IDLE via stop_finished.
+            logger.info("Orchestrator run cancelled session=%s", self._conversation_session.session_id)
+            self._fsm.maybe_fire("stop_finished")
+            result = None
+            raise
         except Exception:
             logger.exception("Orchestrator run failed")
+            self._fsm.maybe_fire("orchestrator_errored")
             result = None
         else:
             self.state.completed = True
+            # RUNNING → COMPLETED; the completion broadcast fires later.
+            self._fsm.maybe_fire("orchestrator_succeeded")
 
         new_carryover: dict[str, list] = {}
         for aid, agent in orchestrator.agents.items():
