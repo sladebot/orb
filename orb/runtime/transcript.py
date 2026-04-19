@@ -37,6 +37,15 @@ class ConversationSession:
     turns: list[ConversationTurn] = field(default_factory=list)
     compactions: list[ConversationCompaction] = field(default_factory=list)
     agent_carryover: dict[str, list[dict]] = field(default_factory=dict)
+    # Absolute path of the workspace the session operates on. Empty means use
+    # the daemon's current working directory at run time.
+    workdir: str = ""
+    # Topology + models pinned to the session after the first run completes.
+    # Follow-up /api/start calls reuse these unless the caller explicitly
+    # supplies a different topology.
+    locked_topology: str = ""
+    locked_agent_models: dict[str, str] = field(default_factory=dict)
+    locked_model_pin: str = ""
 
     def add_message(self, msg: Message, *, max_turns: int = 500) -> None:
         self._append(ConversationTurn(
@@ -146,6 +155,10 @@ class ConversationSession:
             "turns": [asdict(turn) for turn in self.turns],
             "compactions": [asdict(item) for item in self.compactions],
             "agent_carryover": self.agent_carryover,
+            "workdir": self.workdir,
+            "locked_topology": self.locked_topology,
+            "locked_agent_models": dict(self.locked_agent_models),
+            "locked_model_pin": self.locked_model_pin,
         }
 
     @classmethod
@@ -156,6 +169,10 @@ class ConversationSession:
             updated_at=float(payload.get("updated_at") or time()),
             generation=max(1, int(payload.get("generation") or 1)),
             agent_carryover=dict(payload.get("agent_carryover") or {}),
+            workdir=str(payload.get("workdir") or ""),
+            locked_topology=str(payload.get("locked_topology") or ""),
+            locked_agent_models=dict(payload.get("locked_agent_models") or {}),
+            locked_model_pin=str(payload.get("locked_model_pin") or ""),
         )
         session.turns = [
             ConversationTurn(**turn)

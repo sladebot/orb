@@ -173,6 +173,23 @@ class DashboardServer:
         query = (body.get("query") or "").strip()
         topology = (body.get("topology") or "auto").strip()
         model_pin = (body.get("model") or "auto").strip()
+        workdir = (body.get("workdir") or "").strip() or None
+        raw_agent_models = body.get("agent_models") or {}
+        if not isinstance(raw_agent_models, dict):
+            return web.json_response(
+                {"ok": False, "error": "agent_models must be an object mapping role -> model_id"},
+                status=400,
+            )
+        agent_models: dict[str, str] = {
+            str(role).strip(): str(model_id).strip()
+            for role, model_id in raw_agent_models.items()
+            if str(role).strip() and str(model_id).strip()
+        } or None
+        if agent_models and (topology == "auto" or not topology):
+            return web.json_response(
+                {"ok": False, "error": "agent_models requires an explicit topology (not 'auto')"},
+                status=400,
+            )
         if not query:
             return web.json_response({"ok": False, "error": "Query must not be empty"}, status=400)
         from orb.topologies import get_loader, normalize_topology_id
@@ -188,6 +205,8 @@ class DashboardServer:
             query,
             topology,
             model_pin=model_pin,
+            agent_models=agent_models,
+            workdir=workdir,
         )
         return web.json_response(payload, status=status)
 
@@ -195,7 +214,17 @@ class DashboardServer:
         return web.json_response(await self.runtime.stop_run())
 
     async def _new_session_handler(self, request: web.Request) -> web.Response:
-        status, payload = await self.runtime.new_session()
+        workdir: str | None = None
+        if request.body_exists and request.content_length:
+            try:
+                body = await request.json()
+            except (JSONDecodeError, UnicodeDecodeError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                raw = body.get("workdir")
+                if isinstance(raw, str) and raw.strip():
+                    workdir = raw.strip()
+        status, payload = await self.runtime.new_session(workdir=workdir)
         return web.json_response(payload, status=status)
 
     async def _run_status_handler(self, request: web.Request) -> web.Response:

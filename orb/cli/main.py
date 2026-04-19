@@ -401,6 +401,14 @@ def parse_args() -> argparse.Namespace:
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     dashboard_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
+    dashboard_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (calls /api/session/new with the path)")
+    dashboard_parser.add_argument(
+        "--agent-model",
+        action="append",
+        default=[],
+        metavar="role=model_id",
+        help="Manual per-node model pin (repeatable). Requires --topology other than 'auto'.",
+    )
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
     daemon_common.add_argument("--host", default=None, help="Daemon bind host")
@@ -958,12 +966,42 @@ async def async_main() -> None:
 
         base = _resolve_connect_url(args.connect)
 
-        if args.query:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{base}/api/start", json={
+        # Parse --agent-model pairs: role=model_id (repeatable)
+        agent_model_pins: dict[str, str] = {}
+        for pair in getattr(args, "agent_model", []) or []:
+            if "=" not in pair:
+                print_error(f"--agent-model expects role=model_id, got: {pair}")
+                sys.exit(1)
+            role, _, model_id = pair.partition("=")
+            role = role.strip()
+            model_id = model_id.strip()
+            if not role or not model_id:
+                print_error(f"--agent-model expects role=model_id, got: {pair}")
+                sys.exit(1)
+            agent_model_pins[role] = model_id
+        if agent_model_pins and args.topology == "auto":
+            print_error("--agent-model requires --topology other than 'auto'")
+            sys.exit(1)
+
+        async with aiohttp.ClientSession() as session:
+            # Scope the session to a workdir first, if requested.
+            if getattr(args, "workdir", None):
+                workdir = str(Path(args.workdir).expanduser().resolve())
+                async with session.post(f"{base}/api/session/new", json={"workdir": workdir}) as resp:
+                    payload = await resp.json()
+                    if not payload.get("ok"):
+                        print_error(payload.get("error", "Failed to create workdir-scoped session"))
+                        sys.exit(1)
+                    print(f"  Session scoped to: {workdir}")
+
+            if args.query:
+                start_body: dict = {
                     "query": args.query,
                     "topology": args.topology,
-                }) as resp:
+                }
+                if agent_model_pins:
+                    start_body["agent_models"] = agent_model_pins
+                async with session.post(f"{base}/api/start", json=start_body) as resp:
                     payload = await resp.json()
                     if not payload.get("ok"):
                         print_error(payload.get("error", "Failed to start run"))

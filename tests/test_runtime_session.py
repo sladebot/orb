@@ -44,6 +44,25 @@ class TestConversationSession:
         assert loaded.agent_carryover["coder"][0]["content"] == "cached"
         assert loaded.user_turn_count() == 0
 
+    def test_round_trip_preserves_workdir_and_topology_lock(self, tmp_path: Path):
+        session = ConversationSession(
+            workdir="/tmp/some-repo",
+            locked_topology="triad",
+            locked_agent_models={"coordinator": "claude-sonnet", "coder": "claude-opus"},
+            locked_model_pin="cloud_fast",
+        )
+        path = tmp_path / "session.json"
+        session.save(path)
+        loaded = ConversationSession.load(path)
+
+        assert loaded.workdir == "/tmp/some-repo"
+        assert loaded.locked_topology == "triad"
+        assert loaded.locked_agent_models == {
+            "coordinator": "claude-sonnet",
+            "coder": "claude-opus",
+        }
+        assert loaded.locked_model_pin == "cloud_fast"
+
 
 class TestGraphRuntimeSession:
     def test_runtime_default_session_paths_are_per_session(self, tmp_path: Path, monkeypatch):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -688,6 +689,15 @@ class GraphRuntime:
         payload["session_id"] = resolved_session_id
         payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
         payload["run_active"] = self.running if run_active is None else bool(run_active)
+        # Expose session-level lock + workdir so the UI can show "pinned"
+        # topology/models and disable re-classification affordances.
+        payload["session"] = {
+            "id": self._conversation_session.session_id,
+            "workdir": self._conversation_session.workdir,
+            "locked_topology": self._conversation_session.locked_topology,
+            "locked_agent_models": dict(self._conversation_session.locked_agent_models),
+            "locked_model_pin": self._conversation_session.locked_model_pin,
+        }
         if self._last_trace is not None:
             payload["run_trace"] = self._last_trace.to_dict()
             payload["run_trace_summary"] = self._last_trace.summary()
@@ -1157,6 +1167,8 @@ class GraphRuntime:
         query: str,
         topology: str,
         model_pin: str = "auto",
+        agent_models: dict[str, str] | None = None,
+        workdir: str | None = None,
     ) -> tuple[int, dict]:
         from orb.topologies import normalize_topology_id
 
@@ -1164,6 +1176,21 @@ class GraphRuntime:
             return 500, {"ok": False, "error": "Server has no providers configured"}
         if self.running:
             return 200, {"ok": False, "error": "Run already in progress"}
+
+        # If a workdir is supplied for this run (or the session already has
+        # one pinned), chdir the daemon to it so tools + file writes land in
+        # the right repo. Empty string means "use wherever we are now".
+        target_workdir = (workdir or self._conversation_session.workdir or "").strip()
+        if target_workdir:
+            expanded = Path(target_workdir).expanduser()
+            if not expanded.exists() or not expanded.is_dir():
+                return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
+            resolved = str(expanded.resolve())
+            try:
+                os.chdir(resolved)
+            except OSError as exc:
+                return 500, {"ok": False, "error": f"Failed to chdir to {resolved}: {exc}"}
+            self._conversation_session.workdir = resolved
 
         self.state.reset()
         self._last_result = None
@@ -1176,19 +1203,43 @@ class GraphRuntime:
             query,
             default_target="coordinator",
         )
+
+        # Session topology lock — if the session has already settled on a
+        # topology (first run committed), reuse it unless the caller passes
+        # an explicit topology override. Manual `agent_models` also implies
+        # the caller is driving topology, so we do not apply the lock there.
+        explicit_topology = topology != "auto"
+        manual_models = bool(agent_models)
+        if self._conversation_session.locked_topology and not explicit_topology and not manual_models:
+            topology = self._conversation_session.locked_topology
+            if not model_pin or model_pin == "auto":
+                model_pin = self._conversation_session.locked_model_pin or "auto"
+
         logger.info(
-            "run start session=%s requested_topology=%s requested_target=%s model_pin=%s query=%s",
+            "run start session=%s requested_topology=%s requested_target=%s model_pin=%s manual_models=%s workdir=%s query=%s",
             self._conversation_session.session_id,
             topology,
             requested_target,
             model_pin,
+            manual_models,
+            self._conversation_session.workdir or "<cwd>",
             query[:240].replace("\n", " "),
         )
         self.state.run_query = query
         self._sync_session_state()
         self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
-        predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
+
+        if manual_models and explicit_topology:
+            # Manual mode — skip the classifier entirely. Synthesize a
+            # predicted payload from the caller-supplied topology + models.
+            predicted = self._manual_prediction(
+                topology=normalize_topology_id(topology),
+                agent_models=agent_models,
+                model_pin=model_pin,
+            )
+        else:
+            predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
         routing_payload = {
             "task_type": str(predicted.get("task_type") or ""),
@@ -1263,12 +1314,17 @@ class GraphRuntime:
             message="model allocation finished",
             data={"agent_models": {aid: cfg.model_id for aid, cfg in agent_model_map.items()}},
         )
-        agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
+        resolved_agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
+        # Pin the topology + agent-model map onto the session so follow-up
+        # runs reuse the same allocation instead of re-classifying.
+        self._conversation_session.locked_topology = selected_topology
+        self._conversation_session.locked_agent_models = dict(resolved_agent_models)
+        self._conversation_session.locked_model_pin = model_pin or "auto"
         self.state.topology_id = selected_topology
         self.state.topology_label = topology_label
         self.state.topology_description = topology_description
         self.state.agent_complexity = agent_complexity
-        self.state.agent_models = agent_models
+        self.state.agent_models = resolved_agent_models
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
         self.state.routing = routing_payload
@@ -1330,21 +1386,36 @@ class GraphRuntime:
             return {"ok": True}
         return {"ok": False, "error": "No run in progress"}
 
-    async def new_session(self) -> tuple[int, dict]:
+    async def new_session(self, *, workdir: str | None = None) -> tuple[int, dict]:
         if self.running:
             return 409, {"ok": False, "error": "Cannot start a new session while a run is in progress"}
+
+        resolved_workdir = ""
+        if workdir is not None and workdir.strip():
+            expanded = Path(workdir.strip()).expanduser()
+            if not expanded.exists() or not expanded.is_dir():
+                return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
+            resolved_workdir = str(expanded.resolve())
+            try:
+                os.chdir(resolved_workdir)
+            except OSError as exc:
+                return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
 
         self.state.reset()
         self._agents = {}
         self._last_result = None
-        self._conversation_session = ConversationSession()
+        self._conversation_session = ConversationSession(workdir=resolved_workdir)
         if not self._session_path_explicit:
             self._session_path = self._default_session_path(self._conversation_session.session_id)
         self._run_transcript = RunTranscript(session=self._conversation_session)
         self._persist_session()
         self._sync_session_state()
         self._persist_dashboard_snapshot(run_active=False)
-        logger.info("session new session=%s", self._conversation_session.session_id)
+        logger.info(
+            "session new session=%s workdir=%s",
+            self._conversation_session.session_id,
+            resolved_workdir or "<cwd>",
+        )
         return 200, {
             "ok": True,
             "session_id": self._conversation_session.session_id,
@@ -1409,6 +1480,59 @@ class GraphRuntime:
             if result and not result.startswith("Consensus:") and result != "[shutdown]":
                 return agent_id, result
         return None, ""
+
+    def _manual_prediction(
+        self,
+        *,
+        topology: str,
+        agent_models: dict[str, str],
+        model_pin: str,
+    ) -> dict:
+        """Synthesize a topology-prediction payload for manual mode.
+
+        When the caller drives both the topology and the per-agent model
+        pins, we skip the classifier entirely. This returns the same shape
+        ``predict_topology`` would have produced so the rest of
+        ``start_run`` stays on one code path.
+        """
+        from orb.topologies import normalize_topology_id
+        topology_id = normalize_topology_id(topology)
+        topo = self._available_topologies().get(topology_id)
+        label = topo.label if topo else topology_id
+        description = topo.description if topo else ""
+        # Build the agent_assignments dict the runtime expects
+        agent_assignments: dict[str, dict] = {}
+        for role, model_id in (agent_models or {}).items():
+            if not role or not model_id:
+                continue
+            agent_assignments[str(role).strip()] = {
+                "provider": "",  # resolved later in _validate_agent_model_assignments
+                "model": str(model_id).strip(),
+            }
+        return {
+            "topology": topology_id,
+            "label": label,
+            "description": description,
+            "options": self._topology_options(topology_id),
+            "task_type": "manual",
+            "reason": "Manual mode — caller supplied topology and per-agent models.",
+            "summary": "Manual topology + model selection",
+            "signals": {"manual": True},
+            "candidates": [],
+            "escalation_allowed": False,
+            "stop_early_allowed": False,
+            "escalation_reason": "",
+            "stop_early_reason": "Manual run",
+            "requested_topology": topology_id,
+            "routing_mode": "manual",
+            "classifier_model": "",
+            "classifier_provider": "",
+            "complexity": 50,
+            "agent_complexity": {},
+            "agent_assignments": agent_assignments,
+            "agent_models": {role: data.get("model", "") for role, data in agent_assignments.items()},
+            "model_pin": model_pin,
+        }
 
     async def predict_topology(
         self,
