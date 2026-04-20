@@ -80,6 +80,26 @@ class TestFsReadSymlinkEscape:
         assert resp.status >= 400
         assert body["ok"] is False
 
+    async def test_fs_read_allows_symlink_staying_inside_workdir(self, client, tmp_path):
+        """Symlinks that resolve inside the workdir must still be readable."""
+        test_client, _ = client
+        workdir = (tmp_path / "work_ok").resolve()
+        workdir.mkdir()
+        real = workdir / "real.txt"
+        real.write_text("hello symlink")
+        link = workdir / "link.txt"
+        os.symlink(str(real), str(link))
+
+        resp = await test_client.get(
+            "/api/v1/fs/read",
+            params={"workdir": str(workdir), "path": "link.txt"},
+        )
+        body = await resp.json()
+        assert resp.status == 200, body
+        # v1 envelope nests the payload under `data`.
+        data = body.get("data") if isinstance(body, dict) and "data" in body else body
+        assert "hello symlink" in (data.get("content") or "")
+
     async def test_fs_read_rejects_symlink_legacy_handler(self, client, tmp_path):
         test_client, server = client
         workdir = tmp_path / "work2"

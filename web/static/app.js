@@ -12,6 +12,11 @@ function safeParseWsMessage(data) {
     }
 }
 
+function describeHttpError(status, body) {
+    if (body) console.error('non-JSON response body (truncated):', String(body).slice(0, 500));
+    return status ? `HTTP ${status}: non-JSON response` : 'non-JSON response';
+}
+
 const AGENT_CSS_CLASS = {
     coordinator: 'agent-coordinator',
     coder:       'agent-coder',
@@ -2957,7 +2962,7 @@ class Dashboard {
             });
             const text = await res.text();
             try { data = JSON.parse(text); }
-            catch { data = { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 300)}` }; }
+            catch { data = { ok: false, error: describeHttpError(res.status, text) }; }
         } catch (err) {
             data = { ok: false, error: `Network error: ${err?.message || err}` };
         }
@@ -4102,7 +4107,7 @@ class Dashboard {
 
 // Expose helpers for unit tests (Node/Vitest). No-op in the browser.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { safeParseWsMessage };
+    module.exports = { safeParseWsMessage, describeHttpError };
 }
 
 // Initialize on load

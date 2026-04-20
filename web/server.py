@@ -474,17 +474,8 @@ class DashboardServer:
             target = (workdir / rel_raw).resolve(strict=True)
         except (OSError, ValueError, FileNotFoundError):
             return web.json_response({"ok": False, "error": "invalid path"}, status=400)
-        # Prevent path traversal outside the workdir
         try:
             target.relative_to(workdir)
-        except ValueError:
-            return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
-        # Belt-and-suspenders: re-check against realpath in case of any
-        # remaining symlink trickery (e.g. TOCTOU or path component games).
-        import os as _os
-        real = Path(_os.path.realpath(str(target)))
-        try:
-            real.relative_to(workdir)
         except ValueError:
             return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
         if not target.exists() or not target.is_file():

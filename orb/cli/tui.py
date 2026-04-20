@@ -1631,6 +1631,8 @@ class OrbTUI(App[None]):
             self._on_server_run_complete(data)
         elif t == "file_write":
             self._on_server_file_write(data)
+        elif t == "plan_step":
+            self._on_server_plan_step(data)
         elif t == "run_state_changed":
             self._on_server_run_state_changed(data)
         elif t == "stats":
@@ -1987,6 +1989,20 @@ class OrbTUI(App[None]):
 
         if agent_id in self._agents:
             self._agents[agent_id].activity_text = f"wrote {path} ({stat})"
+        self._refresh_all()
+
+    def _on_server_plan_step(self, data: dict) -> None:
+        stage = str(data.get("stage") or "planning")
+        title = str(data.get("title") or "Planning update")
+        detail = str(data.get("detail") or "")
+        elapsed = float(data.get("elapsed") or self._last_elapsed or 0.0)
+        self._record_timeline_entry(TimelineEntry(
+            kind="plan",
+            elapsed=elapsed,
+            title=title,
+            summary=detail,
+            body=f"stage: {stage}",
+        ))
         self._refresh_all()
 
     def on_orb_log_record(self, event: OrbLogRecord) -> None:
