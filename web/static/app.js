@@ -227,7 +227,8 @@ class Dashboard {
     _connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const sessionId = new URL(window.location.href).searchParams.get('session');
-        const wsUrl = `${protocol}//${window.location.host}/ws${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
+        // v1 WebSocket: multiplexed /api/v1/ws with optional session filter.
+        const wsUrl = `${protocol}//${window.location.host}/api/v1/ws${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`;
         this._wsSessionId = sessionId || '';
 
         this.ws = new WebSocket(wsUrl);
@@ -873,18 +874,26 @@ class Dashboard {
             this._fileChanges = new Map();
             this._workspaceFiles = [];
 
-            const res = await fetch('/api/session/new', {
+            // v1 multi-tenant route: POST /api/v1/sessions. Response shape
+            // is the standard envelope {ok, code, data: {session_id,...}}.
+            const res = await fetch('/api/v1/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(workdir ? { workdir } : {}),
             });
-            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-            if (!data.ok) {
-                if (hint) hint.textContent = data.error || 'Failed to create session';
+            const envelope = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            if (!envelope.ok) {
+                if (hint) hint.textContent = envelope.error || 'Failed to create session';
                 return;
             }
-            if (data.session_id) this._updateSessionUrl(data.session_id);
-            if (data.init) this._handleInit(data.init);
+            const summary = envelope.data || {};
+            if (summary.session_id) this._updateSessionUrl(summary.session_id);
+            // v1 create_session only returns the summary; pull full init state separately.
+            if (summary.session_id) {
+                const stateRes = await fetch(`/api/v1/sessions/${encodeURIComponent(summary.session_id)}/state`);
+                const stateEnv = await stateRes.json().catch(() => ({ ok: false }));
+                if (stateEnv.ok && stateEnv.data) this._handleInit(stateEnv.data);
+            }
 
             // Reflect picked topology + manual agent_models for the FIRST
             // /api/start on the fresh session; the server locks them in
@@ -950,7 +959,7 @@ class Dashboard {
 
     async _requestStopRun() {
         try {
-            await fetch('/api/stop', { method: 'POST' });
+            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/stop` : '/api/stop', { method: 'POST' });
         } catch (err) { /* ignore */ }
     }
 
@@ -2040,7 +2049,7 @@ class Dashboard {
         this._refreshNodePanel();
 
         try {
-            await fetch('/api/inject', {
+            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: this.selectedAgent, message: text }),
@@ -2700,7 +2709,7 @@ class Dashboard {
             input.value = '';
             input.style.height = 'auto';
             this._hideMentionSuggestions();
-            await fetch('/api/inject', {
+            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: 'coordinator', message: query }),
@@ -2771,7 +2780,14 @@ class Dashboard {
                     }
                 }
             }
-            res = await fetch('/api/start', {
+            // v1 route: POST /api/v1/sessions/{id}/runs starts a run on
+            // a specific session. Falls back to the default session id if
+            // the UI hasn't captured one yet (first-boot race).
+            const sid = this._wsSessionId || this._defaultSessionId || '';
+            const url = sid
+                ? `/api/v1/sessions/${encodeURIComponent(sid)}/runs`
+                : '/api/start';  // legacy fallback before we know the id
+            res = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(startBody),
@@ -2782,20 +2798,25 @@ class Dashboard {
         } catch (err) {
             data = { ok: false, error: `Network error: ${err?.message || err}` };
         }
-        if (!data.ok) {
+        // v1 envelopes nest the payload under `data`. Legacy returns
+        // fields at the top level. Normalize both shapes.
+        const payload = data && typeof data.data === 'object' && data.data !== null
+            ? { ok: data.ok, error: data.error, code: data.code, ...data.data }
+            : data;
+        if (!payload.ok) {
             this._setRunActive(false);
             this._hideLoader();
             document.getElementById('result-agent').textContent = 'Error';
             document.getElementById('result-elapsed').textContent = '';
-            document.getElementById('result-body').textContent = data.error || `Failed to start run (HTTP ${res?.status || '?'}).`;
+            document.getElementById('result-body').textContent = payload.error || `Failed to start run (HTTP ${res?.status || '?'}).`;
             document.getElementById('result-panel').classList.remove('hidden');
             return;
         }
-        if (data.session_id) {
-            this._updateSessionUrl(data.session_id);
+        if (payload.session_id) {
+            this._updateSessionUrl(payload.session_id);
         }
-        if (data.init && !this._shouldIgnoreStartSnapshot(data.init)) {
-            this._handleInit(data.init);
+        if (payload.init && !this._shouldIgnoreStartSnapshot(payload.init)) {
+            this._handleInit(payload.init);
         }
     }
 
@@ -2852,7 +2873,7 @@ class Dashboard {
         const label = btn?.querySelector('.query-action-label');
         btn.disabled = true;
         if (label) label.textContent = 'Stopping…';
-        await fetch('/api/stop', { method: 'POST' });
+        await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/stop` : '/api/stop', { method: 'POST' });
     }
 
     _handleRunStateChanged(data) {
@@ -3642,7 +3663,7 @@ class Dashboard {
         input.value = '';
 
         // Inject the reply directly to the agent that asked
-        await fetch('/api/inject', {
+        await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ to: this._questionAgent, message: text }),
