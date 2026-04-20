@@ -45,6 +45,12 @@ def _base_args(**overrides) -> Namespace:
         workdir=None,
         no_prompt=True,
         agent_model=[],
+        sessions_action=None,
+        session_id=None,
+        session_ids=None,
+        keep_disk=False,
+        yes=False,
+        all=False,
     )
     data.update(overrides)
     return Namespace(**data)

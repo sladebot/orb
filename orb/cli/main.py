@@ -389,6 +389,21 @@ def parse_args() -> argparse.Namespace:
     topologies_init.add_argument("--force", action="store_true", help="Overwrite ~/.orb/topologies.yaml if it already exists")
     topology_choices = ["auto"] + get_loader().list_ids()
 
+    sessions_parser = subparsers.add_parser("sessions", help="Manage Orb sessions (list, show, remove, prune)")
+    sessions_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
+    sessions_parser.add_argument("--port", type=int, default=None, help="Daemon port shorthand for localhost connects")
+    sessions_sub = sessions_parser.add_subparsers(dest="sessions_action")
+    sessions_sub.add_parser("list", help="List sessions the daemon knows about (active + persisted on disk)")
+    sessions_show = sessions_sub.add_parser("show", help="Print a session's summary + run state")
+    sessions_show.add_argument("session_id", help="Session id to inspect")
+    sessions_rm = sessions_sub.add_parser("rm", help="Delete one or more sessions by id")
+    sessions_rm.add_argument("session_ids", nargs="+", help="Session ids to remove")
+    sessions_rm.add_argument("--keep-disk", action="store_true", help="Remove from daemon registry but keep the on-disk transcript")
+    sessions_prune = sessions_sub.add_parser("prune", help="Remove terminal (idle/completed/errored) sessions; add --all to include in-flight")
+    sessions_prune.add_argument("--all", action="store_true", help="Also delete in-flight sessions (cancels any running task)")
+    sessions_prune.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    sessions_prune.add_argument("--keep-disk", action="store_true", help="Keep on-disk transcripts")
+
     tui_parser = subparsers.add_parser("tui", help="Attach the terminal UI to a running Orb daemon")
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     tui_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
@@ -463,6 +478,207 @@ def _normalize_connect_url(url: str | None, default: str = DEFAULT_CONNECT_URL) 
     if "://" not in base:
         base = f"http://{base}"
     return base
+
+
+async def _cmd_sessions(args: argparse.Namespace) -> None:
+    """Handle `orb sessions list/show/rm/prune`.
+
+    Sessions live in two places:
+      - the daemon's in-memory `RuntimeManager` registry
+      - JSON transcripts on disk under `~/.orb/sessions/*.json`
+
+    The CLI talks to the daemon's v1 API for live state and also
+    scrubs the on-disk files when the user asks to remove or prune.
+    That way cleaning up doesn't leave dangling transcripts.
+    """
+    import aiohttp
+
+    action = getattr(args, "sessions_action", None)
+    base = _resolve_connect_url(getattr(args, "connect", None), getattr(args, "port", None))
+
+    async def _api(session: aiohttp.ClientSession, method: str, path: str, **kwargs) -> tuple[int, dict]:
+        try:
+            async with session.request(method, f"{base}{path}", **kwargs) as resp:
+                try:
+                    body = await resp.json()
+                except Exception:
+                    body = {"ok": False, "error": f"HTTP {resp.status}"}
+                return resp.status, body
+        except aiohttp.ClientError as exc:
+            return 0, {"ok": False, "error": f"Cannot reach daemon at {base}: {exc}"}
+
+    def _sessions_dir() -> Path:
+        return Path.home() / ".orb" / "sessions"
+
+    def _disk_session_ids() -> list[str]:
+        d = _sessions_dir()
+        if not d.exists():
+            return []
+        return sorted(p.stem for p in d.glob("*.json"))
+
+    def _rm_disk(session_id: str) -> bool:
+        p = _sessions_dir() / f"{session_id}.json"
+        try:
+            p.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
+    def _short(sid: str) -> str:
+        return sid[:8] if len(sid) > 8 else sid
+
+    if action == "list":
+        async with aiohttp.ClientSession() as http:
+            status, body = await _api(http, "GET", "/api/v1/sessions")
+        if status == 0:
+            print_error(body.get("error", "Failed to reach daemon"))
+            sys.exit(1)
+        live = {s["session_id"]: s for s in (body.get("data") or {}).get("sessions", [])}
+        disk_ids = set(_disk_session_ids())
+        all_ids = sorted(set(live.keys()) | disk_ids, key=lambda sid: (sid not in live, sid))
+
+        if not all_ids:
+            print("  No sessions found.")
+            return
+        header = f"  {'SESSION':<10}  {'STATE':<10}  {'WORKDIR':<40}  {'TOPOLOGY':<12}  NOTES"
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for sid in all_ids:
+            info = live.get(sid)
+            if info:
+                state = info.get("run_state") or "?"
+                workdir = info.get("workdir") or "<daemon-cwd>"
+                topology = info.get("locked_topology") or "auto"
+                note = ""
+            else:
+                state = "persisted"
+                workdir = "—"
+                topology = "—"
+                note = "on-disk only (daemon doesn't have it loaded)"
+            print(f"  {_short(sid):<10}  {state:<10}  {workdir[:40]:<40}  {topology:<12}  {note}")
+        print()
+        print(f"  Total: {len(all_ids)}  ({len(live)} active, {len(disk_ids - set(live))} persisted-only)")
+        return
+
+    if action == "show":
+        sid = args.session_id
+        # Resolve short prefixes against the live registry + disk files.
+        async with aiohttp.ClientSession() as http:
+            _, list_body = await _api(http, "GET", "/api/v1/sessions")
+        live_ids = [s["session_id"] for s in (list_body.get("data") or {}).get("sessions", [])]
+        all_ids = sorted(set(live_ids) | set(_disk_session_ids()))
+        matches = [i for i in all_ids if i == sid or i.startswith(sid)]
+        if len(matches) == 1:
+            sid = matches[0]
+        elif len(matches) > 1:
+            print_error(f"Ambiguous session prefix {sid!r} matches {len(matches)} sessions:")
+            for m in matches[:10]:
+                print(f"    {m}")
+            sys.exit(1)
+        async with aiohttp.ClientSession() as http:
+            status, body = await _api(http, "GET", f"/api/v1/sessions/{sid}")
+        if status == 404:
+            # Try falling back to on-disk transcript
+            disk_path = _sessions_dir() / f"{sid}.json"
+            if disk_path.exists():
+                import json as _json
+                data = _json.loads(disk_path.read_text())
+                print(f"  Session:    {sid}")
+                print(f"   (on-disk only, not loaded by the daemon)")
+                print(f"  Workdir:    {data.get('workdir') or '—'}")
+                print(f"  Topology:   {data.get('locked_topology') or 'auto'}")
+                print(f"  Generation: {data.get('generation') or 1}")
+                print(f"  Turns:      {len(data.get('turns') or [])}")
+                return
+            print_error(f"No session with id {sid}")
+            sys.exit(1)
+        if status == 0:
+            print_error(body.get("error", "Failed to reach daemon"))
+            sys.exit(1)
+        data = (body.get("data") or {})
+        print(f"  Session:    {data.get('session_id')}")
+        print(f"  State:      {data.get('run_state')}")
+        print(f"  Workdir:    {data.get('workdir') or '<daemon-cwd>'}")
+        print(f"  Topology:   {data.get('locked_topology') or 'auto'}")
+        print(f"  Turn:       {data.get('turn')}")
+        print(f"  Generation: {data.get('generation')}")
+        return
+
+    if action == "rm":
+        removed = 0
+        async with aiohttp.ClientSession() as http:
+            for sid in args.session_ids:
+                status, body = await _api(http, "DELETE", f"/api/v1/sessions/{sid}")
+                if status == 200:
+                    print(f"  ✓ {_short(sid)}  removed from daemon registry")
+                    removed += 1
+                elif status == 404:
+                    print(f"  ·  {_short(sid)}  not in daemon registry")
+                else:
+                    print_error(f"  ✗ {_short(sid)}  {body.get('error', 'unknown error')}")
+                    continue
+                if not args.keep_disk and _rm_disk(sid):
+                    print(f"     and deleted ~/.orb/sessions/{sid}.json")
+        print(f"\n  Done — {removed} session(s) removed from daemon.")
+        return
+
+    if action == "prune":
+        # Gather live sessions. Filter to terminal-state unless --all.
+        async with aiohttp.ClientSession() as http:
+            status, body = await _api(http, "GET", "/api/v1/sessions")
+            if status == 0:
+                print_error(body.get("error", "Failed to reach daemon"))
+                sys.exit(1)
+            live_sessions = (body.get("data") or {}).get("sessions", [])
+
+        terminal_states = {"idle", "completed", "errored"}
+        targets = [
+            s for s in live_sessions
+            if args.all or (s.get("run_state") in terminal_states)
+        ]
+        disk_extras = [
+            sid for sid in _disk_session_ids()
+            if sid not in {s["session_id"] for s in live_sessions}
+        ]
+
+        if not targets and not disk_extras:
+            print("  Nothing to prune — no terminal sessions in the registry or stale files on disk.")
+            return
+
+        print(f"  Would remove {len(targets)} session(s) from the daemon:")
+        for s in targets:
+            sid = s["session_id"]
+            print(f"    {_short(sid)}  state={s.get('run_state')}  workdir={s.get('workdir') or '<cwd>'}")
+        if disk_extras:
+            print(f"\n  And {len(disk_extras)} orphaned transcript(s) on disk:")
+            for sid in disk_extras[:10]:
+                print(f"    ~/.orb/sessions/{sid}.json")
+            if len(disk_extras) > 10:
+                print(f"    … and {len(disk_extras) - 10} more")
+
+        if not args.yes:
+            try:
+                confirm = input("\n  Proceed? [y/N]: ").strip().lower()
+            except EOFError:
+                confirm = "n"
+            if confirm != "y":
+                print("  Aborted.")
+                return
+
+        async with aiohttp.ClientSession() as http:
+            for s in targets:
+                sid = s["session_id"]
+                await _api(http, "DELETE", f"/api/v1/sessions/{sid}")
+                if not args.keep_disk:
+                    _rm_disk(sid)
+        if not args.keep_disk:
+            for sid in disk_extras:
+                _rm_disk(sid)
+        print(f"\n  Pruned {len(targets)} active + {len(disk_extras) if not args.keep_disk else 0} on-disk session(s).")
+        return
+
+    print_error("Specify a sessions action: list | show <id> | rm <id...> | prune")
+    sys.exit(1)
 
 
 def _resolve_connect_url(url: str | None, port: int | None = None) -> str:
@@ -866,6 +1082,10 @@ async def async_main() -> None:
             return
         print_error("Unknown topologies command")
         sys.exit(1)
+
+    if args.subcommand == "sessions":
+        await _cmd_sessions(args)
+        return
 
     if args.subcommand == "daemon":
         daemon_action = getattr(args, "daemon_action", None)
