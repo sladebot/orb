@@ -256,6 +256,7 @@ class GraphRuntime:
         elapsed = time.time() - (self.state.start_time or time.time())
         payload = json.dumps({
             "type": "run_state_changed",
+            "session_id": self._conversation_session.session_id,
             "from": from_state.value,
             "to": to_state.value,
             "event": event,
