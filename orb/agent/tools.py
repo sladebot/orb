@@ -63,7 +63,8 @@ def write_file_tool() -> dict:
         "name": "write_file",
         "description": (
             "Write content to a file on disk. Creates parent directories as needed. "
-            "Use relative paths (resolved from the current working directory)."
+            "Paths resolve against the session workdir (see the Working directory "
+            "section of your system prompt). Pass a relative path like 'src/foo.py'."
         ),
         "input_schema": {
             "type": "object",
@@ -85,7 +86,11 @@ def write_file_tool() -> dict:
 def read_file_tool() -> dict:
     return {
         "name": "read_file",
-        "description": "Read the contents of a file on disk.",
+        "description": (
+            "Read the contents of a file on disk. Paths resolve against the "
+            "session workdir. Call list_directory('.') first if you don't know "
+            "which files exist."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -102,7 +107,11 @@ def read_file_tool() -> dict:
 def list_directory_tool() -> dict:
     return {
         "name": "list_directory",
-        "description": "List files and directories at a given path (non-recursive).",
+        "description": (
+            "List files and directories at a given path (non-recursive). "
+            "Paths resolve against the session workdir. Default '.' lists the "
+            "workdir root — use this to discover the repo layout."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -121,8 +130,8 @@ def run_command_tool() -> dict:
         "name": "run_command",
         "description": (
             "Run a shell command and return its stdout/stderr output. "
-            "Useful for executing tests, linting, building, or checking the environment. "
-            "Commands time out after 30 seconds."
+            "Useful for executing tests, linting, building, grep, git, or inspecting the filesystem. "
+            "Commands execute with the session workdir as cwd and time out after 30 seconds."
         ),
         "input_schema": {
             "type": "object",

@@ -13,6 +13,26 @@ def _mock_providers():
 
 
 class TestCreateOrchestrator:
+    def test_workdir_threads_to_sandbox_and_agent_prompt(self, tmp_path):
+        """Explicit workdir anchors the sandbox and surfaces in every
+        filesystem-enabled agent's system prompt. Without this the agent
+        replies "where?" when asked to review code.
+        """
+        workdir = tmp_path / "repo"
+        workdir.mkdir()
+        orch = create_orchestrator(
+            "triad",
+            _mock_providers(),
+            model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
+            trace=False,
+            workdir=str(workdir),
+        )
+        assert str(orch._sandbox.root) == str(workdir.resolve())
+        for agent_id in ("coder", "reviewer", "tester"):
+            agent = orch.agents[agent_id]
+            assert agent.config.sandbox is orch._sandbox
+            assert str(workdir.resolve()) in agent._system_prompt
+
     def test_triad_agents(self):
         orch = create_orchestrator(
             "triad",

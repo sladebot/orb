@@ -10,6 +10,7 @@ def build_system_prompt(
     topology: TopologyContext | None = None,
     enable_filesystem: bool = False,
     suppress_context_guidelines: bool = False,
+    workdir: str = "",
 ) -> str:
     neighbor_lines = "\n".join(
         f"  - **{nid}** ({r})" for nid, r in neighbors.items()
@@ -52,11 +53,20 @@ def build_system_prompt(
 {completion_lines}
 """
 
+    workdir_section = ""
+    if workdir:
+        workdir_section = f"""
+## Working directory
+- **Session workdir**: `{workdir}`
+- This is the absolute path your team is operating on. When peers ask "where is the code", this is the answer. Relative paths in `read_file` / `list_directory` / `run_command` resolve against this directory.
+"""
+
     filesystem_section = ""
     if enable_filesystem:
-        filesystem_section = """
+        workdir_line = f" Rooted at `{workdir}`." if workdir else ""
+        filesystem_section = f"""
 ## Sandbox & Filesystem Tools
-You are running inside an **isolated sandbox directory**. All file paths are relative to the sandbox root.
+You are running inside an **isolated sandbox directory**.{workdir_line} All file paths are relative to the sandbox root.
 You have access to:
 - `write_file(path, content)` — write a file to the sandbox
 - `read_file(path)` — read a file from the sandbox
@@ -100,7 +110,7 @@ You can communicate with these agents:
 - Call `complete_task` when you've finished your part and have no more contributions.
 - Don't call complete_task prematurely — wait until the work is genuinely done.
 - If you receive feedback that requires changes, address it before completing.
-
+{workdir_section}
 ## Important
 - Be concise and focused in your responses.
 - Think step by step about what needs to happen before acting.

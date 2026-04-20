@@ -162,6 +162,7 @@ class LLMAgent(AgentNode):
             **neighbor_roles,
             "user": "Human operator — use to ask for clarification or report a blocker",
         }
+        workdir = str(self.config.sandbox.root) if self.config.sandbox else ""
         self._system_prompt = build_system_prompt(
             role=self.config.role,
             description=self.config.description,
@@ -169,6 +170,7 @@ class LLMAgent(AgentNode):
             topology=topology_context,
             enable_filesystem=self.config.enable_filesystem,
             suppress_context_guidelines=self.config.suppress_context_guidelines,
+            workdir=workdir,
         )
         self._tools = [
             send_message_tool(sorted(all_neighbors.keys())),
