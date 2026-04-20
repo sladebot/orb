@@ -72,7 +72,11 @@ class DashboardServer:
         self.runtime._agents = agents
 
     def set_providers(self, providers: dict, config, model_overrides, tier_override) -> None:
-        self.runtime.configure(providers, config, model_overrides, tier_override)
+        # Route provider config through the manager so every session
+        # (default + any created later via POST /api/v1/sessions) gets
+        # the same pool. `manager.configure` fans out to the existing
+        # default session; create_session seeds the pool onto fresh ones.
+        self.manager.configure(providers, config, model_overrides, tier_override)
 
     async def start(self) -> None:
         self.runtime.subscribe(self.broadcast)
