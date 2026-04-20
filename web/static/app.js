@@ -29,6 +29,32 @@ const MSG_TYPE_BADGE_CLASS = {
     system:   'msg-type-system',
 };
 
+/**
+ * Unwrap a v1 JSON envelope `{ok, code, data}` into its payload.
+ * Falls through to the raw JSON when the response isn't wrapped
+ * (legacy shape or hand-rolled error responses). Returns null on
+ * parse failure so callers can branch cleanly.
+ */
+async function unwrapEnvelope(res) {
+    let env;
+    try {
+        env = await res.json();
+    } catch {
+        return null;
+    }
+    if (env && typeof env === 'object' && 'ok' in env && 'data' in env) {
+        if (env.ok) {
+            // Merge ok:true into the payload so callers that still check
+            // `data.ok` keep working without caring about the envelope.
+            const merged = { ok: true };
+            if (env.data && typeof env.data === 'object') Object.assign(merged, env.data);
+            return merged;
+        }
+        return { ok: false, error: env.error, code: env.code };
+    }
+    return env;
+}
+
 class Dashboard {
     constructor() {
         this.canvas      = document.getElementById('graph-canvas');
@@ -69,9 +95,46 @@ class Dashboard {
             if (this._handleMentionKeydown(e)) return;
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._submitQuery(); }
         });
-        document.getElementById('changes-panel-toggle').addEventListener('click', () => this._togglePanel('changes-panel'));
-        document.getElementById('communications-panel-toggle').addEventListener('click', () => this._togglePanel('communications-panel'));
+        document.getElementById('changes-panel-toggle')?.addEventListener('click', () => this._togglePanel('changes-panel'));
+        document.getElementById('communications-panel-toggle')?.addEventListener('click', () => this._togglePanel('communications-panel'));
         this._setupPanelResize();
+
+        // Drawer is always open now — the conversation + composer is the
+        // primary surface. Toggle + close buttons were removed from the UI.
+        this._drawerOpen = true;
+        this._applyDrawerState();
+        document.getElementById('drawer-toggle')?.addEventListener('click', () => this._toggleDrawer());
+        document.getElementById('drawer-close-inline')?.addEventListener('click', () => this._setDrawerOpen(false));
+        document.getElementById('drawer-open')?.addEventListener('click', () => this._setDrawerOpen(true));
+        document.getElementById('stop-run-button')?.addEventListener('click', () => this._requestStopRun());
+        document.getElementById('repo-sync-button')?.addEventListener('click', () => this._syncWorkspace());
+        document.getElementById('repo-pr-button')?.addEventListener('click', () => this._openPullRequest());
+        document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((b) => b.classList.toggle('on', b === btn));
+                this._repoView = btn.dataset.view || 'unified';
+                this._renderLiveCodeChanges();
+            });
+        });
+        this._repoView = 'unified';
+        this._repoSelectedPath = null;
+        this._throughputSamples = [];
+
+        // Manual session config (set via the Session modal). Persists until
+        // a run starts and the server locks in the choice.
+        this._sessionConfig = { workdir: '', topology: 'auto', agentModels: {} };
+        this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
+
+        this._setupSessionConfigModal();
+        document.getElementById('session-config-button')?.addEventListener('click', () => this._openSessionConfig());
+
+        // Desktop grid column resize
+        this._setupGridResize();
+        this._restoreGridWidths();
+
+        // Move node detail panel into the left rail (below agents) so it
+        // doesn't overlay the conversation drawer on the right.
+        this._relocateNodePanel();
 
         const qi = document.getElementById('query-input');
         qi.addEventListener('input', () => {
@@ -111,6 +174,9 @@ class Dashboard {
         document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
         document.getElementById('trace-admin-close')?.addEventListener('click', () => this._closeTraceAdmin());
         document.getElementById('trace-admin-backdrop')?.addEventListener('click', () => this._closeTraceAdmin());
+
+        this._modalPriorFocus = new WeakMap();
+        document.addEventListener('keydown', (e) => this._handleGlobalKeydown(e));
 
         // Node detail panel
         document.getElementById('ndp-close').addEventListener('click', () => this._hideNodePanel());
@@ -155,17 +221,22 @@ class Dashboard {
         const savedTheme = window.localStorage.getItem('orb:theme') || 'dark';
         this._applyTheme(savedTheme);
 
-        // Topology dropdown toggle
-        document.getElementById('topology-trigger').addEventListener('click', (e) => {
-            e.stopPropagation();
-            this._toggleTopologyMenu();
-        });
-        // Close dropdown on outside click
+        // Topology dropdown — only wire if the legacy inline dropdown is
+        // still in the DOM. The composer no longer renders it by default;
+        // topology is owned by the Session Config modal.
+        const topologyTrigger = document.getElementById('topology-trigger');
+        if (topologyTrigger) {
+            topologyTrigger.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._toggleTopologyMenu();
+            });
+        }
         document.addEventListener('click', (e) => {
             const dd = document.getElementById('topology-dropdown');
-            if (!dd.contains(e.target)) {
+            const menu = document.getElementById('topology-menu');
+            if (dd && !dd.contains(e.target)) {
                 dd.classList.remove('open');
-                document.getElementById('topology-menu').classList.add('hidden');
+                if (menu) menu.classList.add('hidden');
             }
         });
         window.addEventListener('resize', () => {
@@ -182,10 +253,23 @@ class Dashboard {
 
     // ── WebSocket ─────────────────────────────────────────────
 
+    async _fetchHomeDir() {
+        // Stashes the user's home dir so workdir labels can be tildified
+        // (``/Users/alice/projects/orb`` → ``~/projects/orb``) the first
+        // time we render a workdir, without waiting for the FS picker.
+        try {
+            const res = await fetch('/api/v1/fs/list');
+            const data = await unwrapEnvelope(res);
+            if (data && data.ok && data.home) this._homeDir = data.home;
+        } catch { /* best-effort; fallback is the absolute path */ }
+    }
+
     _connect() {
+        if (!this._homeDir) this._fetchHomeDir();
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const sessionId = new URL(window.location.href).searchParams.get('session');
-        const wsUrl = `${protocol}//${window.location.host}/ws${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
+        // v1 WebSocket: multiplexed /api/v1/ws with optional session filter.
+        const wsUrl = `${protocol}//${window.location.host}/api/v1/ws${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`;
         this._wsSessionId = sessionId || '';
 
         this.ws = new WebSocket(wsUrl);
@@ -206,6 +290,17 @@ class Dashboard {
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+            if (data && data.type === 'error' && data.code === 'SESSION_NOT_FOUND') {
+                // Stale session in URL (daemon restart wiped it + no disk snapshot).
+                // Strip the ?session=... and let the next reconnect attach to
+                // the most-recent session instead of looping on the dead id.
+                const url = new URL(window.location.href);
+                url.searchParams.delete('session');
+                window.history.replaceState({}, '', url.toString());
+                this._wsSessionId = '';
+                this.ws.close();
+                return;
+            }
             this._handleEvent(data);
         };
     }
@@ -223,8 +318,781 @@ class Dashboard {
 
     _restorePanelState() {
         for (const panelId of ['changes-panel', 'communications-panel']) {
+            if (!document.getElementById(panelId)) continue;
             const collapsed = window.localStorage.getItem(`orb:${panelId}:collapsed`) === 'true';
             this._setPanelCollapsed(panelId, collapsed);
+        }
+    }
+
+    _toggleDrawer() { this._setDrawerOpen(!this._drawerOpen); }
+
+    _setDrawerOpen(open) {
+        this._drawerOpen = !!open;
+        this._drawerManuallyOpened = this._drawerOpen;
+        this._applyDrawerState();
+        window.localStorage.setItem('orb:drawer:open', String(this._drawerOpen));
+        setTimeout(() => this.graph._resize?.(), 160);
+    }
+
+    _applyDrawerState() {
+        const grid = document.getElementById('main-layout');
+        if (grid) grid.classList.toggle('drawer-closed', !this._drawerOpen);
+        const toggle = document.getElementById('drawer-toggle');
+        if (toggle) {
+            toggle.setAttribute('aria-pressed', String(this._drawerOpen));
+            toggle.textContent = this._drawerOpen ? '▸ Chat' : '◂ Chat';
+        }
+        this._updateDrawerUnread();
+    }
+
+    _updateDrawerUnread() {
+        const pill = document.getElementById('drawer-unread');
+        if (!pill) return;
+        const n = this._rawMessages?.length || 0;
+        pill.textContent = String(n);
+        pill.classList.toggle('empty', n === 0);
+    }
+
+    _relocateNodePanel() {
+        const panel = document.getElementById('node-detail-panel');
+        const leftRail = document.getElementById('left-rail');
+        if (!panel || !leftRail || panel.parentElement === leftRail) return;
+        leftRail.appendChild(panel);
+    }
+
+    _positionNodePanel() {
+        const panel = document.getElementById('node-detail-panel');
+        const topo = document.getElementById('topology-mini');
+        const leftRail = document.getElementById('left-rail');
+        if (!panel || !topo || !leftRail) return;
+        // Use bounding rects so transforms/scroll are accounted for correctly.
+        const railRect = leftRail.getBoundingClientRect();
+        const topoRect = topo.getBoundingClientRect();
+        const top = Math.max(0, Math.round(topoRect.bottom - railRect.top + 10));
+        // Clear any stale inline top so the CSS rule (using --ndp-top) wins.
+        panel.style.removeProperty('top');
+        panel.style.setProperty('--ndp-top', top + 'px');
+    }
+
+    _setupGridResize() {
+        const grid = document.getElementById('main-layout');
+        if (!grid) return;
+        const handles = [
+            { id: 'left-resize-handle', varName: '--left-col', side: 'left', min: 260, max: 640 },
+            { id: 'right-resize-handle', varName: '--right-col', side: 'right', min: 280, max: 600 },
+        ];
+        const positionHandle = (h) => {
+            const el = document.getElementById(h.id);
+            if (!el) return;
+            const gridRect = grid.getBoundingClientRect();
+            if (h.side === 'left') {
+                const leftW = parseFloat(getComputedStyle(grid).getPropertyValue('--left-col')) || 400;
+                el.style.left = (leftW + 10) + 'px';
+            } else {
+                const rightW = parseFloat(getComputedStyle(grid).getPropertyValue('--right-col')) || 380;
+                el.style.left = (gridRect.width - rightW - 10) + 'px';
+            }
+        };
+        const reposition = () => {
+            handles.forEach(positionHandle);
+            this._positionNodePanel?.();
+        };
+        this._gridResizeReposition = reposition;
+        reposition();
+        window.addEventListener('resize', reposition);
+
+        handles.forEach((h) => {
+            const el = document.getElementById(h.id);
+            if (!el) return;
+            el.addEventListener('pointerdown', (ev) => {
+                if (window.innerWidth <= 720) return;
+                ev.preventDefault();
+                el.setPointerCapture(ev.pointerId);
+                el.classList.add('dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+
+                const startX = ev.clientX;
+                const gridRect = grid.getBoundingClientRect();
+                const startVal = parseFloat(getComputedStyle(grid).getPropertyValue(h.varName)) || (h.side === 'left' ? 400 : 380);
+
+                const onMove = (e) => {
+                    const dx = e.clientX - startX;
+                    let next = h.side === 'left' ? startVal + dx : startVal - dx;
+                    next = Math.max(h.min, Math.min(h.max, next));
+                    grid.style.setProperty(h.varName, next + 'px');
+                    positionHandle(h);
+                    positionHandle(h.side === 'left' ? handles[1] : handles[0]);
+                    this.graph._resize?.();
+                };
+                const onUp = () => {
+                    el.releasePointerCapture(ev.pointerId);
+                    el.classList.remove('dragging');
+                    document.body.style.cursor = '';
+                    document.body.style.userSelect = '';
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    const cs = getComputedStyle(grid);
+                    window.localStorage.setItem('orb:v2-left-col', cs.getPropertyValue('--left-col').trim());
+                    window.localStorage.setItem('orb:v2-right-col', cs.getPropertyValue('--right-col').trim());
+                };
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            });
+        });
+    }
+
+    _restoreGridWidths() {
+        const grid = document.getElementById('main-layout');
+        if (!grid) return;
+        const left = window.localStorage.getItem('orb:v2-left-col');
+        const right = window.localStorage.getItem('orb:v2-right-col');
+        if (left) grid.style.setProperty('--left-col', left);
+        if (right) grid.style.setProperty('--right-col', right);
+        if (this._gridResizeReposition) this._gridResizeReposition();
+    }
+
+    _updateTopologyAdaptiveHeight() {
+        const el = document.getElementById('topology-mini');
+        if (!el) return;
+        const rows = this._plan?.graph_view?.rows;
+        let count = Array.isArray(rows) && rows.length ? rows.length : 3;
+        // If graphView not present, estimate from agent count (layered layout)
+        if (!rows || !rows.length) {
+            const n = Object.keys(this.agents || {}).length;
+            count = n <= 2 ? 2 : n <= 4 ? 3 : n <= 6 ? 4 : 5;
+        }
+        count = Math.max(2, Math.min(4, count));
+        el.style.setProperty('--topo-rows', String(count));
+        // Resize canvas + reposition NDP after DOM reflows
+        setTimeout(() => {
+            this.graph._resize?.();
+            this._positionNodePanel();
+        }, 80);
+    }
+
+    async _probeGitStatus(path) {
+        const host = document.getElementById('session-config-git-status');
+        if (!host) return;
+        if (!path) { host.innerHTML = ''; return; }
+        host.innerHTML = `<span class="git-pill">checking…</span>`;
+        try {
+            const res = await fetch(`/api/v1/git/status?path=${encodeURIComponent(path)}`);
+            const data = await unwrapEnvelope(res);
+            if (!data.ok) { host.innerHTML = `<span class="git-pill">—</span>`; return; }
+            if (data.is_git_repo) {
+                const unc = data.has_uncommitted ? ' · uncommitted' : '';
+                const behind = data.behind ? ` · ${data.behind} behind` : '';
+                host.innerHTML = `<span class="git-pill git-ok">✓ git repo · <code>${this._escapeHtml(data.branch || '(detached)')}</code>${unc}${behind}</span>`;
+            } else {
+                host.innerHTML = `<span class="git-pill git-missing">✗ Not a git repo</span><button class="v2-btn" type="button" id="sc-git-init">Initialize git</button>`;
+                document.getElementById('sc-git-init')?.addEventListener('click', () => this._initGitRepo(path));
+            }
+        } catch (err) {
+            host.innerHTML = `<span class="git-pill">—</span>`;
+        }
+    }
+
+    async _initGitRepo(path) {
+        const btn = document.getElementById('sc-git-init');
+        if (btn) { btn.disabled = true; btn.textContent = 'Initializing…'; }
+        try {
+            await fetch('/api/v1/git/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path }),
+            });
+        } finally {
+            this._probeGitStatus(path);
+        }
+    }
+
+    _setupSessionConfigModal() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        document.getElementById('session-config-close')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-cancel')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-backdrop')?.addEventListener('click', () => this._closeSessionConfig());
+        document.getElementById('session-config-apply')?.addEventListener('click', () => this._applySessionConfig());
+        document.getElementById('session-config-workdir-cwd')?.addEventListener('click', () => {
+            const input = document.getElementById('session-config-workdir');
+            if (input) input.value = '';
+            const hint = document.getElementById('session-config-footer-hint');
+            if (hint) hint.textContent = 'Leaving workspace blank keeps the daemon\'s current directory.';
+            this._probeGitStatus('');
+        });
+        // Probe git status whenever the user edits the workdir field
+        const workdirInput = document.getElementById('session-config-workdir');
+        if (workdirInput) {
+            let debounceTimer = null;
+            workdirInput.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => this._probeGitStatus(workdirInput.value.trim()), 300);
+            });
+        }
+
+        // FS picker wiring
+        document.getElementById('session-config-workdir-browse')?.addEventListener('click', () => this._toggleFsPicker());
+        document.getElementById('session-config-fs-cancel')?.addEventListener('click', () => this._closeFsPicker());
+        document.getElementById('session-config-fs-select')?.addEventListener('click', () => this._confirmFsSelection());
+        const picker = document.getElementById('session-config-fs-picker');
+        picker?.querySelector('.sc-fs-up')?.addEventListener('click', () => this._fsNavigateParent());
+        picker?.querySelector('.sc-fs-home')?.addEventListener('click', () => this._loadFsPath(''));
+        picker?.querySelector('.sc-fs-hidden-check')?.addEventListener('change', (e) => {
+            this._fsShowHidden = !!e.target.checked;
+            this._loadFsPath(this._fsCurrentPath || '');
+        });
+    }
+
+    _toggleFsPicker() {
+        const picker = document.getElementById('session-config-fs-picker');
+        if (!picker) return;
+        if (picker.classList.contains('hidden')) {
+            picker.classList.remove('hidden');
+            const seed = (document.getElementById('session-config-workdir')?.value || '').trim();
+            this._loadFsPath(seed);
+        } else {
+            this._closeFsPicker();
+        }
+    }
+
+    _closeFsPicker() {
+        document.getElementById('session-config-fs-picker')?.classList.add('hidden');
+    }
+
+    async _loadFsPath(path) {
+        const list = document.getElementById('session-config-fs-list');
+        const pathEl = document.getElementById('session-config-fs-path');
+        const selEl = document.getElementById('session-config-fs-selected');
+        if (!list) return;
+        list.innerHTML = `<div class="sc-fs-loading">Loading…</div>`;
+        try {
+            const qs = new URLSearchParams();
+            if (path) qs.set('path', path);
+            if (this._fsShowHidden) qs.set('hidden', '1');
+            const res = await fetch(`/api/v1/fs/list?${qs.toString()}`);
+            const data = await unwrapEnvelope(res);
+            if (!data.ok) {
+                list.innerHTML = `<div class="sc-fs-error">${this._escapeHtml(data.error || 'Failed to list')}</div>`;
+                return;
+            }
+            this._fsCurrentPath = data.path;
+            this._fsParentPath = data.parent || '';
+            if (data.home) this._homeDir = data.home;
+            if (pathEl) {
+                pathEl.textContent = data.path;
+                pathEl.title = data.path;
+            }
+            if (selEl) selEl.textContent = data.path;
+            if (!data.entries.length) {
+                list.innerHTML = `<div class="sc-fs-empty">No subdirectories.</div>`;
+                return;
+            }
+            list.innerHTML = data.entries.map((e) => `
+                <div class="sc-fs-item" data-path="${this._escapeAttr(e.path)}">
+                    <span class="sc-fs-glyph">▸</span>
+                    <span class="sc-fs-name">${this._escapeHtml(e.name)}</span>
+                </div>
+            `).join('');
+            list.querySelectorAll('.sc-fs-item').forEach((row) => {
+                row.addEventListener('click', () => this._loadFsPath(row.dataset.path || ''));
+            });
+        } catch (err) {
+            list.innerHTML = `<div class="sc-fs-error">Network error: ${this._escapeHtml(String(err.message || err))}</div>`;
+        }
+    }
+
+    _fsNavigateParent() {
+        if (this._fsParentPath) this._loadFsPath(this._fsParentPath);
+    }
+
+    _confirmFsSelection() {
+        const input = document.getElementById('session-config-workdir');
+        if (input && this._fsCurrentPath) {
+            input.value = this._fsCurrentPath;
+        }
+        this._closeFsPicker();
+    }
+
+    _renderTopologyPreview() {
+        const preview = document.getElementById('session-config-topology-preview');
+        const svg = document.getElementById('session-config-topology-svg');
+        const desc = document.getElementById('session-config-topology-desc');
+        if (!preview || !svg) return;
+        const tid = this._sessionConfig.topology;
+        if (tid === 'auto') {
+            preview.classList.add('hidden');
+            return;
+        }
+        const topo = (this._topologyList || []).find((t) => t.id === tid);
+        if (!topo) { preview.classList.add('hidden'); return; }
+        preview.classList.remove('hidden');
+        if (desc) desc.textContent = topo.description || '';
+
+        // Layer the agents via BFS from coordinator (or first agent)
+        const agents = topo.agents || [];
+        const edges = topo.edges || [];
+        const out = new Map(agents.map((a) => [a, []]));
+        for (const e of edges) {
+            if (out.has(e.source)) out.get(e.source).push(e.target);
+        }
+        const layer = new Map();
+        const root = agents.includes('coordinator') ? 'coordinator' : (agents[0] || '');
+        if (root) {
+            const queue = [root]; layer.set(root, 0);
+            while (queue.length) {
+                const cur = queue.shift();
+                for (const next of out.get(cur) || []) {
+                    if (!layer.has(next)) { layer.set(next, (layer.get(cur) || 0) + 1); queue.push(next); }
+                }
+            }
+        }
+        for (const a of agents) if (!layer.has(a)) layer.set(a, 1);
+
+        // Group by layer
+        const byLayer = new Map();
+        for (const [a, l] of layer.entries()) {
+            if (!byLayer.has(l)) byLayer.set(l, []);
+            byLayer.get(l).push(a);
+        }
+        const layers = Array.from(byLayer.keys()).sort((a, b) => a - b);
+
+        // Lay out
+        const W = 360, H = 180;
+        const nodeW = 96, nodeH = 24, radius = 6;
+        const ySlots = layers.length;
+        const positions = new Map();
+        layers.forEach((l, li) => {
+            const row = byLayer.get(l);
+            const y = (H / (ySlots + 1)) * (li + 1);
+            row.forEach((a, ai) => {
+                const x = (W / (row.length + 1)) * (ai + 1);
+                positions.set(a, { x, y });
+            });
+        });
+
+        const ROLE_COLOR = {
+            coordinator: '#94bfff',
+            coder: '#c4ced9',
+            reviewer: '#f0c982',
+            reviewer_a: '#f0c982',
+            reviewer_b: '#f5b56b',
+            tester: '#86d8ab',
+            researcher: '#cdbdff',
+        };
+
+        // Build SVG
+        // Keep defs (marker), replace everything else
+        const defs = svg.querySelector('defs');
+        while (svg.lastChild && svg.lastChild !== defs) svg.removeChild(svg.lastChild);
+
+        // Edges first
+        for (const e of edges) {
+            const a = positions.get(e.source);
+            const b = positions.get(e.target);
+            if (!a || !b) continue;
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            // curved bezier
+            const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            const d = `M ${a.x} ${a.y + nodeH / 2} C ${a.x} ${mid.y}, ${b.x} ${mid.y}, ${b.x} ${b.y - nodeH / 2}`;
+            line.setAttribute('d', d);
+            line.setAttribute('class', 'sc-edge');
+            line.setAttribute('marker-end', 'url(#sc-arrow)');
+            svg.appendChild(line);
+        }
+
+        for (const [id, p] of positions.entries()) {
+            const color = ROLE_COLOR[id] || ROLE_COLOR[id.split('_')[0]] || '#c4ced9';
+            const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.setAttribute('transform', `translate(${p.x - nodeW / 2}, ${p.y - nodeH / 2})`);
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('width', String(nodeW));
+            rect.setAttribute('height', String(nodeH));
+            rect.setAttribute('rx', String(radius));
+            rect.setAttribute('class', 'sc-node-rect');
+            rect.setAttribute('style', `color: ${color};`);
+            g.appendChild(rect);
+            const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            dot.setAttribute('cx', '10'); dot.setAttribute('cy', String(nodeH / 2));
+            dot.setAttribute('r', '3.2');
+            dot.setAttribute('class', 'sc-node-dot');
+            dot.setAttribute('style', `color: ${color};`);
+            g.appendChild(dot);
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', '20');
+            label.setAttribute('y', String(nodeH / 2 + 0.5));
+            label.setAttribute('class', 'sc-node-label');
+            label.textContent = this._roleDisplayName(id, id);
+            g.appendChild(label);
+            svg.appendChild(g);
+        }
+    }
+
+    async _openSessionConfig() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        this._rememberModalFocus(modal);
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+
+        // Seed from current session state
+        const workdirInput = document.getElementById('session-config-workdir');
+        if (workdirInput) {
+            workdirInput.value = this._sessionLock.workdir || this._sessionConfig.workdir || '';
+            workdirInput.focus();
+        } else {
+            this._focusFirstInModal(modal);
+        }
+
+        // Ensure topology + model catalogs are cached, then render
+        await Promise.all([
+            this._ensureTopologyList(),
+            this._ensureModelList(),
+        ]);
+        // Preselect based on what's locked or configured
+        const seedTopology =
+            this._sessionLock.topology
+            || (this._sessionConfig.topology !== 'auto' ? this._sessionConfig.topology : '')
+            || this._plan?.topology?.id
+            || 'auto';
+        this._sessionConfig.topology = seedTopology;
+        if (this._sessionLock.topology && !Object.keys(this._sessionConfig.agentModels).length) {
+            this._sessionConfig.agentModels = { ...this._sessionLock.agentModels };
+        }
+        this._renderSessionConfigTopologies();
+        this._renderSessionConfigAgentModels();
+        this._renderTopologyPreview();
+        this._renderSessionConfigLockBanner();
+
+        // Seed the git status badge from whatever path is currently in the input
+        const seedPath = (document.getElementById('session-config-workdir')?.value || '').trim();
+        this._probeGitStatus(seedPath);
+    }
+
+    async _loadWorkspaceFiles(workdir) {
+        if (!workdir) { this._workspaceFiles = []; this._renderLiveCodeChanges(); return; }
+        try {
+            const res = await fetch(`/api/v1/fs/files?path=${encodeURIComponent(workdir)}`);
+            const data = await unwrapEnvelope(res);
+            if (data.ok) {
+                this._workspaceFiles = (data.files || []).map((p) => ({
+                    path: p,
+                    agent: '',
+                    content: '',
+                    oldContent: '',
+                    status: 'U',  // "unchanged" — existing file from disk
+                    added: 0,
+                    removed: 0,
+                    _tracked: true,
+                }));
+            } else {
+                this._workspaceFiles = [];
+            }
+        } catch {
+            this._workspaceFiles = [];
+        }
+        this._renderLiveCodeChanges();
+    }
+
+    _closeSessionConfig() {
+        const modal = document.getElementById('session-config-modal');
+        if (!modal) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+        window.localStorage.setItem('orb:session-modal-dismissed', '1');
+        this._restoreModalFocus(modal);
+    }
+
+    async _ensureTopologyList() {
+        if (this._topologyList && this._topologyList.length) return;
+        try {
+            const res = await fetch('/api/v1/topologies');
+            const data = await unwrapEnvelope(res);
+            this._topologyList = Array.isArray(data.topologies) ? data.topologies : [];
+        } catch {
+            this._topologyList = [];
+        }
+    }
+
+    async _ensureModelList() {
+        if (this._modelCatalog && this._modelCatalog.length) return;
+        try {
+            const res = await fetch('/api/v1/models');
+            const data = await unwrapEnvelope(res);
+            this._modelCatalog = Array.isArray(data.models) ? data.models : [];
+        } catch {
+            this._modelCatalog = [];
+        }
+    }
+
+    _renderSessionConfigTopologies() {
+        const host = document.getElementById('session-config-topology-list');
+        if (!host) return;
+        const items = [{ id: 'auto', label: 'Auto' }, ...(this._topologyList || [])];
+        host.innerHTML = items.map((t) => {
+            const selected = this._sessionConfig.topology === t.id ? ' selected' : '';
+            return `<button type="button" class="sc-topology-item${selected}" data-topology="${this._escapeAttr(t.id)}">
+                <span class="tlabel">${this._escapeHtml(t.label || t.id)}</span>
+                ${t.id !== 'auto' ? `<span class="tid">${this._escapeHtml(t.id)}</span>` : ''}
+            </button>`;
+        }).join('');
+        host.querySelectorAll('.sc-topology-item').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const tid = btn.dataset.topology || 'auto';
+                this._sessionConfig.topology = tid;
+                // Reset per-agent models when topology changes — different agent roster
+                if (tid === 'auto') {
+                    this._sessionConfig.agentModels = {};
+                } else {
+                    const topo = (this._topologyList || []).find((t) => t.id === tid);
+                    const validRoles = new Set(topo?.agents || []);
+                    const next = {};
+                    for (const [role, model] of Object.entries(this._sessionConfig.agentModels || {})) {
+                        if (validRoles.has(role)) next[role] = model;
+                    }
+                    this._sessionConfig.agentModels = next;
+                }
+                this._renderSessionConfigTopologies();
+                this._renderSessionConfigAgentModels();
+                this._renderTopologyPreview();
+            });
+        });
+    }
+
+    _renderSessionConfigAgentModels() {
+        const section = document.getElementById('session-config-agent-models-section');
+        const host = document.getElementById('session-config-agent-models');
+        if (!section || !host) return;
+
+        const tid = this._sessionConfig.topology;
+        if (tid === 'auto') {
+            section.classList.add('hidden');
+            host.innerHTML = '';
+            return;
+        }
+        section.classList.remove('hidden');
+        const topo = (this._topologyList || []).find((t) => t.id === tid);
+        const agents = topo?.agents || [];
+        if (!agents.length) {
+            host.innerHTML = `<div class="sc-empty">No agents defined for this topology.</div>`;
+            return;
+        }
+        const models = this._modelCatalog || [];
+        const options = ['<option value="">auto</option>']
+            .concat(models.map((m) => {
+                const id = String(m.id || '');
+                const label = String(m.label || id);
+                return `<option value="${this._escapeAttr(id)}">${this._escapeHtml(label)}</option>`;
+            }))
+            .join('');
+        host.innerHTML = agents.map((role) => {
+            const selected = this._sessionConfig.agentModels[role] || '';
+            const roleClass = (role || 'generic').toLowerCase();
+            return `<div class="sc-agent-row v2-role-${this._escapeAttr(roleClass)}">
+                <div class="sc-agent-name"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(role, role))}</div>
+                <select data-role="${this._escapeAttr(role)}">${options}</select>
+            </div>`;
+        }).join('');
+        host.querySelectorAll('select').forEach((sel) => {
+            const role = sel.dataset.role;
+            sel.value = this._sessionConfig.agentModels[role] || '';
+            sel.addEventListener('change', () => {
+                const val = sel.value.trim();
+                if (val) this._sessionConfig.agentModels[role] = val;
+                else delete this._sessionConfig.agentModels[role];
+            });
+        });
+    }
+
+    _renderSessionConfigLockBanner() {
+        const banner = document.getElementById('session-config-lock-banner');
+        if (!banner) return;
+        if (this._sessionLock.topology) banner.classList.remove('hidden');
+        else banner.classList.add('hidden');
+    }
+
+    async _applySessionConfig() {
+        const workdirInput = document.getElementById('session-config-workdir');
+        const workdir = (workdirInput?.value || '').trim();
+        this._sessionConfig.workdir = workdir;
+
+        // "Apply" always starts a fresh session with the chosen workdir,
+        // topology, and per-node models. The old path only started a new
+        // session when the workdir changed — confusing when the user
+        // switches topology/models but keeps the folder.
+        const applyBtn = document.getElementById('session-config-apply');
+        const hint = document.getElementById('session-config-footer-hint');
+        if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Creating…'; }
+        if (hint) hint.textContent = 'Creating a fresh session — transcript and turn count reset.';
+        try {
+            // Clear the UI's lock state so the subsequent init event treats
+            // this as a brand-new session (re-probes workdir files, etc.).
+            this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
+            this._fileChanges = new Map();
+            this._workspaceFiles = [];
+
+            // v1 multi-tenant route: POST /api/v1/sessions. Sends the
+            // picked topology + per-agent models so the daemon pre-warms
+            // the graph — first chat message goes straight to the pinned
+            // coordinator, no classifier pass. Only `auto` defers that
+            // decision to the first query.
+            const createBody = {};
+            if (workdir) createBody.workdir = workdir;
+            const scTopology = (this._sessionConfig || {}).topology;
+            if (scTopology && scTopology !== 'auto') {
+                createBody.topology = scTopology;
+                const picks = (this._sessionConfig || {}).agentModels || {};
+                if (Object.keys(picks).length) createBody.agent_models = picks;
+            }
+            const res = await fetch('/api/v1/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(createBody),
+            });
+            const envelope = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            if (!envelope.ok) {
+                if (hint) hint.textContent = envelope.error || 'Failed to create session';
+                return;
+            }
+            const summary = envelope.data || {};
+            if (summary.session_id) this._updateSessionUrl(summary.session_id);
+            // v1 create_session only returns the summary; pull full init state separately.
+            if (summary.session_id) {
+                const stateRes = await fetch(`/api/v1/sessions/${encodeURIComponent(summary.session_id)}/state`);
+                const stateEnv = await stateRes.json().catch(() => ({ ok: false }));
+                if (stateEnv.ok && stateEnv.data) this._handleInit(stateEnv.data);
+            }
+
+            // Reflect picked topology + manual agent_models for the FIRST
+            // /api/start on the fresh session; the server locks them in
+            // after planning, so subsequent messages reuse automatically.
+            this._selectedTopology = this._sessionConfig.topology;
+            this._userOverrodeTopology = this._sessionConfig.topology !== 'auto';
+            this._updateTopologyTrigger?.();
+            this._closeSessionConfig();
+        } finally {
+            if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = 'Apply'; }
+        }
+    }
+
+    _applySessionLock(sessionBlock) {
+        if (!sessionBlock || typeof sessionBlock !== 'object') return;
+        const previousWorkdir = this._sessionLock?.workdir;
+        this._sessionLock = {
+            topology: String(sessionBlock.locked_topology || ''),
+            agentModels: { ...(sessionBlock.locked_agent_models || {}) },
+            modelPin: String(sessionBlock.locked_model_pin || ''),
+            workdir: String(sessionBlock.workdir || ''),
+        };
+
+        // Load the workspace's existing files into the repo tree whenever
+        // the session workdir changes (including the initial mount).
+        if (this._sessionLock.workdir && this._sessionLock.workdir !== previousWorkdir) {
+            this._loadWorkspaceFiles(this._sessionLock.workdir);
+        }
+
+        // First-load prompt: if this is the initial init we've seen and the
+        // session has no workdir yet, pop the Session modal so the user can
+        // scope it to their repo. Suppress if they've dismissed the prompt
+        // in this browser before.
+        if (previousWorkdir === undefined) {
+            const dismissed = window.localStorage.getItem('orb:session-modal-dismissed') === '1';
+            const modal = document.getElementById('session-config-modal');
+            if (!this._sessionLock.workdir && !dismissed && modal?.classList.contains('hidden')) {
+                setTimeout(() => this._openSessionConfig(), 200);
+            }
+        }
+        // Render lock icon
+        const icon = document.getElementById('breadcrumbs-lock-icon');
+        if (icon) icon.classList.toggle('on', !!this._sessionLock.topology);
+        // Once the session has a locked topology, the composer shouldn't
+        // re-ask for it — it's already determined for the whole session.
+        // Hide the topology dropdown entirely; users change it via the
+        // "New Session" modal if they want a different one.
+        const dropdown = document.getElementById('topology-dropdown');
+        if (dropdown) {
+            dropdown.classList.toggle('hidden', !!this._sessionLock.topology);
+        }
+        const trigger = document.getElementById('topology-trigger');
+        if (trigger) {
+            if (this._sessionLock.topology) {
+                trigger.classList.add('locked');
+                trigger.title = `Pinned to ${this._sessionLock.topology} for this session`;
+            } else {
+                trigger.classList.remove('locked');
+                trigger.title = 'Switch topology';
+            }
+        }
+    }
+
+    async _requestStopRun() {
+        if (!this._wsSessionId) return;
+        try {
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/stop`, { method: 'POST' });
+        } catch (err) { /* ignore */ }
+    }
+
+    async _syncWorkspace() {
+        const btn = document.getElementById('repo-sync-button');
+        const original = btn?.textContent;
+        if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+        try {
+            const workdir = this._sessionLock?.workdir || '';
+            if (workdir) {
+                await Promise.all([
+                    this._loadWorkspaceFiles(workdir),
+                    this._refreshRepoBranch(workdir),
+                ]);
+            } else {
+                this._renderLiveCodeChanges();
+            }
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = original || '↻ Sync'; }
+        }
+    }
+
+    async _refreshRepoBranch(workdir) {
+        try {
+            const res = await fetch(`/api/v1/git/status?path=${encodeURIComponent(workdir)}`);
+            const data = await unwrapEnvelope(res);
+            if (!data.ok || !data.is_git_repo) return;
+            const branchEl = document.getElementById('repo-branch');
+            if (branchEl) {
+                branchEl.textContent = data.branch || 'HEAD';
+                branchEl.title = data.remote_url || '';
+            }
+            const baseEl = document.getElementById('repo-base-branch');
+            if (baseEl && data.github_slug) baseEl.title = data.github_slug;
+        } catch {
+            /* ignore */
+        }
+    }
+
+    async _openPullRequest() {
+        const workdir = this._sessionLock?.workdir || '';
+        const btn = document.getElementById('repo-pr-button');
+        const original = btn?.textContent;
+        if (!workdir) {
+            if (btn) { btn.textContent = 'Set workdir first'; btn.disabled = true; }
+            setTimeout(() => { if (btn) { btn.textContent = original || 'Open PR →'; btn.disabled = false; } }, 1800);
+            return;
+        }
+        if (btn) { btn.disabled = true; btn.textContent = 'Opening…'; }
+        try {
+            const res = await fetch('/api/v1/git/pr-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: workdir }),
+            });
+            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            if (!data.ok) {
+                if (btn) btn.textContent = (data.error || 'PR not available').slice(0, 28);
+                setTimeout(() => { if (btn) btn.textContent = original || 'Open PR →'; }, 2400);
+                return;
+            }
+            window.open(data.compare_url, '_blank', 'noopener');
+        } finally {
+            if (btn) { btn.disabled = false; if (btn.textContent === 'Opening…') btn.textContent = original || 'Open PR →'; }
         }
     }
 
@@ -383,8 +1251,8 @@ class Dashboard {
             case 'agent_heartbeat': this._handleAgentHeartbeat(data); break;
             case 'complete':       this._handleComplete(data);       break;
             case 'stats':          this._handleStats(data);          break;
-            case 'stopped':        this._handleStopped();            break;
             case 'run_complete':   this._handleRunComplete(data);    break;
+            case 'run_state_changed': this._handleRunStateChanged(data); break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
             case 'file_write':     this._handleFileWrite(data);      break;
             case 'topologies_reloaded': this._loadTopologyOptions();   break;
@@ -417,6 +1285,8 @@ class Dashboard {
         if (this._plan?.topology?.label) {
             document.getElementById('stat-topology').textContent = this._plan.topology.label;
             this._setText('hero-topology-label', this._plan.topology.label);
+            this._setText('breadcrumbs-topology', this._plan.topology.id || this._plan.topology.label);
+            this._setText('topology-count', this._plan.topology.id || this._plan.topology.label);
         }
 
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
@@ -440,6 +1310,10 @@ class Dashboard {
             };
         }
         this._refreshMentionTargets();
+        this._renderAgentsList();
+        this._renderLiveCodeChanges();
+        this._updateTopologyAdaptiveHeight();
+        this._applySessionLock(data.session);
 
         this.graph.setTopology(data.agents, data.edges, this._plan?.graph_view || null);
         this._hideLoader();
@@ -471,13 +1345,16 @@ class Dashboard {
         if (data.stats) this._handleStats(data.stats);
         this._hydrateLiveCodeChangesFromInit(data);
 
-        // Determine UI state based on run state
-        if (data.run_active === true) {
-            // Mid-run reconnect
+        // Determine UI state from the runtime FSM's run_state. The six
+        // enum values map to two higher-level UI modes: in-flight (the
+        // canvas runs live) vs. terminal (show the last result).
+        this._runState = data.run_state || 'idle';
+        const inFlight = ['planning', 'running', 'stopping'].includes(this._runState);
+        if (inFlight) {
             this._setRunActive(true);
             this.graph.setRunState('running');
             this._hydrateCodeChangesFromInit(data);
-        } else if (data.completed === true) {
+        } else if (this._runState === 'completed') {
             // Reconnect after a finished run: keep the result in the left rail only.
             this._setRunActive(false);
             this.graph.setRunState('completed');
@@ -585,6 +1462,7 @@ class Dashboard {
         // Keep graph node model in sync (agent_stats fires for both sender and receiver)
         if (data.model) this.graph.updateAgentStatus(data.agent, data.status || '', data.model);
         if (this.selectedAgent === data.agent) this._refreshNodePanel();
+        this._renderAgentsList();
     }
 
     _handleAgentHeartbeat(data) {
@@ -617,6 +1495,87 @@ class Dashboard {
         document.getElementById('stat-budget').textContent   = data.budget_remaining;
         document.getElementById('stat-elapsed').textContent  = data.elapsed.toFixed(1) + 's';
         this._lastElapsed = data.elapsed;
+        this._sampleThroughput(data.message_count, data.elapsed);
+        const sub = document.getElementById('stat-elapsed-sub');
+        if (sub) sub.textContent = this._isRunActive ? 'live' : 'idle';
+        this._updateDrawerUnread();
+    }
+
+    _sampleThroughput(count, elapsed) {
+        const samples = this._throughputSamples || (this._throughputSamples = []);
+        samples.push({ count, t: elapsed });
+        while (samples.length > 60) samples.shift();
+        const points = [];
+        for (let i = 1; i < samples.length; i++) {
+            const a = samples[i - 1], b = samples[i];
+            const dt = Math.max(0.0001, b.t - a.t);
+            points.push(Math.max(0, (b.count - a.count) / dt));
+        }
+        const spark = document.getElementById('stat-throughput-spark');
+        if (!spark || points.length === 0) return;
+        const line = spark.querySelector('.spark-line');
+        const fill = spark.querySelector('.spark-fill');
+        const W = 100, H = 22;
+        const min = 0, max = Math.max(1, ...points);
+        const rng = max - min || 1;
+        const pts = points.map((p, i) => [
+            (i / Math.max(1, points.length - 1)) * W,
+            H - ((p - min) / rng) * (H - 2) - 1,
+        ]);
+        const d = pts.map(([x, y], i) => (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1)).join(' ');
+        if (line) line.setAttribute('d', d);
+        if (fill) fill.setAttribute('d', d + ` L ${W} ${H} L 0 ${H} Z`);
+        const avg = points.reduce((s, v) => s + v, 0) / points.length;
+        const peak = Math.max(...points);
+        const sub = document.getElementById('stat-throughput-sub');
+        if (sub) sub.textContent = `peak ${peak.toFixed(1)} · avg ${avg.toFixed(1)}`;
+    }
+
+    _renderAgentsList() {
+        const host = document.getElementById('agents-list');
+        if (!host) return;
+        const entries = Object.values(this.agents || {});
+        const count = document.getElementById('agents-count');
+        if (count) count.textContent = String(entries.length);
+        if (entries.length === 0) {
+            host.innerHTML = `<div class="repo-empty" style="padding:18px 14px;">No agents yet. Start a task to spin up the crew.</div>`;
+            return;
+        }
+        host.innerHTML = entries.map((a) => {
+            const role = (a.role || 'generic').toLowerCase();
+            const selected = this.selectedAgent === a.id ? ' active' : '';
+            const statusDim = (a.status === 'completed' || a.status === 'idle') ? 'opacity:.55;' : '';
+            return `
+                <div class="agent-row v2-role-${this._escapeAttr(role)}${selected}" data-agent-id="${this._escapeAttr(a.id)}">
+                    <span class="v2-role-dot" style="${statusDim}"></span>
+                    <div class="agent-body">
+                        <span class="agent-name">${this._escapeHtml(this._roleDisplayName(a.role, a.id))}</span>
+                        <span class="agent-meta">
+                            <span>${this._escapeHtml(a.model || '—')}</span>
+                            <span class="sep">·</span>
+                            <span>${this._escapeHtml(a.status || 'idle')}</span>
+                        </span>
+                    </div>
+                    <span class="msg-count">${a.msg_count || 0}</span>
+                </div>
+            `;
+        }).join('');
+        host.querySelectorAll('.agent-row').forEach((row) => {
+            row.addEventListener('click', () => {
+                const id = row.dataset.agentId;
+                if (id) this._selectAgent(id);
+            });
+        });
+    }
+
+    _roleDisplayName(role, fallback) {
+        if (!role) return fallback || 'agent';
+        const r = String(role);
+        return r.charAt(0).toUpperCase() + r.slice(1);
+    }
+
+    _escapeAttr(s) {
+        return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
     _handleFileWrite(data) {
@@ -749,27 +1708,50 @@ class Dashboard {
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
         const workdirEl = document.getElementById('workdir-banner');
         const composerWorkdirEl = document.getElementById('composer-workdir');
+        const repoWorkdirEl = document.getElementById('repo-workdir');
         const sessionEl = document.getElementById('session-id-banner');
         const generationEl = document.getElementById('session-generation-banner');
         const turnEl = document.getElementById('session-turn-banner');
         const pillEl = document.getElementById('session-pill');
-        if (!workdirEl || !sessionEl || !generationEl || !turnEl || !pillEl) return;
+        const breadcrumbWorkdir = document.getElementById('breadcrumbs-workdir');
+        const breadcrumbSession = document.getElementById('breadcrumbs-session');
+        if (!pillEl) return;
 
         const workspaceName = workdir ? workdir.split('/').filter(Boolean).pop() || workdir : '—';
         const shortSession = sessionId ? sessionId.slice(0, 8) : '—';
-
-        workdirEl.textContent = workspaceName;
-        workdirEl.title = workdir || '';
-        if (composerWorkdirEl) {
-            composerWorkdirEl.textContent = workspaceName;
-            composerWorkdirEl.title = workdir || '';
+        // Tildified full path: `/Users/alice/projects/orb` → `~/projects/orb`.
+        // Keeps the visible string short enough to fit the hero card while
+        // still surfacing the absolute location of the active session.
+        const homePrefix = this._homeDir || '';
+        let displayPath = workdir || '';
+        if (homePrefix && displayPath.startsWith(homePrefix)) {
+            displayPath = '~' + displayPath.slice(homePrefix.length);
         }
 
-        sessionEl.textContent = shortSession;
-        sessionEl.title = sessionId || '';
+        if (workdirEl) {
+            workdirEl.textContent = displayPath || '—';
+            workdirEl.title = workdir || '';
+        }
+        if (composerWorkdirEl) {
+            composerWorkdirEl.textContent = displayPath || '—';
+            composerWorkdirEl.title = workdir || '';
+        }
+        if (repoWorkdirEl) {
+            repoWorkdirEl.textContent = displayPath || '—';
+            repoWorkdirEl.title = workdir || '';
+        }
+        if (breadcrumbWorkdir) {
+            breadcrumbWorkdir.textContent = displayPath || '—';
+            breadcrumbWorkdir.title = workdir || '';
+        }
+        if (breadcrumbSession) {
+            breadcrumbSession.textContent = sessionId ? `run_${shortSession}` : '—';
+            breadcrumbSession.title = sessionId || '';
+        }
 
-        generationEl.textContent = String(generation || 1);
-        turnEl.textContent = String(sessionTurn || 0);
+        if (sessionEl) { sessionEl.textContent = shortSession; sessionEl.title = sessionId || ''; }
+        if (generationEl) generationEl.textContent = String(generation || 1);
+        if (turnEl) turnEl.textContent = String(sessionTurn || 0);
 
         if (sessionId) {
             pillEl.textContent = sessionTurn > 0 ? 'Session Active' : 'Session Ready';
@@ -857,12 +1839,12 @@ class Dashboard {
         entry.innerHTML = `
             <div class="msg-header">
                 <span class="msg-time">${elapsed}</span>
-                <span class="${fromClass}">${msg.from}</span>
+                <span class="${fromClass}">${this._escapeHtml(msg.from)}</span>
                 ${modelLabel ? `<span class="msg-model-pill">${this._escapeHtml(modelLabel)}</span>` : ''}
                 <span class="msg-arrow">&rarr;</span>
-                <span class="${toClass}">${msg.to}</span>
-                <span class="msg-type-badge ${badgeCls}">${msgType}</span>
-                ${depth !== '' ? `<span class="msg-depth-badge">${depth}</span>` : ''}
+                <span class="${toClass}">${this._escapeHtml(msg.to)}</span>
+                <span class="msg-type-badge ${badgeCls}">${this._escapeHtml(msgType)}</span>
+                ${depth !== '' ? `<span class="msg-depth-badge">${this._escapeHtml(String(depth))}</span>` : ''}
             </div>
             <div class="msg-preview">${this._escapeHtml(preview)}</div>
             <div class="msg-expanded">
@@ -879,16 +1861,25 @@ class Dashboard {
     }
 
     _selectAgent(agentId) {
-        this.selectedAgent = agentId;
+        // Toggle: clicking the currently selected agent closes the panel.
+        const panel = document.getElementById('node-detail-panel');
+        const isOpen = panel && !panel.classList.contains('ndp-closed');
+        if (agentId && this.selectedAgent === agentId && isOpen) {
+            this._hideNodePanel();
+            this._renderAgentsList();
+            return;
+        }
 
-        // Update graph selection
+        this.selectedAgent = agentId;
         this.graph.selectedNode = agentId;
 
-        // Show node detail panel (replaces old chat panel for graph clicks)
         if (agentId) {
+            this._positionNodePanel();
             this._showNodePanel(agentId);
+            this._renderAgentsList();
         } else {
             this._hideNodePanel();
+            this._renderAgentsList();
         }
     }
 
@@ -996,7 +1987,7 @@ class Dashboard {
             <div class="ndp-overview-card">
                 <span class="ndp-overview-label">Peers</span>
                 <span class="ndp-overview-value">${peers.length}</span>
-                <span class="ndp-overview-note">${peers.slice(0, 3).join(', ') || 'none yet'}</span>
+                <span class="ndp-overview-note">${peers.slice(0, 3).map(p => this._escapeHtml(p)).join(', ') || 'none yet'}</span>
             </div>
         `;
 
@@ -1006,7 +1997,7 @@ class Dashboard {
                 <span class="ndp-topology-node">${this._escapeHtml(agentId)}</span>
             </div>
             <div class="ndp-topology-copy">
-                ${this._escapeHtml(agent.role || agentId)} is the ${this._escapeHtml(position)} and can communicate directly with ${uniqueNeighbors.length ? uniqueNeighbors.join(', ') : 'no current neighbors'}.
+                ${this._escapeHtml(agent.role || agentId)} is the ${this._escapeHtml(position)} and can communicate directly with ${uniqueNeighbors.length ? uniqueNeighbors.map(n => this._escapeHtml(n)).join(', ') : 'no current neighbors'}.
             </div>
             <div class="ndp-neighbor-row">
                 ${uniqueNeighbors.length
@@ -1104,7 +2095,7 @@ class Dashboard {
                         <span class="ndp-msg-from ${fromCls}">${this._escapeHtml(m.from)}</span>
                         <span class="ndp-msg-arrow">→</span>
                         <span class="ndp-msg-to ${toCls}">${this._escapeHtml(m.to)}</span>
-                        <span class="ndp-msg-type" style="${bstyle}">${mtype}</span>
+                        <span class="ndp-msg-type" style="${bstyle}">${this._escapeHtml(mtype)}</span>
                         ${elapsed ? `<span class="ndp-msg-elapsed">${elapsed}</span>` : ''}
                     </div>
                     <div class="ndp-msg-meta">
@@ -1145,8 +2136,12 @@ class Dashboard {
         this._addMessageEntry(msgData);
         this._refreshNodePanel();
 
+        if (!this._wsSessionId) {
+            document.getElementById('ndp-chat-input').focus();
+            return;
+        }
         try {
-            await fetch('/api/inject', {
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: this.selectedAgent, message: text }),
@@ -1158,8 +2153,8 @@ class Dashboard {
     // ── Query bar ─────────────────────────────────────────────
 
     async _loadModelOptions() {
-        const res = await fetch('/api/models');
-        const data = await res.json();
+        const res = await fetch('/api/v1/models');
+        const data = await unwrapEnvelope(res);
         this._modelLabels = {};
         this._models = data.models || [];
         this._indexModelsByProvider(this._models);
@@ -1171,8 +2166,8 @@ class Dashboard {
     }
 
     async _loadSettings() {
-        const res = await fetch('/api/settings');
-        const data = await res.json();
+        const res = await fetch('/api/v1/settings');
+        const data = await unwrapEnvelope(res);
         const providers = data.providers || {};
         const enabledProviders = Object.entries(providers)
             .filter(([, meta]) => meta && meta.enabled)
@@ -1274,11 +2269,56 @@ class Dashboard {
         this._applyTheme(next);
     }
 
+    _handleGlobalKeydown(e) {
+        if (e.key !== 'Escape') return;
+        const sessionModal = document.getElementById('session-config-modal');
+        const settingsModal = document.getElementById('settings-modal');
+        const traceModal = document.getElementById('trace-admin-modal');
+        if (sessionModal && !sessionModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeSessionConfig();
+            return;
+        }
+        if (settingsModal && !settingsModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeSettings();
+            return;
+        }
+        if (traceModal && !traceModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeTraceAdmin();
+            return;
+        }
+    }
+
+    _focusFirstInModal(modal) {
+        if (!modal) return;
+        const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        const first = modal.querySelector(sel);
+        if (first && typeof first.focus === 'function') first.focus();
+    }
+
+    _rememberModalFocus(modal) {
+        if (!modal || !this._modalPriorFocus) return;
+        this._modalPriorFocus.set(modal, document.activeElement);
+    }
+
+    _restoreModalFocus(modal) {
+        if (!modal || !this._modalPriorFocus) return;
+        const prior = this._modalPriorFocus.get(modal);
+        this._modalPriorFocus.delete(modal);
+        if (prior && typeof prior.focus === 'function' && document.contains(prior)) {
+            prior.focus();
+        }
+    }
+
     _openSettings() {
         const modal = document.getElementById('settings-modal');
         if (!modal) return;
+        this._rememberModalFocus(modal);
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
+        this._focusFirstInModal(modal);
     }
 
     _closeSettings() {
@@ -1286,13 +2326,17 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+        this._restoreModalFocus(modal);
     }
 
     async _openTraceAdmin() {
         const modal = document.getElementById('trace-admin-modal');
         if (!modal) return;
+        const wasHidden = modal.classList.contains('hidden');
+        if (wasHidden) this._rememberModalFocus(modal);
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
+        if (wasHidden) this._focusFirstInModal(modal);
         await this._loadTraceSessions();
     }
 
@@ -1342,11 +2386,12 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+        this._restoreModalFocus(modal);
     }
 
     async _loadTraceSessions() {
-        const res = await fetch('/api/admin/traces/sessions');
-        const data = await res.json();
+        const res = await fetch('/api/v1/traces/sessions');
+        const data = await unwrapEnvelope(res);
         this._traceSessions = Array.isArray(data.sessions) ? data.sessions : [];
         const preferredSession = this._selectedTraceSession || data.current_session_id || '';
         const nextSession = this._traceSessions.find((item) => item.session_id === preferredSession)?.session_id
@@ -1365,8 +2410,8 @@ class Dashboard {
     }
 
     async _loadTraceRuns(sessionId) {
-        const res = await fetch(`/api/admin/traces/session/${encodeURIComponent(sessionId)}`);
-        const data = await res.json();
+        const res = await fetch(`/api/v1/traces/sessions/${encodeURIComponent(sessionId)}`);
+        const data = await unwrapEnvelope(res);
         this._traceRuns = Array.isArray(data.runs) ? data.runs : [];
         const nextRun = this._traceRuns.find((item) => item.run_id === this._selectedTraceRun)?.run_id
             || this._traceRuns[0]?.run_id
@@ -1381,12 +2426,12 @@ class Dashboard {
     }
 
     async _loadTraceDetail(runId) {
-        const res = await fetch(`/api/admin/traces/run/${encodeURIComponent(runId)}`);
+        const res = await fetch(`/api/v1/traces/runs/${encodeURIComponent(runId)}`);
         if (!res.ok) {
             this._renderTraceDetail(null);
             return;
         }
-        const data = await res.json();
+        const data = await unwrapEnvelope(res);
         this._renderTraceDetail(data);
     }
 
@@ -1592,8 +2637,8 @@ class Dashboard {
     }
 
     async _loadTopologyOptions() {
-        const res = await fetch('/api/topologies');
-        const data = await res.json();
+        const res = await fetch('/api/v1/topologies');
+        const data = await unwrapEnvelope(res);
         this._topologyList = data.topologies || [];
         this._renderTopologyMenu();
         this._updateTopologyTrigger();
@@ -1653,6 +2698,7 @@ class Dashboard {
         item.addEventListener('click', () => {
             if (this._isRunActive) return;
             this._selectedTopology = t.id;
+            this._userOverrodeTopology = t.id !== 'auto';
             this._renderTopologyMenu();
             this._updateTopologyTrigger();
             document.getElementById('topology-dropdown').classList.remove('open');
@@ -1667,34 +2713,31 @@ class Dashboard {
         const count = document.getElementById('topology-trigger-count');
         const statEl = document.getElementById('stat-topology');
 
+        const setAll = (labelText, countText, statText) => {
+            if (label) label.textContent = labelText;
+            if (count) count.textContent = countText;
+            if (statEl) statEl.textContent = statText;
+            this._setText('hero-topology-label', statText);
+        };
+
         if (this._selectedTopology === 'auto') {
-            label.textContent = 'Auto';
-            count.textContent = '';
-            statEl.textContent = 'Auto';
-            this._setText('hero-topology-label', 'Auto');
+            setAll('Auto', '', 'Auto');
         } else {
             const topo = this._topologyList.find(t => t.id === this._selectedTopology);
             if (topo) {
-                label.textContent = topo.label;
-                count.textContent = `\u2014 ${topo.agents.length} agents`;
-                statEl.textContent = topo.label;
-                this._setText('hero-topology-label', topo.label);
+                setAll(topo.label, `\u2014 ${topo.agents.length} agents`, topo.label);
             } else {
-                label.textContent = this._selectedTopology;
-                count.textContent = '';
-                statEl.textContent = this._selectedTopology;
-                this._setText('hero-topology-label', this._selectedTopology);
+                setAll(this._selectedTopology, '', this._selectedTopology);
             }
         }
 
-        // Disable trigger while running
-        const trigger = document.getElementById('topology-trigger');
-        trigger.classList.toggle('disabled', this._isRunActive);
+        document.getElementById('topology-trigger')?.classList.toggle('disabled', this._isRunActive);
         this._refreshMentionTargets();
     }
 
     _toggleTopologyMenu() {
         if (this._isRunActive) return;
+        if (this._sessionLock?.topology) return;
         const dd = document.getElementById('topology-dropdown');
         const menu = document.getElementById('topology-menu');
         if (!dd || !menu) return;
@@ -1773,10 +2816,10 @@ class Dashboard {
         this.graph.setRunState(active ? 'running' : (this._statusText() === 'Done' ? 'completed' : 'idle'));
 
         // Close and disable/enable topology dropdown
-        document.getElementById('topology-trigger').classList.toggle('disabled', active);
+        document.getElementById('topology-trigger')?.classList.toggle('disabled', active);
         if (active) {
-            document.getElementById('topology-dropdown').classList.remove('open');
-            document.getElementById('topology-menu').classList.add('hidden');
+            document.getElementById('topology-dropdown')?.classList.remove('open');
+            document.getElementById('topology-menu')?.classList.add('hidden');
         }
         this._updateMentionSuggestions();
     }
@@ -1808,7 +2851,14 @@ class Dashboard {
             input.value = '';
             input.style.height = 'auto';
             this._hideMentionSuggestions();
-            await fetch('/api/inject', {
+            if (!this._wsSessionId) {
+                document.getElementById('result-agent').textContent = 'Error';
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').textContent = 'No session — click New Session first.';
+                document.getElementById('result-panel').classList.remove('hidden');
+                return;
+            }
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: 'coordinator', message: query }),
@@ -1852,30 +2902,73 @@ class Dashboard {
         input.value = '';
         input.style.height = 'auto';
         this._hideMentionSuggestions();
-        const res = await fetch('/api/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+        let res, data;
+        try {
+            // When the current session already has a topology, reuse it for
+            // follow-ups so we don't re-classify and rebuild the graph mid-session.
+            const sessionTopology = this._plan?.topology?.id;
+            const topologyForStart = this._userOverrodeTopology
+                ? this._selectedTopology
+                : (sessionTopology && sessionTopology !== 'auto' ? sessionTopology : this._selectedTopology);
+            const startBody = {
                 query,
-                topology: this._selectedTopology,
+                topology: topologyForStart,
                 model: this._selectedModel,
-            }),
-        });
-        const data = await res.json();
-        if (!data.ok) {
+            };
+            // First-run manual config: pass through workdir + agent_models
+            // if the user set them via the Session modal and the session is
+            // not yet locked. After the first successful run the server
+            // persists the lock on the session.
+            const sc = this._sessionConfig || {};
+            if (!this._sessionLock?.topology) {
+                if (sc.workdir) startBody.workdir = sc.workdir;
+                if (sc.topology && sc.topology !== 'auto') {
+                    startBody.topology = sc.topology;
+                    if (sc.agentModels && Object.keys(sc.agentModels).length) {
+                        startBody.agent_models = { ...sc.agentModels };
+                    }
+                }
+            }
+            const sid = this._wsSessionId || '';
+            if (!sid) {
+                this._setRunActive(false);
+                this._hideLoader();
+                document.getElementById('result-agent').textContent = 'Error';
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').textContent = 'No session — click New Session first.';
+                document.getElementById('result-panel').classList.remove('hidden');
+                return;
+            }
+            res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}/runs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(startBody),
+            });
+            const text = await res.text();
+            try { data = JSON.parse(text); }
+            catch { data = { ok: false, error: `HTTP ${res.status}: ${text.slice(0, 300)}` }; }
+        } catch (err) {
+            data = { ok: false, error: `Network error: ${err?.message || err}` };
+        }
+        // v1 envelopes nest the payload under `data`. Legacy returns
+        // fields at the top level. Normalize both shapes.
+        const payload = data && typeof data.data === 'object' && data.data !== null
+            ? { ok: data.ok, error: data.error, code: data.code, ...data.data }
+            : data;
+        if (!payload.ok) {
             this._setRunActive(false);
             this._hideLoader();
             document.getElementById('result-agent').textContent = 'Error';
             document.getElementById('result-elapsed').textContent = '';
-            document.getElementById('result-body').textContent = data.error || 'Failed to start run.';
+            document.getElementById('result-body').textContent = payload.error || `Failed to start run (HTTP ${res?.status || '?'}).`;
             document.getElementById('result-panel').classList.remove('hidden');
             return;
         }
-        if (data.session_id) {
-            this._updateSessionUrl(data.session_id);
+        if (payload.session_id) {
+            this._updateSessionUrl(payload.session_id);
         }
-        if (data.init && !this._shouldIgnoreStartSnapshot(data.init)) {
-            this._handleInit(data.init);
+        if (payload.init && !this._shouldIgnoreStartSnapshot(payload.init)) {
+            this._handleInit(payload.init);
         }
     }
 
@@ -1884,13 +2977,16 @@ class Dashboard {
         const snapshotSessionId = String(snapshot.session_id || '');
         const currentSessionId = String(this._wsSessionId || '');
         const sameSession = snapshotSessionId && currentSessionId && snapshotSessionId === currentSessionId;
+        if (!sameSession) return false;
+        const hasAgents = Object.keys(this.agents || {}).length > 0;
+        const hasTopology = Boolean(this._plan?.topology?.id);
+        if (hasAgents || hasTopology) return true;
         const hasLiveProgress = Boolean(
             (this._planSteps && this._planSteps.length) ||
             (this._rawMessages && this._rawMessages.length) ||
-            (this.messageLog && this.messageLog.querySelector('.msg-entry, .prediction-card')) ||
-            Object.keys(this.agents || {}).length
+            (this.messageLog && this.messageLog.querySelector('.msg-entry, .prediction-card'))
         );
-        return sameSession && hasLiveProgress;
+        return hasLiveProgress;
     }
 
     async _createNewSession() {
@@ -1902,7 +2998,7 @@ class Dashboard {
             button.textContent = 'Starting…';
         }
         try {
-            const res = await fetch('/api/session/new', { method: 'POST' });
+            const res = await fetch('/api/v1/sessions', { method: 'POST' });
             let data = null;
             try {
                 data = await res.json();
@@ -1932,7 +3028,52 @@ class Dashboard {
         const label = btn?.querySelector('.query-action-label');
         btn.disabled = true;
         if (label) label.textContent = 'Stopping…';
-        await fetch('/api/stop', { method: 'POST' });
+        if (!this._wsSessionId) return;
+        await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/stop`, { method: 'POST' });
+    }
+
+    _handleRunStateChanged(data) {
+        // Live FSM transition from the runtime. Authoritative source for
+        // what state the runtime is in right now.
+        const from = data.from || '';
+        const to = data.to || 'idle';
+        const event = data.event || '';
+        this._runState = to;
+        const inFlightStates = new Set(['planning', 'running', 'stopping']);
+        const inFlight = inFlightStates.has(to);
+        if (inFlight !== this._isRunActive) {
+            this._setRunActive(inFlight);
+        }
+        // Drive the graph renderer based on the target state.
+        if (to === 'planning' || to === 'running') {
+            this.graph.setRunState('running');
+        } else if (to === 'completed') {
+            this.graph.setRunState('completed');
+        } else if (to === 'errored') {
+            this.graph.setRunState('idle');
+        } else if (to === 'idle') {
+            this.graph.setRunState('idle');
+        }
+        // Surface the state pill in the summary strip.
+        const el = document.getElementById('stat-status');
+        if (el) {
+            const label = to.charAt(0).toUpperCase() + to.slice(1);
+            el.textContent = label;
+            const cls = ({
+                idle: 'status-waiting',
+                planning: 'status-running',
+                running: 'status-running',
+                stopping: 'status-error',
+                completed: 'status-done',
+                errored: 'status-error',
+            })[to] || 'status-waiting';
+            el.className = `stat-value ${cls}`;
+            this._setText('hero-status-label', label);
+        }
+        // Disable Send while stopping so users don't queue up inject
+        // messages that will just be swallowed by the cancel.
+        const send = document.getElementById('query-send');
+        if (send) send.disabled = (to === 'stopping');
     }
 
     _handleStopped() {
@@ -1978,6 +3119,16 @@ class Dashboard {
             elapsed: data.elapsed || 0,
             result,
         });
+
+        // V2: surface the final result in the drawer's result panel since #changes-log is hidden
+        const resAgentEl = document.getElementById('result-agent');
+        const resElapsedEl = document.getElementById('result-elapsed');
+        const resBodyEl = document.getElementById('result-body');
+        const resPanel = document.getElementById('result-panel');
+        if (resAgentEl) resAgentEl.textContent = this._roleDisplayName(data.agent, data.agent || 'run');
+        if (resElapsedEl) resElapsedEl.textContent = elapsed;
+        if (resBodyEl) resBodyEl.innerHTML = this._renderResult(result);
+        if (resPanel) resPanel.classList.remove('hidden');
     }
 
     _renderInitialCodeChanges(result, diff, elapsed = '', sessionTurn = 0) {
@@ -2084,35 +3235,210 @@ class Dashboard {
     }
 
     _renderLiveCodeChanges() {
-        if (!this.changesLog) return;
-        const empty = this.changesLog.querySelector('.empty-state');
-        if (empty) empty.remove();
+        const changedFiles = Array.from(this._fileChanges.values()).map((f) => {
+            const diff = this._buildUnifiedDiff(f.path, f.oldContent, f.content);
+            const stats = this._countDiffStats(diff);
+            const status = (f.oldContent || '').length === 0 ? 'A' : 'M';
+            return { ...f, diff, added: stats.added, removed: stats.removed, status };
+        });
 
-        let card = document.getElementById('live-diff-card');
-        if (!card) {
-            card = document.createElement('div');
-            card.id = 'live-diff-card';
-            card.className = 'final-result-card live-diff-card';
-            this.changesLog.prepend(card);
+        // Overlay workspace (unchanged) files — agent writes win if both exist.
+        const changedByPath = new Map(changedFiles.map((f) => [f.path, f]));
+        const workspace = (this._workspaceFiles || []).filter((f) => !changedByPath.has(f.path));
+        const files = [...changedFiles, ...workspace];
+
+        this._renderRepoTree(files);
+        this._renderRepoDiff(files);
+        this._renderRepoToolbar(files);
+        // Stats strip only counts agent-authored changes.
+        this._updateFilesStat(changedFiles);
+    }
+
+    _renderRepoTree(files) {
+        const host = document.getElementById('repo-tree');
+        if (!host) return;
+        if (files.length === 0) {
+            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">No file writes yet. Start a task to see diffs here.</div>`;
+            return;
+        }
+        // Group by top-level folder (or "(root)")
+        const groups = new Map();
+        for (const f of files) {
+            const slash = f.path.indexOf('/');
+            const folder = slash >= 0 ? f.path.slice(0, slash + 1) : '';
+            if (!groups.has(folder)) groups.set(folder, []);
+            groups.get(folder).push(f);
+        }
+        const sortedFolders = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+        const selected = this._repoSelectedPath || files[0].path;
+        this._repoSelectedPath = selected;
+
+        host.innerHTML = sortedFolders.map((folder) => {
+            const items = groups.get(folder) || [];
+            items.sort((a, b) => a.path.localeCompare(b.path));
+            const label = folder || '(root)';
+            return `
+                <div class="repo-folder">${this._escapeHtml(label)}</div>
+                ${items.map((f) => {
+                    const shortName = folder ? f.path.slice(folder.length) || f.path : f.path;
+                    const sel = f.path === selected ? ' sel' : '';
+                    let byline;
+                    if (f.status === 'U') {
+                        byline = `<span class="byline"><span class="track-label">tracked</span></span>`;
+                    } else {
+                        const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                        byline = `<span class="byline">
+                                <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
+                                <span class="sep">·</span>
+                                <span class="stat-add">+${f.added || 0}</span>
+                                ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
+                            </span>`;
+                    }
+                    return `
+                        <div class="repo-file${sel}" data-path="${this._escapeAttr(f.path)}" title="${this._escapeAttr(f.path)}">
+                            <span class="badge ${f.status}">${f.status}</span>
+                            <div class="main">
+                                <span class="pth">${this._escapeHtml(shortName)}</span>
+                                ${byline}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            `;
+        }).join('');
+
+        host.querySelectorAll('.repo-file').forEach((row) => {
+            row.addEventListener('click', () => {
+                this._repoSelectedPath = row.dataset.path;
+                this._renderLiveCodeChanges();
+            });
+        });
+    }
+
+    _renderRepoDiff(files) {
+        const filebar = document.getElementById('repo-diff-filebar');
+        const pathEl = document.getElementById('repo-diff-path');
+        const addEl = document.getElementById('repo-diff-add');
+        const delEl = document.getElementById('repo-diff-del');
+        const badgeEl = document.getElementById('repo-diff-status');
+        const authorEl = document.getElementById('repo-diff-author');
+        const diffHost = document.getElementById('repo-diff');
+        if (!diffHost) return;
+
+        if (files.length === 0) {
+            if (filebar) filebar.classList.add('hidden');
+            diffHost.innerHTML = `<div id="repo-diff-empty" class="repo-empty">Select a file from the tree to see its diff.</div>`;
+            return;
+        }
+        const selected = files.find((f) => f.path === this._repoSelectedPath) || files[0];
+        this._repoSelectedPath = selected.path;
+
+        if (filebar) filebar.classList.remove('hidden');
+        if (pathEl) pathEl.textContent = selected.path;
+        if (addEl) addEl.textContent = `+${selected.added || 0}`;
+        if (delEl) { delEl.textContent = `−${selected.removed || 0}`; delEl.style.display = (selected.removed || 0) > 0 ? '' : 'none'; }
+        if (badgeEl) { badgeEl.textContent = selected.status; badgeEl.className = `repo-diff-badge ${selected.status}`; }
+        if (authorEl) {
+            const role = (this._roleOf(selected.agent) || 'generic').toLowerCase();
+            authorEl.className = `diff-gutter-author v2-role-${role}`;
+            authorEl.innerHTML = `<span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(selected.agent, selected.agent))}`;
         }
 
-        const files = Array.from(this._fileChanges.values());
-        const total = files.length;
-        card.innerHTML = `
-            <div class="final-result-header">
-                <span class="final-result-title">Live Workspace Diff</span>
-                <span class="final-result-elapsed">${total} file${total === 1 ? '' : 's'}</span>
-            </div>
-            <div class="live-diff-summary">Captured from runtime file writes. This is the current overall code delta for the run.</div>
-            <div class="live-diff-files">
-                ${files.map((file) => this._renderCodeChangeCard({
-                    path: file.path,
-                    agent: file.agent || '',
-                    diff: this._buildUnifiedDiff(file.path, file.oldContent, file.content),
-                    ...this._countDiffStats(this._buildUnifiedDiff(file.path, file.oldContent, file.content)),
-                })).join('')}
-            </div>
-        `;
+        if (selected.status === 'U') {
+            // Unchanged file from the workspace — fetch and show its content.
+            this._renderUnchangedFile(selected, diffHost);
+            return;
+        }
+        if (this._repoView === 'raw') {
+            diffHost.innerHTML = `<pre class="repo-raw" style="padding:12px 16px; margin:0; color:var(--text-secondary);">${this._escapeHtml(selected.content || '')}</pre>`;
+            return;
+        }
+        diffHost.innerHTML = this._renderV2Diff(selected);
+    }
+
+    async _renderUnchangedFile(file, host) {
+        const workdir = this._sessionLock?.workdir || this._sessionConfig?.workdir || '';
+        if (!workdir) {
+            host.innerHTML = `<div class="repo-empty">Workspace unknown — can't read file content.</div>`;
+            return;
+        }
+        host.innerHTML = `<div class="repo-empty">Loading ${this._escapeHtml(file.path)}…</div>`;
+        try {
+            const res = await fetch(`/api/v1/fs/read?workdir=${encodeURIComponent(workdir)}&path=${encodeURIComponent(file.path)}`);
+            const data = await unwrapEnvelope(res);
+            if (!data.ok) {
+                host.innerHTML = `<div class="repo-empty">${this._escapeHtml(data.error || 'Could not read file')}</div>`;
+                return;
+            }
+            const lines = (data.content || '').split('\n');
+            const rows = [`<div class="diff-hunk-hdr"><span class="at">@@ tracked @@</span><span>${this._escapeHtml(file.path)}</span></div>`];
+            lines.forEach((line, idx) => {
+                const n = idx + 1;
+                rows.push(`<div class="diff-line ctx"><span class="ln">${n}</span><span class="ln">${n}</span><span class="code">${this._escapeHtml(line)}</span></div>`);
+            });
+            host.innerHTML = rows.join('');
+        } catch (err) {
+            host.innerHTML = `<div class="repo-empty">Network error loading file.</div>`;
+        }
+    }
+
+    _renderV2Diff(file) {
+        const oldLines = (file.oldContent || '').split('\n');
+        const newLines = (file.content || '').split('\n');
+        const ops = this._diffLineOps(oldLines, newLines);
+        const rows = [];
+        rows.push(`<div class="diff-hunk-hdr"><span class="at">@@ ${file.status === 'A' ? 'new file' : 'modified'} @@</span><span>${this._escapeHtml(file.path)}</span></div>`);
+        let oldLn = 0, newLn = 0;
+        for (const op of ops) {
+            if (op.type === 'equal') {
+                oldLn++; newLn++;
+                rows.push(`<div class="diff-line ctx"><span class="ln">${oldLn}</span><span class="ln">${newLn}</span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            } else if (op.type === 'add') {
+                newLn++;
+                rows.push(`<div class="diff-line add"><span class="ln"></span><span class="ln">${newLn}</span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            } else {
+                oldLn++;
+                rows.push(`<div class="diff-line del"><span class="ln">${oldLn}</span><span class="ln"></span><span class="code">${this._escapeHtml(op.line)}</span></div>`);
+            }
+        }
+        return rows.join('');
+    }
+
+    _renderRepoToolbar(files) {
+        const countEl = document.getElementById('repo-panel-count');
+        const addEl = document.getElementById('repo-stat-add');
+        const delEl = document.getElementById('repo-stat-del');
+        const contribEl = document.getElementById('repo-contrib');
+        const branchEl = document.getElementById('repo-branch');
+        const totalAdd = files.reduce((s, f) => s + (f.added || 0), 0);
+        const totalDel = files.reduce((s, f) => s + (f.removed || 0), 0);
+        const authors = new Set(files.map((f) => f.agent).filter(Boolean));
+        if (countEl) countEl.textContent = `${files.length} file${files.length === 1 ? '' : 's'}`;
+        if (addEl) addEl.textContent = `+${totalAdd}`;
+        if (delEl) delEl.textContent = `−${totalDel}`;
+        if (contribEl) contribEl.textContent = `${authors.size} agent${authors.size === 1 ? '' : 's'} contributed`;
+        if (branchEl) {
+            const short = (this._wsSessionId || '').slice(0, 6);
+            branchEl.textContent = short ? `orb/run_${short}` : 'orb/run';
+        }
+    }
+
+    _updateFilesStat(files) {
+        const el = document.getElementById('stat-files');
+        const sub = document.getElementById('stat-files-sub');
+        if (el) el.textContent = String(files.length);
+        if (sub) {
+            const add = files.reduce((s, f) => s + (f.added || 0), 0);
+            const del = files.reduce((s, f) => s + (f.removed || 0), 0);
+            sub.textContent = `+${add} −${del} loc`;
+        }
+    }
+
+    _roleOf(agentId) {
+        if (!agentId) return 'generic';
+        const agent = this.agents[agentId];
+        if (agent?.role) return agent.role;
+        return agentId;
     }
 
     _renderCodeChangeCard(file) {
@@ -2492,8 +3818,14 @@ class Dashboard {
         document.getElementById('question-panel').classList.add('hidden');
         input.value = '';
 
-        // Inject the reply directly to the agent that asked
-        await fetch('/api/inject', {
+        if (!this._wsSessionId) {
+            document.getElementById('result-agent').textContent = 'Error';
+            document.getElementById('result-elapsed').textContent = '';
+            document.getElementById('result-body').textContent = 'No session — click New Session first.';
+            document.getElementById('result-panel').classList.remove('hidden');
+            return;
+        }
+        await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ to: this._questionAgent, message: text }),

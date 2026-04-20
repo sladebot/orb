@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from orb.cli.config import get as get_config, load_config, save_config
 from orb.messaging.channel import ChannelClosed
 from orb.tracing.run_trace import RunTrace
 from web.state import DashboardState
+from .run_state import InvalidTransitionError, RunState, RunStateMachine
 from .topology_classifier import ProviderBackedTopologyClassifier, TopologyClassifier
 from .transcript import ConversationSession, RunTranscript
 
@@ -45,6 +47,11 @@ class GraphRuntime:
         self._subscribers: set[BroadcastFn] = set()
         self._agents: dict = {}
         self._run_task: asyncio.Task | None = None
+        self._fsm = RunStateMachine()
+        # Every FSM transition fans out as a `run_state_changed` broadcast
+        # so dashboards can react to the explicit lifecycle without
+        # reconstructing it from several independent flags.
+        self._fsm.subscribe(self._on_fsm_state_changed)
         self._providers: dict = {}
         self._all_providers: dict = {}
         self._enabled_providers: list[str] = []
@@ -198,12 +205,87 @@ class GraphRuntime:
         return options
 
     @property
-    def running(self) -> bool:
-        return self._run_task is not None and not self._run_task.done()
+    def is_run_in_flight(self) -> bool:
+        """True iff the FSM is in PLANNING, RUNNING, or STOPPING.
+
+        Callers that need a bool (e.g. the /api/run-status endpoint) use
+        this; anyone who cares about *which* in-flight state should read
+        ``run_state`` directly.
+        """
+        return self._fsm.is_in_flight
+
+    @property
+    def run_state(self) -> RunState:
+        """Current lifecycle state of the runtime.
+
+        One of ``idle`` / ``planning`` / ``running`` / ``stopping`` /
+        ``completed`` / ``errored``. Prefer this over ``running`` when
+        the caller needs to distinguish between "in the middle of a run"
+        and "finished with a result ready".
+        """
+        return self._fsm.state
 
     @property
     def last_result(self):
         return self._last_result
+
+    def _prewarm_topology_view(self, topology_id: str) -> None:
+        """Paint the topology + agent roster onto the dashboard state
+        BEFORE any run executes.
+
+        Called from ``RuntimeManager.create_session`` when the caller
+        pinned an explicit topology. The goal is for the dashboard
+        opening the session's WebSocket to see the topology graph
+        immediately — agents listed, edges drawn, status "idle" — so the
+        first user query feels like "I'm talking to the coordinator of a
+        ready graph", not "I'm triggering graph construction".
+
+        We only seed the shape (names, edges, positions, graph view).
+        No provider/LLM work happens here — the actual orchestrator is
+        built when ``start_run`` fires.
+        """
+        from orb.topologies import get_loader, normalize_topology_id
+        from web.state import AgentState, EdgeState
+
+        tid = normalize_topology_id(topology_id)
+        loader = get_loader()
+        topo = loader.get(tid)
+        if topo is None:
+            return
+        label, description, positions = self._topology_meta(tid)
+        graph_view = self._topology_graph_view(tid)
+
+        # Agents — one entry per topology node with the role label
+        # from the schema. Pinned models come from the session lock if
+        # the caller supplied them.
+        locked_models = self._conversation_session.locked_agent_models or {}
+        agents: dict[str, AgentState] = {}
+        for agent_id, agent_schema in topo.agents.items():
+            agents[agent_id] = AgentState(
+                node_id=agent_id,
+                role=agent_schema.role,
+                status="idle",
+                model=locked_models.get(agent_id, ""),
+                msg_count=0,
+                complexity=agent_schema.base_complexity,
+                last_heartbeat=0.0,
+            )
+        self.state.agents = agents
+        self.state.edges = [EdgeState(source=a, target=b) for a, b in (topo.edges or [])]
+        self.state.topology_id = tid
+        self.state.topology_label = label
+        self.state.topology_description = description
+        self.state.agent_positions = positions
+        self.state.agent_models = dict(locked_models)
+        self.state.agent_complexity = {
+            aid: schema.base_complexity for aid, schema in topo.agents.items()
+        }
+        self.state.graph_view = graph_view
+        # Persist so a reconnecting WebSocket picks it up from the snapshot.
+        try:
+            self._persist_dashboard_snapshot()
+        except Exception:  # noqa: BLE001
+            logger.debug("prewarm snapshot persist failed (non-fatal)")
 
     def subscribe(self, callback: BroadcastFn) -> None:
         self._subscribers.add(callback)
@@ -212,14 +294,51 @@ class GraphRuntime:
         self._subscribers.discard(callback)
 
     async def _broadcast(self, data: str) -> None:
+        # Tag every payload with this session's id so multi-tenant clients
+        # can filter. The DashboardBridge sends minimal events that don't
+        # carry session_id themselves — injecting here keeps every hop
+        # downstream (manager → server → WS) addressable by session.
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict) and "session_id" not in parsed:
+                parsed["session_id"] = self._conversation_session.session_id
+                data = json.dumps(parsed)
+        except (ValueError, TypeError):
+            pass
         stale: list[BroadcastFn] = []
-        for callback in self._subscribers:
+        # Snapshot: a subscriber callback may (un)subscribe mid-broadcast,
+        # which would otherwise raise "Set changed size during iteration".
+        for callback in list(self._subscribers):
             try:
                 await callback(data)
             except Exception:
                 stale.append(callback)
         for callback in stale:
             self._subscribers.discard(callback)
+
+    def _on_fsm_state_changed(self, from_state: RunState, to_state: RunState, event: str) -> None:
+        """FSM listener — schedule a ``run_state_changed`` WebSocket broadcast.
+
+        Fired synchronously by RunStateMachine.fire(); we hand off to the
+        asyncio loop so the FSM never waits on IO. If no loop is running
+        (e.g. during unit tests that drive the FSM directly), silently skip
+        the broadcast — there's nobody to notify.
+        """
+        elapsed = time.time() - (self.state.start_time or time.time())
+        payload = json.dumps({
+            "type": "run_state_changed",
+            "session_id": self._conversation_session.session_id,
+            "from": from_state.value,
+            "to": to_state.value,
+            "event": event,
+            "at": round(elapsed, 3),
+        })
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("run_state_changed suppressed (no running loop): %s -> %s", from_state.value, to_state.value)
+            return
+        loop.create_task(self._broadcast(payload))
 
     def configure(self, providers: dict, config, model_overrides, tier_override) -> None:
         self._all_providers = dict(providers)
@@ -654,7 +773,7 @@ class GraphRuntime:
         }
 
     def _dashboard_sessions_dir(self) -> Path:
-        return Path.home() / ".orb" / "sessions"
+        return self._workspace_state_dir() / "sessions"
 
     def _dashboard_session_path(self, session_id: str | None = None) -> Path:
         return self._dashboard_sessions_dir() / f"{session_id or self._conversation_session.session_id}.json"
@@ -682,12 +801,24 @@ class GraphRuntime:
         file_changes = snapshot.get("file_changes") or []
         return file_changes if isinstance(file_changes, list) else []
 
-    def _dashboard_snapshot_payload(self, *, session_id: str | None = None, run_active: bool | None = None) -> dict:
+    def _dashboard_snapshot_payload(self, *, session_id: str | None = None) -> dict:
         payload = self.state.to_init_event()
         resolved_session_id = session_id or payload.get("session_id") or self._conversation_session.session_id
         payload["session_id"] = resolved_session_id
         payload["file_changes"] = self._load_dashboard_file_changes(resolved_session_id)
-        payload["run_active"] = self.running if run_active is None else bool(run_active)
+        # `run_state` is the single source of truth — callers read the enum
+        # value and decide for themselves what to show (in-flight UI, result
+        # pane, error banner, etc.). No more `run_active: bool` shim.
+        payload["run_state"] = self._fsm.state.value
+        # Expose session-level lock + workdir so the UI can show "pinned"
+        # topology/models and disable re-classification affordances.
+        payload["session"] = {
+            "id": self._conversation_session.session_id,
+            "workdir": self._conversation_session.workdir,
+            "locked_topology": self._conversation_session.locked_topology,
+            "locked_agent_models": dict(self._conversation_session.locked_agent_models),
+            "locked_model_pin": self._conversation_session.locked_model_pin,
+        }
         if self._last_trace is not None:
             payload["run_trace"] = self._last_trace.to_dict()
             payload["run_trace_summary"] = self._last_trace.summary()
@@ -756,20 +887,20 @@ class GraphRuntime:
             self.state.final_diff,
         ))
 
-    def _persist_dashboard_snapshot(self, *, run_active: bool | None = None) -> None:
+    def _persist_dashboard_snapshot(self) -> None:
         session_id = self._conversation_session.session_id
         if not session_id:
             return
         try:
             self._write_dashboard_snapshot(
-                self._dashboard_snapshot_payload(session_id=session_id, run_active=run_active),
+                self._dashboard_snapshot_payload(session_id=session_id),
                 session_id=session_id,
             )
         except OSError as exc:
             logger.warning("Failed to persist dashboard snapshot: %s", exc)
 
     def _trace_dir(self) -> Path:
-        return Path.cwd() / ".orb" / "traces"
+        return self._workspace_state_dir() / "traces"
 
     def _trace_session_index_dir(self) -> Path:
         return self._trace_dir() / "by-session"
@@ -902,7 +1033,7 @@ class GraphRuntime:
             return
         snapshot = self._load_dashboard_snapshot(session_id) or self._dashboard_snapshot_payload(
             session_id=session_id,
-            run_active=self.running,
+            
         )
         existing = {
             str(change.get("path")): dict(change)
@@ -916,7 +1047,6 @@ class GraphRuntime:
             "old_content": old_content,
         }
         snapshot["file_changes"] = list(existing.values())
-        snapshot["run_active"] = self.running
         try:
             self._write_dashboard_snapshot(snapshot, session_id=session_id)
         except OSError as exc:
@@ -928,7 +1058,7 @@ class GraphRuntime:
             return
         snapshot = self._load_dashboard_snapshot(resolved_session_id) or self._dashboard_snapshot_payload(
             session_id=resolved_session_id,
-            run_active=self.running,
+            
         )
         snapshot["file_changes"] = []
         try:
@@ -940,7 +1070,15 @@ class GraphRuntime:
         return self._session_path or self._default_session_path(self._conversation_session.session_id)
 
     def _workspace_state_dir(self) -> Path:
-        return Path.cwd() / ".orb"
+        """Root of the .orb state dir for this runtime.
+
+        Prefers the session's workdir when set so multi-tenant daemons
+        keep each session's state/traces/sessions in the right repo.
+        Falls back to the process CWD for the unscoped case (tests,
+        `orb trace` invocations before any session exists).
+        """
+        base = self._conversation_session.workdir if hasattr(self, "_conversation_session") and self._conversation_session.workdir else str(Path.cwd())
+        return Path(base) / ".orb"
 
     def _workspace_sessions_dir(self) -> Path:
         return self._workspace_state_dir() / "sessions"
@@ -962,7 +1100,7 @@ class GraphRuntime:
                     session_id = current_path.read_text().strip()
             except OSError:
                 session_id = ""
-            path = self._default_session_path(session_id) if session_id else (Path.cwd() / ".orb" / "session.json")
+            path = self._default_session_path(session_id) if session_id else (self._workspace_state_dir() / "session.json")
         if not path.exists():
             return ConversationSession()
         try:
@@ -983,7 +1121,10 @@ class GraphRuntime:
             logger.warning("Failed to persist conversation session: %s", exc)
 
     def _sync_session_state(self) -> None:
-        self.state.workdir = str(Path.cwd())
+        # Dashboard's workdir reflects the *session's* scoped folder, not
+        # the daemon's process CWD — crucial once a daemon can host
+        # multiple concurrent sessions in different workdirs.
+        self.state.workdir = self._conversation_session.workdir or str(Path.cwd())
         self.state.session_turn = self._conversation_session.user_turn_count()
         self.state.session_id = self._conversation_session.session_id
         self.state.session_generation = self._conversation_session.generation
@@ -1043,23 +1184,21 @@ class GraphRuntime:
         current_snapshot = self._load_dashboard_snapshot(current_session_id)
 
         if requested_session_id:
-            if requested_session_id != current_session_id or not self.running:
+            if requested_session_id != current_session_id or not self.is_run_in_flight:
                 snapshot = self._load_dashboard_snapshot(requested_session_id)
                 if snapshot:
                     snapshot["type"] = "init"
-                    snapshot["run_active"] = bool(self.running and requested_session_id == current_session_id)
                     return snapshot
 
-        if not self.running and not self._has_live_dashboard_state():
+        if not self.is_run_in_flight and not self._has_live_dashboard_state():
             snapshot = current_snapshot
             if snapshot:
                 snapshot["type"] = "init"
-                snapshot["run_active"] = False
                 return snapshot
 
         live_payload = self._dashboard_snapshot_payload(
             session_id=requested_session_id or current_session_id,
-            run_active=self.running,
+            
         )
         if requested_session_id and requested_session_id == current_session_id:
             return self._merge_dashboard_snapshot(live_payload, current_snapshot)
@@ -1084,12 +1223,22 @@ class GraphRuntime:
         }))
 
     async def stop(self) -> None:
+        """Force-cancel the in-flight task (daemon shutdown path).
+
+        Unlike ``stop_run`` this skips the user-facing broadcast but still
+        drives the FSM through STOPPING → IDLE so downstream listeners see a
+        coherent lifecycle trail on shutdown.
+        """
         if self._run_task and not self._run_task.done():
+            self._fsm.maybe_fire("stop_requested")
             self._run_task.cancel()
             try:
                 await self._run_task
             except asyncio.CancelledError:
                 pass
+            # Defensive: if the orchestrator's CancelledError branch didn't
+            # already drain STOPPING → IDLE, do it here.
+            self._fsm.maybe_fire("stop_finished")
 
     async def wait_for_run(self) -> None:
         if self._run_task:
@@ -1101,7 +1250,7 @@ class GraphRuntime:
     async def inject_message(self, target_id: str, text: str) -> tuple[int, dict]:
         from orb.messaging.message import Message, MessageType
 
-        if not self.running:
+        if not self.is_run_in_flight:
             return 400, {"ok": False, "error": "No run in progress"}
 
         known_targets = {aid.lower() for aid in self._agents}
@@ -1157,14 +1306,63 @@ class GraphRuntime:
         query: str,
         topology: str,
         model_pin: str = "auto",
+        agent_models: dict[str, str] | None = None,
+        workdir: str | None = None,
     ) -> tuple[int, dict]:
         from orb.topologies import normalize_topology_id
 
         if not self._providers:
             return 500, {"ok": False, "error": "Server has no providers configured"}
-        if self.running:
+        if self.is_run_in_flight:
             return 200, {"ok": False, "error": "Run already in progress"}
 
+        # Validate the workdir BEFORE announcing PLANNING so a bad path
+        # leaves the FSM resting in a terminal state.
+        target_workdir = (workdir or self._conversation_session.workdir or "").strip()
+        resolved_workdir: str | None = None
+        if target_workdir:
+            expanded = Path(target_workdir).expanduser()
+            if not expanded.exists() or not expanded.is_dir():
+                return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
+            resolved_workdir = str(expanded.resolve())
+
+        # Move the FSM to PLANNING. From here on any failure must fire
+        # ``orchestrator_errored`` so we never strand the runtime.
+        try:
+            self._fsm.fire("start_run_begin")
+        except InvalidTransitionError as exc:
+            return 409, {"ok": False, "error": f"Cannot start a run: {exc}"}
+
+        if resolved_workdir:
+            # Store on the session — the sandbox + state-dir resolvers read
+            # from here instead of process CWD, enabling multi-tenant runs.
+            self._conversation_session.workdir = resolved_workdir
+
+        # Everything from here through orchestrator_task_created is "planning":
+        # any exception leaves the FSM stuck in PLANNING if we don't catch it,
+        # permanently wedging the runtime. Wrap the whole body so we always
+        # land in ERRORED on unexpected failures.
+        try:
+            return await self._start_run_planning(
+                query=query,
+                topology=topology,
+                model_pin=model_pin,
+                agent_models=agent_models,
+            )
+        except Exception as exc:
+            logger.exception("start_run planning failed session=%s", self._conversation_session.session_id)
+            self._fsm.maybe_fire("orchestrator_errored")
+            return 500, {"ok": False, "error": f"Run planning failed: {exc}"}
+
+    async def _start_run_planning(
+        self,
+        *,
+        query: str,
+        topology: str,
+        model_pin: str,
+        agent_models: dict[str, str] | None,
+    ) -> tuple[int, dict]:
+        from orb.topologies import normalize_topology_id
         self.state.reset()
         self._last_result = None
         self._run_transcript = RunTranscript(session=self._conversation_session)
@@ -1176,19 +1374,58 @@ class GraphRuntime:
             query,
             default_target="coordinator",
         )
+
+        # Session topology lock — once the session has planned its first
+        # run, follow-ups should reuse the same topology AND per-node model
+        # map without re-running the classifier. This also handles the
+        # common UI case where a follow-up /api/start passes the locked
+        # topology id explicitly rather than "auto": we still want to skip
+        # re-classification in that case.
+        explicit_topology = topology != "auto"
+        manual_models = bool(agent_models)
+        if self._conversation_session.locked_topology and not manual_models:
+            same_as_lock = (
+                not explicit_topology
+                or topology == self._conversation_session.locked_topology
+            )
+            if same_as_lock:
+                topology = self._conversation_session.locked_topology
+                explicit_topology = True
+                if not model_pin or model_pin == "auto":
+                    model_pin = self._conversation_session.locked_model_pin or "auto"
+                # Route through the manual-prediction path to skip the
+                # classifier — even when the user only pinned the topology
+                # and left per-agent models on "auto". The heuristic
+                # allocator (_build_agent_model_map) still fills in the
+                # models downstream; we just don't re-classify.
+                agent_models = dict(self._conversation_session.locked_agent_models or {})
+                manual_models = True
+
         logger.info(
-            "run start session=%s requested_topology=%s requested_target=%s model_pin=%s query=%s",
+            "run start session=%s requested_topology=%s requested_target=%s model_pin=%s manual_models=%s workdir=%s query=%s",
             self._conversation_session.session_id,
             topology,
             requested_target,
             model_pin,
+            manual_models,
+            self._conversation_session.workdir or "<cwd>",
             query[:240].replace("\n", " "),
         )
         self.state.run_query = query
         self._sync_session_state()
         self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
-        predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
+
+        if manual_models and explicit_topology:
+            # Manual mode — skip the classifier entirely. Synthesize a
+            # predicted payload from the caller-supplied topology + models.
+            predicted = self._manual_prediction(
+                topology=normalize_topology_id(topology),
+                agent_models=agent_models,
+                model_pin=model_pin,
+            )
+        else:
+            predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
         routing_payload = {
             "task_type": str(predicted.get("task_type") or ""),
@@ -1263,12 +1500,17 @@ class GraphRuntime:
             message="model allocation finished",
             data={"agent_models": {aid: cfg.model_id for aid, cfg in agent_model_map.items()}},
         )
-        agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
+        resolved_agent_models = {role: cfg.model_id for role, cfg in agent_model_map.items()}
+        # Pin the topology + agent-model map onto the session so follow-up
+        # runs reuse the same allocation instead of re-classifying.
+        self._conversation_session.locked_topology = selected_topology
+        self._conversation_session.locked_agent_models = dict(resolved_agent_models)
+        self._conversation_session.locked_model_pin = model_pin or "auto"
         self.state.topology_id = selected_topology
         self.state.topology_label = topology_label
         self.state.topology_description = topology_description
         self.state.agent_complexity = agent_complexity
-        self.state.agent_models = agent_models
+        self.state.agent_models = resolved_agent_models
         self.state.agent_positions = agent_positions
         self.state.graph_view = graph_view
         self.state.routing = routing_payload
@@ -1289,7 +1531,7 @@ class GraphRuntime:
         self._persist_run_trace()
         self._persist_dashboard_snapshot()
         self._clear_dashboard_file_changes()
-        planning_init = self.current_init_event(session_id=self._conversation_session.session_id) | {"run_active": True}
+        planning_init = self.current_init_event(session_id=self._conversation_session.session_id)
         await self._broadcast(json.dumps(planning_init))
         self._run_task = asyncio.create_task(
             self._run_orchestrator(
@@ -1303,6 +1545,8 @@ class GraphRuntime:
                 trace_recorder=self._last_trace,
             )
         )
+        # PLANNING → RUNNING. The orchestrator task now owns the lifecycle.
+        self._fsm.fire("orchestrator_task_created")
         self._run_task.add_done_callback(
             lambda t: logger.error("Run task failed: %s", t.exception())
             if not t.cancelled() and t.exception() else None
@@ -1316,7 +1560,7 @@ class GraphRuntime:
         }
 
     async def stop_run(self) -> dict:
-        if self.running:
+        if self.is_run_in_flight:
             logger.info("run stop session=%s", self._conversation_session.session_id)
             if self._last_trace is not None:
                 self._last_trace.record_human_override(
@@ -1324,27 +1568,54 @@ class GraphRuntime:
                     message="run stopped by user",
                 )
                 self._persist_run_trace()
-            self._run_task.cancel()
-            self._persist_dashboard_snapshot(run_active=False)
-            await self._broadcast(json.dumps({"type": "stopped"}))
+            # PLANNING/RUNNING → STOPPING. The actual IDLE transition
+            # happens inside _run_orchestrator's CancelledError branch
+            # once the task unwinds.
+            # stop_requested fires an FSM transition which the listener
+            # turns into a `run_state_changed` broadcast — no need for a
+            # separate `{"type": "stopped"}` event. The CancelledError
+            # branch inside _run_orchestrator will fire stop_finished and
+            # drive the FSM back to IDLE.
+            self._fsm.maybe_fire("stop_requested")
+            if self._run_task is not None:
+                self._run_task.cancel()
+            self._persist_dashboard_snapshot()
             return {"ok": True}
         return {"ok": False, "error": "No run in progress"}
 
-    async def new_session(self) -> tuple[int, dict]:
-        if self.running:
+    async def new_session(self, *, workdir: str | None = None) -> tuple[int, dict]:
+        if self.is_run_in_flight:
             return 409, {"ok": False, "error": "Cannot start a new session while a run is in progress"}
+
+        resolved_workdir = ""
+        if workdir is not None and workdir.strip():
+            expanded = Path(workdir.strip()).expanduser()
+            if not expanded.exists() or not expanded.is_dir():
+                return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
+            # Store on the session; no process-level chdir so this daemon
+            # can host other sessions pointed at different folders.
+            resolved_workdir = str(expanded.resolve())
+
+        # COMPLETED/ERRORED → IDLE (IDLE → IDLE is a no-op). The FSM guard
+        # on ``session_reset`` rejects in-flight states; ``self.is_run_in_flight``
+        # above already short-circuits those, so this fire is safe.
+        self._fsm.maybe_fire("session_reset")
 
         self.state.reset()
         self._agents = {}
         self._last_result = None
-        self._conversation_session = ConversationSession()
+        self._conversation_session = ConversationSession(workdir=resolved_workdir)
         if not self._session_path_explicit:
             self._session_path = self._default_session_path(self._conversation_session.session_id)
         self._run_transcript = RunTranscript(session=self._conversation_session)
         self._persist_session()
         self._sync_session_state()
-        self._persist_dashboard_snapshot(run_active=False)
-        logger.info("session new session=%s", self._conversation_session.session_id)
+        self._persist_dashboard_snapshot()
+        logger.info(
+            "session new session=%s workdir=%s",
+            self._conversation_session.session_id,
+            resolved_workdir or "<cwd>",
+        )
         return 200, {
             "ok": True,
             "session_id": self._conversation_session.session_id,
@@ -1409,6 +1680,59 @@ class GraphRuntime:
             if result and not result.startswith("Consensus:") and result != "[shutdown]":
                 return agent_id, result
         return None, ""
+
+    def _manual_prediction(
+        self,
+        *,
+        topology: str,
+        agent_models: dict[str, str],
+        model_pin: str,
+    ) -> dict:
+        """Synthesize a topology-prediction payload for manual mode.
+
+        When the caller drives both the topology and the per-agent model
+        pins, we skip the classifier entirely. This returns the same shape
+        ``predict_topology`` would have produced so the rest of
+        ``start_run`` stays on one code path.
+        """
+        from orb.topologies import normalize_topology_id
+        topology_id = normalize_topology_id(topology)
+        topo = self._available_topologies().get(topology_id)
+        label = topo.label if topo else topology_id
+        description = topo.description if topo else ""
+        # Build the agent_assignments dict the runtime expects
+        agent_assignments: dict[str, dict] = {}
+        for role, model_id in (agent_models or {}).items():
+            if not role or not model_id:
+                continue
+            agent_assignments[str(role).strip()] = {
+                "provider": "",  # resolved later in _validate_agent_model_assignments
+                "model": str(model_id).strip(),
+            }
+        return {
+            "topology": topology_id,
+            "label": label,
+            "description": description,
+            "options": self._topology_options(topology_id),
+            "task_type": "manual",
+            "reason": "Manual mode — caller supplied topology and per-agent models.",
+            "summary": "Manual topology + model selection",
+            "signals": {"manual": True},
+            "candidates": [],
+            "escalation_allowed": False,
+            "stop_early_allowed": False,
+            "escalation_reason": "",
+            "stop_early_reason": "Manual run",
+            "requested_topology": topology_id,
+            "routing_mode": "manual",
+            "classifier_model": "",
+            "classifier_provider": "",
+            "complexity": 50,
+            "agent_complexity": {},
+            "agent_assignments": agent_assignments,
+            "agent_models": {role: data.get("model", "") for role, data in agent_assignments.items()},
+            "model_pin": model_pin,
+        }
 
     async def predict_topology(
         self,
@@ -1927,6 +2251,7 @@ class GraphRuntime:
             trace_recorder=trace_recorder,
             tier_override=self._tier_override,
             agent_model_map=agent_model_map or None,
+            workdir=self._conversation_session.workdir or None,
         )
         self._last_trace = trace_recorder
         self._last_trace.record_stage_start(
@@ -1959,7 +2284,7 @@ class GraphRuntime:
         if self._config:
             bridge.setup_budget(self._config.budget)
 
-        await self._broadcast(json.dumps(self.current_init_event() | {"run_active": True}))
+        await self._broadcast(json.dumps(self.current_init_event()))
         orchestrator.bus.on_event(bridge.on_message_routed)
         orchestrator.bus.on_event(lambda _event, msg: self._run_transcript.add_message(msg))
         orchestrator._transcript = self._run_transcript
@@ -2026,7 +2351,7 @@ class GraphRuntime:
                     content=content,
                     old_content=old_content,
                 )
-                asyncio.ensure_future(self._broadcast(json.dumps({
+                asyncio.create_task(self._broadcast(json.dumps({
                     "type": "file_write",
                     "agent": aid,
                     "path": path,
@@ -2062,11 +2387,24 @@ class GraphRuntime:
         try:
             run_target = initial_target if initial_target in orchestrator.agents else orchestrator.config.entry_agent
             result = await orchestrator.run(query, entry_agent=run_target)
+        except asyncio.CancelledError:
+            # stop_run() cancelled us; land the FSM in IDLE via stop_finished.
+            logger.info("Orchestrator run cancelled session=%s", self._conversation_session.session_id)
+            self._fsm.maybe_fire("stop_finished")
+            result = None
+            raise
         except Exception:
             logger.exception("Orchestrator run failed")
+            # `orchestrator_errored` is valid from both RUNNING and STOPPING
+            # (if a cancel race dropped us into STOPPING before the error
+            # surfaced), so maybe_fire covers both cases.
+            self._fsm.maybe_fire("orchestrator_errored")
             result = None
         else:
-            self.state.completed = True
+            # RUNNING → COMPLETED, or STOPPING → COMPLETED if the user
+            # requested stop after the task already finished naturally. The
+            # FSM transition table explicitly allows both.
+            self._fsm.maybe_fire("orchestrator_succeeded")
 
         new_carryover: dict[str, list] = {}
         for aid, agent in orchestrator.agents.items():
@@ -2102,12 +2440,12 @@ class GraphRuntime:
         if result:
             final_agent_id, final_result = self._pick_primary_result(result.completions)
             from orb.cli.diff_capture import capture_diff
-            diff = capture_diff()
+            diff = capture_diff(cwd=self._conversation_session.workdir or None)
             self.state.final_agent = final_agent_id or ""
             self.state.final_result = final_result or ""
             self.state.final_diff = diff or ""
             self.state.session_turn = self._conversation_session.user_turn_count()
-            self._persist_dashboard_snapshot(run_active=False)
+            self._persist_dashboard_snapshot()
             if final_result:
                 logger.info(
                     "run complete session=%s agent=%s elapsed=%.2fs routed=%s result=%s",
@@ -2137,5 +2475,5 @@ class GraphRuntime:
                 data={"completed": bool(result), "message_count": self.state.message_count},
             )
             self._persist_run_trace()
-        self._persist_dashboard_snapshot(run_active=False)
+        self._persist_dashboard_snapshot()
         self._last_result = result

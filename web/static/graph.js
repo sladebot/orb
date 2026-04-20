@@ -13,11 +13,11 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const NODE_W = 156;
-const NODE_H = 44;
-const CORE_NODE_W = 168;
-const CORE_NODE_H = 46;
-const NODE_RADIUS = 14;          // pill-chip corner radius
+const NODE_W = 124;
+const NODE_H = 32;
+const CORE_NODE_W = 134;
+const CORE_NODE_H = 34;
+const NODE_RADIUS = 10;          // v2 chip corner radius (smaller than legacy pill)
 const PARTICLE_DURATION = 900;   // ms
 
 const AGENT_COLORS = {
@@ -419,11 +419,12 @@ class GraphRenderer {
         const populatedRows = rows.filter((row) => Array.isArray(row) && row.some((item) => item?.node));
         if (!populatedRows.length) return false;
 
-        const laneTop = 72;
-        const laneBottom = H - 92;
+        const compact = H < 320;
+        const laneTop = compact ? Math.max(26, H * 0.14) : 72;
+        const laneBottom = H - (compact ? Math.max(22, H * 0.12) : 92);
         const rowGap = populatedRows.length === 1
             ? 0
-            : Math.max(116, Math.min(168, (laneBottom - laneTop) / Math.max(populatedRows.length - 1, 1)));
+            : Math.max(compact ? 48 : 116, Math.min(compact ? 88 : 168, (laneBottom - laneTop) / Math.max(populatedRows.length - 1, 1)));
         const top = populatedRows.length === 1 ? H * 0.46 : laneTop;
         const placed = new Set();
         this._layoutRows = [];
@@ -550,12 +551,19 @@ class GraphRenderer {
             }
         });
 
-        const top = 78;
-        const bottom = H - 88;
-        const usableHeight = Math.max(180, bottom - top);
+        // Scale vertical padding + row gap to fit the available canvas height.
+        // Small canvases (mobile, or a short desktop panel) need tighter spacing.
+        const compact = H < 320;
+        const topPad = compact ? Math.max(28, H * 0.16) : 78;
+        const botPad = compact ? Math.max(24, H * 0.14) : 88;
+        const top = topPad;
+        const bottom = H - botPad;
+        const usableHeight = Math.max(compact ? 80 : 180, bottom - top);
+        const rowGapMin = compact ? 52 : 124;
+        const rowGapMax = compact ? 96 : 176;
         const rowGap = layoutLines.length === 1
             ? 0
-            : Math.max(124, Math.min(176, usableHeight / Math.max(layoutLines.length - 1, 1)));
+            : Math.max(rowGapMin, Math.min(rowGapMax, usableHeight / Math.max(layoutLines.length - 1, 1)));
         this._layoutRows = [];
         this._layoutBands = [];
 
@@ -668,7 +676,7 @@ class GraphRenderer {
         ctx.save();
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'left';
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
 
         for (const item of items) {
             ctx.fillStyle = item.color;
@@ -867,7 +875,7 @@ class GraphRenderer {
         ctx.arc(x + 16, y + boxH / 2, 4.5, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.font = '700 11px "Space Grotesk", sans-serif';
+        ctx.font = '700 11px "Geist", ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = textColor || accent;
@@ -1001,40 +1009,21 @@ class GraphRenderer {
         ctx.stroke();
         ctx.restore();
 
-        // ── 3. Inside chip: [glyph] [name] [status dot] ──
-        const padX = 14;
-        const glyphColor = isLive
-            ? (isLight ? '#17202b' : '#e6edf7')
-            : (isLight ? '#41505f' : '#c4cbd6');
+        // ── 3. v2 chip contents: [status dot] [name] — no glyph, no caption ──
+        const padX = 12;
         const labelColor = isLive
             ? (isLight ? '#0d141d' : '#f0f4fa')
             : (isLight ? '#17202b' : '#c4ced9');
-
-        const glyphKey = glyphKeyFor(node.id, node.role);
-        const glyphCx = x + padX + 9;
-        const glyphCy = y + height / 2;
-        drawRoleGlyph(ctx, glyphCx, glyphCy, glyphColor, glyphKey);
-
-        const textLeft = glyphCx + 14;
-        const dotX = x + width - padX;
-        const textRight = dotX - 12;
-        const maxTextW = Math.max(40, textRight - textLeft);
-
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = labelColor;
-        ctx.font = isCore
-            ? '500 14px "Space Grotesk", sans-serif'
-            : '500 13px "Space Grotesk", sans-serif';
-        const labelText = this._truncate(ctx, node.role || node.id, maxTextW);
-        ctx.fillText(labelText, textLeft, y + height / 2);
-
-        // Status dot: role-colored on live (with glow), muted on idle
         const dotColor = isLive
             ? roleAccent
             : isDone
                 ? (isLight ? '#16a34a' : '#86d8ab')
                 : (isLight ? '#8796a7' : '#7a8499');
+
+        const dotRadius = 3 + pulse * 1;
+        const dotX = x + padX;
+        const dotY = y + height / 2;
+
         ctx.save();
         if (isLive) {
             ctx.shadowColor = roleAccent;
@@ -1043,42 +1032,32 @@ class GraphRenderer {
         ctx.fillStyle = dotColor;
         ctx.globalAlpha = isLive ? 1 : 0.55;
         ctx.beginPath();
-        ctx.arc(dotX, y + height / 2, 3.2 + pulse * 1.2, 0, Math.PI * 2);
+        ctx.arc(dotX, dotY, dotRadius, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
 
-        // ── 4. Caption line below chip: "ROLE_CAPTION · model" ──
-        const captionColor = isLive
-            ? (isLight ? '#5d6b7c' : '#a5b0bf')
-            : (isLight ? '#718295' : '#8796a7');
-        const caption = (this._roleCaption(node) || '').toUpperCase();
-        const modelLabel = node.model ? _shortModel(node.model) : 'pending';
-        ctx.save();
+        const textLeft = dotX + 8;
+        const textRight = x + width - padX;
+        const maxTextW = Math.max(32, textRight - textLeft);
+
         ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.font = '9px "JetBrains Mono", monospace';
-        ctx.fillStyle = captionColor;
-        const metaY = y + height + 8;
-        const dotSep = '  ·  ';
-        const captionTrack = 0.8;
-        const captionWidth = this._trackedWidth(ctx, caption, captionTrack);
-        const sepWidth = ctx.measureText(dotSep).width;
-        const modelWidth = ctx.measureText(modelLabel).width;
-        const totalMetaW = captionWidth + sepWidth + modelWidth;
-        let metaX = node.x - totalMetaW / 2;
-        this._fillTracked(ctx, caption, metaX, metaY, captionTrack);
-        metaX += captionWidth;
-        ctx.fillText(dotSep, metaX, metaY);
-        metaX += sepWidth;
-        ctx.fillStyle = isLive
-            ? (isLight ? '#41505f' : '#c4ced9')
-            : (isLight ? '#718295' : '#8796a7');
-        ctx.fillText(modelLabel, metaX, metaY);
-        ctx.restore();
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = labelColor;
+        ctx.font = isCore
+            ? '500 12px "Geist", ui-sans-serif, system-ui, sans-serif'
+            : '500 11px "Geist", ui-sans-serif, system-ui, sans-serif';
+        const labelText = this._truncate(ctx, this._displayName(node), maxTextW);
+        ctx.fillText(labelText, textLeft, y + height / 2);
 
         if (isSelected || isHovered) this._drawNodeLabel(ctx, node, isCore, isSelected, isHovered);
 
         ctx.restore();
+    }
+
+    _displayName(node) {
+        const raw = String(node.role || node.id || '');
+        if (!raw) return '';
+        return raw.charAt(0).toUpperCase() + raw.slice(1);
     }
 
     _roleCaption(node) {
@@ -1140,9 +1119,9 @@ class GraphRenderer {
         if (!detailVisible) return;
 
         ctx.save();
-        ctx.font = '700 12px "Space Grotesk", sans-serif';
+        ctx.font = '700 12px "Geist", ui-sans-serif, system-ui, sans-serif';
         const titleW = ctx.measureText(title).width;
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
         const subW = ctx.measureText(subtitle).width;
         const contentW = Math.max(titleW, subW);
         const padX = 12;
@@ -1179,12 +1158,12 @@ class GraphRenderer {
         ctx.stroke();
 
         ctx.fillStyle = this.theme === 'light' ? '#17202b' : '#ecf1f6';
-        ctx.font = '700 12px "Space Grotesk", sans-serif';
+        ctx.font = '700 12px "Geist", ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText(title, boxX + 12, boxY + 10);
 
-        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.font = '10px "Geist Mono", "JetBrains Mono", ui-monospace, monospace';
         ctx.fillStyle = this.theme === 'light' ? '#718295' : '#8796a7';
         let sub = subtitle;
         while (sub.length && ctx.measureText(sub).width > boxW - 24) sub = sub.slice(0, -1);
