@@ -347,7 +347,7 @@
 
                 <section class="sc-section">
                     <div class="sc-section-label">Workspace</div>
-                    <div class="sc-section-copy">Orb will <code>chdir</code> into this folder. File writes and tool calls will operate on it for the whole session.</div>
+                    <div class="sc-section-copy">The session is scoped to this folder — agents read, write, and run commands here (the daemon itself doesn't <code>chdir</code>, so concurrent sessions in other folders stay isolated).</div>
                     <div class="sc-row">
                         <input id="session-config-workdir" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/repo">
                         <button id="session-config-workdir-browse" class="v2-btn" type="button" title="Browse the daemon's filesystem">Browse…</button>
