@@ -103,7 +103,45 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             if not path.exists() or not path.is_dir():
                 return err("INVALID_WORKDIR", f"Workdir does not exist or is not a directory: {path}", status=400)
             workdir = str(path.resolve())
-        runtime = manager.create_session(workdir=workdir)
+
+        # Optional pre-warm: explicit topology + per-node models get
+        # pinned onto the session at creation time so the first /runs
+        # skips the classifier and the dashboard paints the graph
+        # immediately.
+        topology = (body.get("topology") or "").strip() or None
+        if topology:
+            from orb.topologies import get_loader, normalize_topology_id
+            normalized = normalize_topology_id(topology)
+            valid = {"auto", *get_loader().list_ids()}
+            if normalized not in valid:
+                return err(
+                    "INVALID_TOPOLOGY",
+                    f"topology must be one of: {', '.join(sorted(valid))}",
+                    status=400,
+                )
+            topology = normalized
+        raw_agent_models = body.get("agent_models") or {}
+        if raw_agent_models and not isinstance(raw_agent_models, dict):
+            return err("INVALID_AGENT_MODELS", "agent_models must be an object", status=400)
+        agent_models: dict[str, str] | None = {
+            str(r).strip(): str(m).strip()
+            for r, m in (raw_agent_models or {}).items()
+            if str(r).strip() and str(m).strip()
+        } or None
+        if agent_models and (not topology or topology == "auto"):
+            return err(
+                "INVALID_AGENT_MODELS",
+                "agent_models requires an explicit topology (not 'auto')",
+                status=400,
+            )
+        model_pin = (body.get("model") or body.get("model_pin") or "").strip() or None
+
+        runtime = manager.create_session(
+            workdir=workdir,
+            topology=topology,
+            agent_models=agent_models,
+            model_pin=model_pin,
+        )
         return ok("SESSION_CREATED", _session_summary(runtime), status=201)
 
     async def list_sessions(request: web.Request) -> web.Response:

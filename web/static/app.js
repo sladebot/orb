@@ -900,12 +900,23 @@ class Dashboard {
             this._fileChanges = new Map();
             this._workspaceFiles = [];
 
-            // v1 multi-tenant route: POST /api/v1/sessions. Response shape
-            // is the standard envelope {ok, code, data: {session_id,...}}.
+            // v1 multi-tenant route: POST /api/v1/sessions. Sends the
+            // picked topology + per-agent models so the daemon pre-warms
+            // the graph — first chat message goes straight to the pinned
+            // coordinator, no classifier pass. Only `auto` defers that
+            // decision to the first query.
+            const createBody = {};
+            if (workdir) createBody.workdir = workdir;
+            const scTopology = (this._sessionConfig || {}).topology;
+            if (scTopology && scTopology !== 'auto') {
+                createBody.topology = scTopology;
+                const picks = (this._sessionConfig || {}).agentModels || {};
+                if (Object.keys(picks).length) createBody.agent_models = picks;
+            }
             const res = await fetch('/api/v1/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(workdir ? { workdir } : {}),
+                body: JSON.stringify(createBody),
             });
             const envelope = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
             if (!envelope.ok) {

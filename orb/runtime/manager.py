@@ -92,12 +92,24 @@ class RuntimeManager:
         *,
         workdir: str | None = None,
         session_path: "Path | None" = None,
+        topology: str | None = None,
+        agent_models: dict[str, str] | None = None,
+        model_pin: str | None = None,
     ) -> GraphRuntime:
         """Spin up a new per-session runtime.
 
         If `workdir` is provided, the session's conversation is scoped to
         that folder — file writes and tool calls land there regardless of
         what CWD the daemon was launched from.
+
+        If `topology` is an explicit id (not "auto"), it's pinned onto
+        the conversation session immediately along with any supplied
+        `agent_models` and `model_pin`. The first `/runs` call then
+        skips the classifier via the lock-reuse path and spawns the
+        orchestrator directly into the pre-declared graph. The dashboard
+        paints the topology/agents immediately because the init event
+        synthesizes them from the topology spec even before the first
+        run.
 
         When ``session_path`` is omitted we allocate a fresh path under
         ``.orb/sessions/`` so concurrent sessions don't collide on a
@@ -132,9 +144,29 @@ class RuntimeManager:
         # Scope to workdir
         if workdir:
             runtime._conversation_session.workdir = workdir  # noqa: SLF001
+        # Pin topology + per-agent models onto the session so the first
+        # run goes straight through the graph without re-classifying.
+        if topology and topology != "auto":
+            from orb.topologies import normalize_topology_id, get_loader
+            normalized = normalize_topology_id(topology)
+            if normalized in get_loader().list_ids():
+                runtime._conversation_session.locked_topology = normalized  # noqa: SLF001
+                if agent_models:
+                    runtime._conversation_session.locked_agent_models = {  # noqa: SLF001
+                        str(r): str(m) for r, m in agent_models.items() if r and m
+                    }
+                if model_pin and model_pin != "auto":
+                    runtime._conversation_session.locked_model_pin = model_pin  # noqa: SLF001
+                # Paint the topology up-front on the dashboard state so the
+                # graph panel renders immediately, without waiting for the
+                # first run to populate `state.topology_*` / `state.agents`.
+                runtime._prewarm_topology_view(normalized)  # noqa: SLF001
         session_id = runtime._conversation_session.session_id  # noqa: SLF001
         self._sessions[session_id] = runtime
-        logger.info("session created id=%s workdir=%s", session_id, workdir or "<cwd>")
+        logger.info(
+            "session created id=%s workdir=%s topology=%s",
+            session_id, workdir or "<cwd>", topology or "auto",
+        )
         return runtime
 
     def get_session(self, session_id: str) -> GraphRuntime | None:

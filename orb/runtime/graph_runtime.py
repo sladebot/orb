@@ -229,6 +229,64 @@ class GraphRuntime:
     def last_result(self):
         return self._last_result
 
+    def _prewarm_topology_view(self, topology_id: str) -> None:
+        """Paint the topology + agent roster onto the dashboard state
+        BEFORE any run executes.
+
+        Called from ``RuntimeManager.create_session`` when the caller
+        pinned an explicit topology. The goal is for the dashboard
+        opening the session's WebSocket to see the topology graph
+        immediately — agents listed, edges drawn, status "idle" — so the
+        first user query feels like "I'm talking to the coordinator of a
+        ready graph", not "I'm triggering graph construction".
+
+        We only seed the shape (names, edges, positions, graph view).
+        No provider/LLM work happens here — the actual orchestrator is
+        built when ``start_run`` fires.
+        """
+        from orb.topologies import get_loader, normalize_topology_id
+        from web.state import AgentState, EdgeState
+
+        tid = normalize_topology_id(topology_id)
+        loader = get_loader()
+        topo = loader.get(tid)
+        if topo is None:
+            return
+        label, description, positions = self._topology_meta(tid)
+        graph_view = self._topology_graph_view(tid)
+
+        # Agents — one entry per topology node with the role label
+        # from the schema. Pinned models come from the session lock if
+        # the caller supplied them.
+        locked_models = self._conversation_session.locked_agent_models or {}
+        agents: dict[str, AgentState] = {}
+        for agent_id, agent_schema in topo.agents.items():
+            agents[agent_id] = AgentState(
+                node_id=agent_id,
+                role=agent_schema.role,
+                status="idle",
+                model=locked_models.get(agent_id, ""),
+                msg_count=0,
+                complexity=agent_schema.base_complexity,
+                last_heartbeat=0.0,
+            )
+        self.state.agents = agents
+        self.state.edges = [EdgeState(source=a, target=b) for a, b in (topo.edges or [])]
+        self.state.topology_id = tid
+        self.state.topology_label = label
+        self.state.topology_description = description
+        self.state.agent_positions = positions
+        self.state.agent_models = dict(locked_models)
+        self.state.agent_complexity = {
+            aid: schema.base_complexity for aid, schema in topo.agents.items()
+        }
+        self.state.graph_view = graph_view
+        # Persist so a reconnecting WebSocket picks it up from the snapshot.
+        try:
+            self._persist_dashboard_snapshot()
+        except Exception:  # noqa: BLE001
+            logger.debug("prewarm snapshot persist failed (non-fatal)")
+
     def subscribe(self, callback: BroadcastFn) -> None:
         self._subscribers.add(callback)
 
