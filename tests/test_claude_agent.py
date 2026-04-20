@@ -197,6 +197,49 @@ class TestLLMAgent:
 
         assert agent_a.status == AgentStatus.WAITING
 
+    async def test_send_to_user_preserves_full_question_in_details(self):
+        """The user-facing question must not be truncated before reaching the UI.
+
+        Regression: the activity string was capped at 120 chars, so long
+        clarification questions got sliced mid-sentence in the dashboard banner.
+        """
+        long_question = (
+            "The coder is ready to implement the calculator CLI but needs "
+            "clarification: what target language or framework would you like "
+            "to use for the project, and should it include unit tests?"
+        )
+        assert len(long_question) > 120
+
+        mock = MockLLMClient([
+            CompletionResponse(
+                content="",
+                model="mock",
+                tool_calls=[ToolCall(
+                    id="tc1",
+                    name="send_message",
+                    input={"to": "user", "content": long_question},
+                )],
+            ),
+        ])
+        agent_a, *_ = _build_two_agent_setup(mock)
+
+        captured: list[tuple[str, str, dict]] = []
+
+        async def on_activity(agent_id, activity, details):
+            captured.append((agent_id, activity, dict(details or {})))
+
+        agent_a._on_activity = on_activity
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="Build app")
+        await agent_a.process(msg)
+
+        waiting = [c for c in captured if c[1].startswith("⏳ Waiting for user")]
+        assert waiting, "agent never emitted a 'Waiting for user' activity"
+        _, _activity, details = waiting[0]
+        assert details.get("full_content") == long_question, (
+            f"full question must be preserved in details.full_content; got {details!r}"
+        )
+
     async def test_model_request_includes_shared_transcript_context(self):
         mock = MockLLMClient([
             CompletionResponse(

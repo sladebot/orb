@@ -1820,6 +1820,7 @@ class OrbTUI(App[None]):
     def _on_server_agent_activity(self, data: dict) -> None:
         aid  = data.get("agent", "")
         text = data.get("activity", "")
+        details = data.get("details") or {}
         if aid in self._agents:
             self._agents[aid].activity_text = text
         self.query_one("#graph-panel", GraphPanel).bump()
@@ -1827,13 +1828,15 @@ class OrbTUI(App[None]):
             self._update_detail_header()
 
         if text.startswith("⏳ Waiting for user"):
+            full = details.get("full_content") if isinstance(details, dict) else None
+            question = str(full) if isinstance(full, str) and full else text
             self._awaiting_user = aid
-            self._awaiting_user_question = text
+            self._awaiting_user_question = question
             self._record_timeline_entry(TimelineEntry(
                 kind="question",
                 elapsed=self._last_elapsed,
                 title=f"{AGENT_LABELS.get(aid, aid)} needs input",
-                summary=text,
+                summary=question,
                 body="Reply in the composer below. Only this node is waiting.",
                 agent_id=aid,
             ))
@@ -1842,7 +1845,7 @@ class OrbTUI(App[None]):
             ta.add_class("user-reply-mode")
             ta.remove_class("inject-mode")
             ta.focus()
-            self._show_question_banner(aid, text)
+            self._show_question_banner(aid, question)
             self.action_select(aid)
         elif text == "" and self._awaiting_user == aid:
             self._awaiting_user = None

@@ -349,6 +349,24 @@ class TestTuiEventHandler:
         tui._mock_qbanner.add_class.assert_called_once_with("visible")
         tui._mock_qbanner_body.update.assert_called_once()
 
+    def test_agent_activity_waiting_prefers_full_content_from_details(self):
+        """When details.full_content is present, use it instead of the truncated activity."""
+        tui = _make_tui()
+        tui._agents = {"coder": AgentInfo("coder", "Coder")}
+        long_q = (
+            "The coder is ready to implement the calculator CLI but needs "
+            "clarification: what target language or framework would you like "
+            "to use, and should it include unit tests?"
+        )
+        tui._handle_server_event({
+            "type": "agent_activity",
+            "agent": "coder",
+            "activity": f"⏳ Waiting for user: {long_q[:240]}",
+            "details": {"full_content": long_q},
+        })
+        assert tui._awaiting_user == "coder"
+        assert tui._awaiting_user_question == long_q
+
     def test_agent_activity_empty_clears_awaiting_user(self):
         tui = _make_tui()
         tui._agents = {"coder": AgentInfo("coder", "Coder")}

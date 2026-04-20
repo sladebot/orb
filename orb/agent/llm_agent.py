@@ -503,7 +503,13 @@ class LLMAgent(AgentNode):
         # triggering completion.  The agent stays RUNNING and waits for an injected reply.
         if to == "user":
             self.status = AgentStatus.WAITING
-            await self._emit(f"⏳ Waiting for user: {content[:120]}")
+            # Keep the activity string compact for status-line consumers, but
+            # pass the full question via details so the question banner can
+            # render it without truncation.
+            await self._emit(
+                f"⏳ Waiting for user: {content[:240]}",
+                details={"full_content": content},
+            )
             # Emit a bus-style event so the dashboard displays this message in the feed
             user_msg = original.reply(
                 from_=self.node_id,

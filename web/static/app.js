@@ -3958,17 +3958,20 @@ class Dashboard {
         });
 
         if (typeof activity === 'string' && activity.startsWith('⏳ Waiting for user')) {
+            const full = data.details && typeof data.details.full_content === 'string'
+                ? data.details.full_content
+                : activity.replace(/^⏳ Waiting for user:\s*/, '');
             this._addMessageEntry({
                 from: agent,
                 to: 'user',
-                content: activity,
+                content: full,
                 elapsed: 0,
                 model: '',
                 depth: 0,
                 msg_type: 'question',
                 context_slice: [],
             });
-            this._showQuestion(agent, activity);
+            this._showQuestion(agent, full);
         } else if (!activity && this._questionAgent === agent) {
             document.getElementById('question-panel').classList.add('hidden');
             this._questionAgent = null;
