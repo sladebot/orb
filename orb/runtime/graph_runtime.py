@@ -294,8 +294,21 @@ class GraphRuntime:
         self._subscribers.discard(callback)
 
     async def _broadcast(self, data: str) -> None:
+        # Tag every payload with this session's id so multi-tenant clients
+        # can filter. The DashboardBridge sends minimal events that don't
+        # carry session_id themselves — injecting here keeps every hop
+        # downstream (manager → server → WS) addressable by session.
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict) and "session_id" not in parsed:
+                parsed["session_id"] = self._conversation_session.session_id
+                data = json.dumps(parsed)
+        except (ValueError, TypeError):
+            pass
         stale: list[BroadcastFn] = []
-        for callback in self._subscribers:
+        # Snapshot: a subscriber callback may (un)subscribe mid-broadcast,
+        # which would otherwise raise "Set changed size during iteration".
+        for callback in list(self._subscribers):
             try:
                 await callback(data)
             except Exception:
@@ -760,7 +773,7 @@ class GraphRuntime:
         }
 
     def _dashboard_sessions_dir(self) -> Path:
-        return Path.home() / ".orb" / "sessions"
+        return self._workspace_state_dir() / "sessions"
 
     def _dashboard_session_path(self, session_id: str | None = None) -> Path:
         return self._dashboard_sessions_dir() / f"{session_id or self._conversation_session.session_id}.json"
@@ -2338,7 +2351,7 @@ class GraphRuntime:
                     content=content,
                     old_content=old_content,
                 )
-                asyncio.ensure_future(self._broadcast(json.dumps({
+                asyncio.create_task(self._broadcast(json.dumps({
                     "type": "file_write",
                     "agent": aid,
                     "path": path,
@@ -2427,7 +2440,7 @@ class GraphRuntime:
         if result:
             final_agent_id, final_result = self._pick_primary_result(result.completions)
             from orb.cli.diff_capture import capture_diff
-            diff = capture_diff()
+            diff = capture_diff(cwd=self._conversation_session.workdir or None)
             self.state.final_agent = final_agent_id or ""
             self.state.final_result = final_result or ""
             self.state.final_diff = diff or ""

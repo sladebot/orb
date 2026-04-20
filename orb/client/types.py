@@ -104,7 +104,16 @@ class Event:
 
     @property
     def is_terminal(self) -> bool:
-        """True for run_state_changed events that land on a terminal state."""
+        """True for run_state_changed events that mark the end of a run.
+
+        Deliberately excludes ``idle`` — the FSM emits idle both as the
+        resting pre-run state and as the post-stop recovery state, so a
+        stale idle event from a prior transition would falsely unblock
+        :meth:`OrbSession.wait_for_terminal` on a fresh run. Only
+        ``completed`` and ``errored`` unambiguously mean "this run is
+        done"; the stop → idle case is handled explicitly by
+        :meth:`OrbSession.wait_for_terminal`.
+        """
         if self.type != "run_state_changed":
             return False
-        return self.to in {"completed", "errored", "idle"}
+        return self.to in {"completed", "errored"}

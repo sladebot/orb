@@ -8,6 +8,7 @@ same SDK talks to the daemon correctly.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from orb.client import OrbClient, OrbSession
 from orb.client.client import OrbAPIError
-from orb.client.types import SessionSummary
+from orb.client.types import Event, SessionSummary
 from web.server import DashboardServer
 from web.state import DashboardState
 
@@ -143,3 +144,166 @@ class TestSessionState:
         runtime._fsm.fire("start_run_begin")  # noqa: SLF001
         summary = await session.refresh()
         assert summary.run_state == "planning"
+
+
+class TestEventIsTerminal:
+    """`Event.is_terminal` must not flag the resting `idle` state as terminal.
+
+    Otherwise ``wait_for_terminal`` returns on a stale pre-run idle event
+    instead of the actual completion/error event.
+    """
+
+    def test_idle_is_not_terminal(self):
+        ev = Event.from_payload({
+            "type": "run_state_changed",
+            "session_id": "s",
+            "to": "idle",
+            "from": "stopping",
+            "event": "stop_finished",
+        })
+        assert ev.is_terminal is False
+
+    def test_completed_is_terminal(self):
+        ev = Event.from_payload({
+            "type": "run_state_changed",
+            "session_id": "s",
+            "to": "completed",
+            "from": "running",
+            "event": "orchestrator_succeeded",
+        })
+        assert ev.is_terminal is True
+
+    def test_errored_is_terminal(self):
+        ev = Event.from_payload({
+            "type": "run_state_changed",
+            "session_id": "s",
+            "to": "errored",
+            "from": "running",
+            "event": "orchestrator_errored",
+        })
+        assert ev.is_terminal is True
+
+    def test_non_run_state_event_is_not_terminal(self):
+        ev = Event.from_payload({"type": "message", "session_id": "s"})
+        assert ev.is_terminal is False
+
+
+@pytest.mark.asyncio
+class TestWaitForTerminal:
+    """`wait_for_terminal` must block through a fresh idle → running →
+    completed cycle and only return on the true terminal event.
+    """
+
+    async def test_blocks_past_initial_idle_until_completed(self, tmp_path: Path):
+        """Simulate an event stream: idle → running → completed.
+
+        The stale ``idle`` must not unblock the waiter — only ``completed``
+        should.
+        """
+
+        async def fake_stream(self):  # noqa: ARG001 — method stub
+            yield Event.from_payload({
+                "type": "run_state_changed",
+                "session_id": "s",
+                "from": "stopping",
+                "to": "idle",
+                "event": "stop_finished",
+            })
+            yield Event.from_payload({
+                "type": "run_state_changed",
+                "session_id": "s",
+                "from": "planning",
+                "to": "running",
+                "event": "orchestrator_task_created",
+            })
+            yield Event.from_payload({
+                "type": "run_state_changed",
+                "session_id": "s",
+                "from": "running",
+                "to": "completed",
+                "event": "orchestrator_succeeded",
+            })
+
+        session = OrbSession.__new__(OrbSession)
+        session._client = None  # noqa: SLF001
+        session._summary = SessionSummary(  # noqa: SLF001
+            session_id="s",
+            generation=1,
+            workdir=str(tmp_path),
+            run_state="running",
+            turn=0,
+        )
+        with patch.object(OrbSession, "stream_events", fake_stream):
+            event = await session.wait_for_terminal()
+        assert event.to == "completed"
+
+    async def test_returns_immediately_when_already_idle(self, tmp_path: Path):
+        """If the session is at rest (idle/completed/errored) when the
+        caller waits, return at once without consuming the stream.
+        """
+        session = OrbSession.__new__(OrbSession)
+        session._client = None  # noqa: SLF001
+        session._summary = SessionSummary(  # noqa: SLF001
+            session_id="s",
+            generation=1,
+            workdir=str(tmp_path),
+            run_state="idle",
+            turn=0,
+        )
+
+        async def fake_stream(self):  # noqa: ARG001
+            raise AssertionError("stream_events must not be consumed when already at rest")
+            yield  # pragma: no cover
+
+        with patch.object(OrbSession, "stream_events", fake_stream):
+            event = await session.wait_for_terminal()
+        assert event.to == "idle"
+
+
+@pytest.mark.asyncio
+class TestRequestNullDataHandling:
+    """`OrbClient._request` must not coerce an explicit ``null`` data
+    payload into ``{}``. Endpoints that contract to return data should
+    raise; endpoints that return nothing (delete/stop) tolerate ``None``.
+    """
+
+    async def test_create_session_with_null_data_raises(self, tmp_path: Path):
+        """A malformed envelope (`{ok: true, data: null}`) from
+        ``create_session`` must raise rather than produce a summary with
+        an empty ``session_id`` (which would 404 every subsequent call).
+        """
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "data": None})
+
+        client = OrbClient("http://localhost:1337")
+        client._http = httpx.AsyncClient(  # noqa: SLF001
+            transport=httpx.MockTransport(handler),
+            base_url="http://localhost:1337",
+        )
+        try:
+            with pytest.raises(OrbAPIError) as exc:
+                await client.create_session(workdir=str(tmp_path))
+            assert exc.value.code == "EMPTY_DATA"
+        finally:
+            await client.close()
+
+    async def test_delete_session_with_null_data_succeeds(self):
+        """``delete_session`` legitimately returns nothing; a null-data
+        envelope must be treated as a success, not an error.
+        """
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "data": None})
+
+        client = OrbClient("http://localhost:1337")
+        client._http = httpx.AsyncClient(  # noqa: SLF001
+            transport=httpx.MockTransport(handler),
+            base_url="http://localhost:1337",
+        )
+        try:
+            await client.delete_session("s")  # must not raise
+        finally:
+            await client.close()

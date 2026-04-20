@@ -27,6 +27,28 @@ async def client(tmp_path: Path):
 
 
 class TestManagerPrewarm:
+    def test_create_session_with_workdir_surfaces_in_init_event(self, tmp_path: Path):
+        """The first /state fetch after a prewarmed session creation must
+        include the workdir at the top-level + plan — the dashboard reads
+        ``data.workdir`` / ``data.plan.workdir`` and falls back to ``—``
+        when both are empty. Regression for "picked folder not showing up
+        in the UI".
+        """
+        workdir = tmp_path / "proj"
+        workdir.mkdir()
+        mgr = RuntimeManager()
+        session = mgr.create_session(
+            workdir=str(workdir),
+            session_path=tmp_path / "a.json",
+            topology="triad",
+        )
+        init = session.current_init_event(
+            session_id=session._conversation_session.session_id  # noqa: SLF001
+        )
+        assert init.get("workdir") == str(workdir)
+        assert (init.get("plan") or {}).get("workdir") == str(workdir)
+        assert (init.get("session") or {}).get("workdir") == str(workdir)
+
     def test_create_session_with_triad_pins_topology(self, tmp_path: Path):
         mgr = RuntimeManager()
         session = mgr.create_session(

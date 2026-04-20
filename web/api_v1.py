@@ -54,7 +54,13 @@ def err(code: str, message: str, *, status: int = 400) -> web.Response:
 
 
 def _get_session(manager: "RuntimeManager", session_id: str) -> "GraphRuntime | None":
-    return manager.get_session(session_id)
+    # Prefer live registry; fall back to restoring from the persisted
+    # daemon registry so a page refresh after a daemon restart transparently
+    # resurrects the user's session instead of blanking the dashboard.
+    runtime = manager.get_session(session_id)
+    if runtime is not None:
+        return runtime
+    return manager.try_restore(session_id)
 
 
 def _session_summary(runtime: "GraphRuntime") -> dict:
@@ -277,13 +283,31 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
         filter_session = request.rel_url.query.get("session_id") or None
+        # Try to resurrect stale session_ids from the on-disk registry so a
+        # page refresh after a daemon restart doesn't blank the dashboard.
+        # Only send SESSION_NOT_FOUND when the id really has no backing
+        # snapshot — that's the "your session was permanently deleted" case.
+        if filter_session and manager.get_session(filter_session) is None:
+            if manager.try_restore(filter_session) is None:
+                import json as _json
+                try:
+                    await ws.send_str(_json.dumps({
+                        "type": "error",
+                        "code": "SESSION_NOT_FOUND",
+                        "session_id": filter_session,
+                    }))
+                except (ConnectionResetError, RuntimeError):
+                    pass
+                await ws.close(code=4404, message=b"session not found")
+                return ws
         server._clients[ws] = filter_session  # noqa: SLF001
         try:
-            # Snapshot of the requested session (or the most recent one)
+            # Snapshot: either the filtered session, or (when no filter was
+            # given) the most recent session for the legacy no-filter caller.
             target_session: "GraphRuntime | None" = None
             if filter_session:
                 target_session = manager.get_session(filter_session)
-            if target_session is None:
+            else:
                 sessions = manager.list_sessions()
                 target_session = sessions[-1] if sessions else None
             if target_session is not None:
@@ -326,10 +350,25 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
     async def predict_topology(request: web.Request) -> web.Response:
         q = request.rel_url.query.get("q", "").strip()
         model_pin = request.rel_url.query.get("model", "auto").strip()
-        # Any live session can answer (they all share the manager's providers)
+        # Any live session can answer (they all share the manager's providers).
+        # When no sessions exist yet, synthesize a throwaway GraphRuntime
+        # instead of calling manager.create_session() — otherwise every
+        # /predict-topology call would leak a session into the registry.
+        # Mirrors the bootstrap pattern used by manager.models_payload() and
+        # manager.settings_payload().
         session = next(iter(manager.list_sessions()), None)
         if session is None:
-            session = manager.create_session()
+            from orb.runtime.graph_runtime import GraphRuntime
+            session = GraphRuntime(session_path=None)
+            if manager._providers:  # noqa: SLF001
+                session.configure(
+                    manager._all_providers,  # noqa: SLF001
+                    manager._config,  # noqa: SLF001
+                    manager._model_overrides,  # noqa: SLF001
+                    manager._tier_override,  # noqa: SLF001
+                )
+            if manager._topology_classifier is not None:  # noqa: SLF001
+                session.set_topology_classifier(manager._topology_classifier)  # noqa: SLF001
         prediction = await session.predict_topology(q, model_pin=model_pin)
         return ok("TOPOLOGY_PREDICTED", prediction)
 
@@ -389,6 +428,34 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         path = Path(raw).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             return err("INVALID_PATH", f"Not a directory: {path}", status=400)
+        # Scope: the dashboard's repo-changes panel should only enumerate
+        # folders under the user's home OR a path already registered as a
+        # session workdir. This prevents callers from walking /etc, ~/.ssh
+        # (unless the user explicitly put a session there), and similar.
+        allowed_roots: list[Path] = [Path.home().resolve()]
+        for rt in manager.list_sessions():
+            wd = getattr(rt._conversation_session, "workdir", None)  # noqa: SLF001
+            if wd:
+                try:
+                    allowed_roots.append(Path(wd).expanduser().resolve())
+                except (OSError, ValueError):
+                    continue
+
+        def _within(p: Path, roots: list[Path]) -> bool:
+            for root in roots:
+                try:
+                    p.relative_to(root)
+                    return True
+                except ValueError:
+                    continue
+            return False
+
+        if not _within(path, allowed_roots):
+            return err(
+                "PATH_OUT_OF_SCOPE",
+                "path must be under $HOME or an existing session workdir",
+                status=400,
+            )
         limit = 800
         files: list[str] = []
         used_git = False
@@ -434,9 +501,21 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         if not workdir.exists() or not workdir.is_dir():
             return err("INVALID_WORKDIR", f"Not a directory: {workdir}", status=400)
         try:
-            target = (workdir / rel_raw).resolve(strict=False)
+            # strict=True forces .resolve() to error on missing components,
+            # which means broken or escaping symlinks are caught here rather
+            # than slipping past .relative_to(). See fs_read_handler in
+            # server.py for the matching rationale.
+            target = (workdir / rel_raw).resolve(strict=True)
             target.relative_to(workdir)
-        except (OSError, ValueError):
+        except (OSError, ValueError, FileNotFoundError):
+            return err("INVALID_PATH", "path escapes workdir", status=400)
+        # Re-check against os.path.realpath so any late symlink resolution
+        # (TOCTOU or path-component games) still gets rejected.
+        import os as _os
+        real = Path(_os.path.realpath(str(target)))
+        try:
+            real.relative_to(workdir)
+        except ValueError:
             return err("INVALID_PATH", "path escapes workdir", status=400)
         if not target.exists() or not target.is_file():
             return err("FILE_NOT_FOUND", "not a file", status=404)

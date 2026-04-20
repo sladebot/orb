@@ -167,6 +167,58 @@ class TestBroadcastIsolation:
         await asyncio.sleep(0)
         assert len(received) == pre_delete
 
+    async def test_runtime_broadcast_tags_payload_with_session_id(
+        self, manager: RuntimeManager, tmp_path: Path
+    ):
+        """Every GraphRuntime._broadcast payload must carry session_id so
+        DashboardServer.broadcast can filter per-client correctly. Without
+        this tag the server would fall back to the default session's id and
+        drop events destined for other sessions — the "dashboard blank on
+        chat" regression.
+        """
+        a = manager.create_session(session_path=tmp_path / "a.json")
+        captured: list[dict] = []
+
+        async def collect(data: str) -> None:
+            captured.append(json.loads(data))
+
+        manager.subscribe(collect)
+        await a._broadcast(json.dumps({"type": "message", "content": "hi"}))  # noqa: SLF001
+        assert captured
+        assert captured[-1]["session_id"] == a._conversation_session.session_id  # noqa: SLF001
+
+    async def test_server_broadcast_filters_per_client_session(
+        self, multi_session_server
+    ):
+        """WebSocket clients registered with a session_id filter must
+        receive payloads tagged with that session_id and be dropped for
+        payloads tagged with any other. A ``None`` filter gets everything.
+        """
+        _, server, sessions, _ = multi_session_server
+        a, b, _ = sessions
+        sid_a = a._conversation_session.session_id  # noqa: SLF001
+        sid_b = b._conversation_session.session_id  # noqa: SLF001
+
+        class FakeWS:
+            def __init__(self):
+                self.sent: list[str] = []
+            async def send_str(self, data: str) -> None:
+                self.sent.append(data)
+
+        ws_a, ws_b, ws_any = FakeWS(), FakeWS(), FakeWS()
+        server._clients[ws_a] = sid_a  # noqa: SLF001
+        server._clients[ws_b] = sid_b  # noqa: SLF001
+        server._clients[ws_any] = None  # noqa: SLF001
+
+        await server.broadcast(json.dumps({"type": "message", "session_id": sid_a}))
+        await server.broadcast(json.dumps({"type": "message", "session_id": sid_b}))
+        # Untagged payloads (e.g. topologies_reloaded) go to everyone
+        await server.broadcast(json.dumps({"type": "topologies_reloaded"}))
+
+        assert len(ws_a.sent) == 2  # sid_a + untagged
+        assert len(ws_b.sent) == 2  # sid_b + untagged
+        assert len(ws_any.sent) == 3
+
 
 # ── HTTP-layer isolation ─────────────────────────────────────────────────
 
@@ -275,3 +327,94 @@ class TestWorkdirIsolation:
         a = manager.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
         a._sync_session_state()  # noqa: SLF001
         assert a.state.workdir == str(dir_a)
+
+    def test_dashboard_sessions_dir_follows_workdir(self, manager: RuntimeManager, tmp_path: Path):
+        """Two sessions in different workdirs must write snapshots to different dirs.
+
+        Regression: `_dashboard_sessions_dir` used to hardcode
+        `~/.orb/sessions`, so sessions with colliding uuids across repos
+        clobbered each other's snapshots on disk.
+        """
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        a = manager.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
+        b = manager.create_session(workdir=str(dir_b), session_path=tmp_path / "b.json")
+        assert str(a._dashboard_sessions_dir()) == str(dir_a / ".orb" / "sessions")  # noqa: SLF001
+        assert str(b._dashboard_sessions_dir()) == str(dir_b / ".orb" / "sessions")  # noqa: SLF001
+        assert a._dashboard_sessions_dir() != b._dashboard_sessions_dir()  # noqa: SLF001
+
+
+# ── Diff capture isolation ───────────────────────────────────────────────
+
+
+class TestCaptureDiffIsolation:
+    def test_run_orchestrator_passes_session_workdir_to_capture_diff(self):
+        """The call site in `_run_orchestrator` must pass the session's
+        workdir to `capture_diff`. A pure source-level check is enough —
+        driving the full orchestrator would require standing up providers
+        and a topology.
+
+        Regression: the old call was `capture_diff()` with no args, so in
+        a multi-tenant daemon every session's run-complete diff came from
+        the daemon's launch CWD regardless of which repo the session was
+        actually scoped to.
+        """
+        import inspect
+        from orb.runtime import graph_runtime as gr
+
+        src = inspect.getsource(gr.GraphRuntime._run_orchestrator)
+        # The fix: capture_diff must be called with the conversation
+        # session's workdir, not bare.
+        assert "capture_diff(cwd=self._conversation_session.workdir or None)" in src, (
+            "expected capture_diff to receive the session's workdir; "
+            "found source:\n" + src
+        )
+
+
+# ── Subscriber mutation during broadcast ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestSubscriberMutationSafety:
+    async def test_runtime_broadcast_survives_concurrent_subscribe(
+        self, manager: RuntimeManager, tmp_path: Path
+    ):
+        """If a subscriber callback triggers another subscribe/unsubscribe
+        mid-iteration, `_broadcast` must not raise
+        `RuntimeError: Set changed size during iteration`.
+        """
+        a = manager.create_session(session_path=tmp_path / "a.json")
+
+        async def mutator(_data: str) -> None:
+            async def noop(_d: str) -> None:
+                return None
+            a.subscribe(noop)  # noqa: SLF001
+
+        async def noop(_data: str) -> None:
+            return None
+
+        a.subscribe(mutator)  # noqa: SLF001
+        a.subscribe(noop)  # noqa: SLF001
+        # Must not raise
+        await a._broadcast(json.dumps({"type": "ping"}))  # noqa: SLF001
+
+    async def test_manager_forward_broadcast_survives_concurrent_subscribe(
+        self, manager: RuntimeManager, tmp_path: Path
+    ):
+        """Same contract at the manager layer: `_forward_broadcast`'s
+        iteration must snapshot its subscribers.
+        """
+        a = manager.create_session(session_path=tmp_path / "a.json")
+
+        async def mutator(_data: str) -> None:
+            async def noop(_d: str) -> None:
+                return None
+            manager.subscribe(noop)
+
+        async def noop(_data: str) -> None:
+            return None
+
+        manager.subscribe(mutator)
+        manager.subscribe(noop)
+        # Must not raise
+        await manager._forward_broadcast(json.dumps({"type": "ping"}))  # noqa: SLF001

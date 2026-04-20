@@ -175,6 +175,9 @@ class Dashboard {
         document.getElementById('trace-admin-close')?.addEventListener('click', () => this._closeTraceAdmin());
         document.getElementById('trace-admin-backdrop')?.addEventListener('click', () => this._closeTraceAdmin());
 
+        this._modalPriorFocus = new WeakMap();
+        document.addEventListener('keydown', (e) => this._handleGlobalKeydown(e));
+
         // Node detail panel
         document.getElementById('ndp-close').addEventListener('click', () => this._hideNodePanel());
         document.getElementById('ndp-chat-send').addEventListener('click', () => this._sendNdpMessage());
@@ -250,7 +253,19 @@ class Dashboard {
 
     // ── WebSocket ─────────────────────────────────────────────
 
+    async _fetchHomeDir() {
+        // Stashes the user's home dir so workdir labels can be tildified
+        // (``/Users/alice/projects/orb`` → ``~/projects/orb``) the first
+        // time we render a workdir, without waiting for the FS picker.
+        try {
+            const res = await fetch('/api/v1/fs/list');
+            const data = await unwrapEnvelope(res);
+            if (data && data.ok && data.home) this._homeDir = data.home;
+        } catch { /* best-effort; fallback is the absolute path */ }
+    }
+
     _connect() {
+        if (!this._homeDir) this._fetchHomeDir();
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const sessionId = new URL(window.location.href).searchParams.get('session');
         // v1 WebSocket: multiplexed /api/v1/ws with optional session filter.
@@ -275,6 +290,17 @@ class Dashboard {
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
+            if (data && data.type === 'error' && data.code === 'SESSION_NOT_FOUND') {
+                // Stale session in URL (daemon restart wiped it + no disk snapshot).
+                // Strip the ?session=... and let the next reconnect attach to
+                // the most-recent session instead of looping on the dead id.
+                const url = new URL(window.location.href);
+                url.searchParams.delete('session');
+                window.history.replaceState({}, '', url.toString());
+                this._wsSessionId = '';
+                this.ws.close();
+                return;
+            }
             this._handleEvent(data);
         };
     }
@@ -552,6 +578,7 @@ class Dashboard {
             }
             this._fsCurrentPath = data.path;
             this._fsParentPath = data.parent || '';
+            if (data.home) this._homeDir = data.home;
             if (pathEl) {
                 pathEl.textContent = data.path;
                 pathEl.title = data.path;
@@ -704,6 +731,7 @@ class Dashboard {
     async _openSessionConfig() {
         const modal = document.getElementById('session-config-modal');
         if (!modal) return;
+        this._rememberModalFocus(modal);
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
 
@@ -712,6 +740,8 @@ class Dashboard {
         if (workdirInput) {
             workdirInput.value = this._sessionLock.workdir || this._sessionConfig.workdir || '';
             workdirInput.focus();
+        } else {
+            this._focusFirstInModal(modal);
         }
 
         // Ensure topology + model catalogs are cached, then render
@@ -770,6 +800,7 @@ class Dashboard {
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
         window.localStorage.setItem('orb:session-modal-dismissed', '1');
+        this._restoreModalFocus(modal);
     }
 
     async _ensureTopologyList() {
@@ -995,8 +1026,9 @@ class Dashboard {
     }
 
     async _requestStopRun() {
+        if (!this._wsSessionId) return;
         try {
-            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/stop` : '/api/stop', { method: 'POST' });
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/stop`, { method: 'POST' });
         } catch (err) { /* ignore */ }
     }
 
@@ -1676,6 +1708,7 @@ class Dashboard {
     _updateWorkdir(workdir, sessionId = '', generation = 1, sessionTurn = 0) {
         const workdirEl = document.getElementById('workdir-banner');
         const composerWorkdirEl = document.getElementById('composer-workdir');
+        const repoWorkdirEl = document.getElementById('repo-workdir');
         const sessionEl = document.getElementById('session-id-banner');
         const generationEl = document.getElementById('session-generation-banner');
         const turnEl = document.getElementById('session-turn-banner');
@@ -1686,13 +1719,31 @@ class Dashboard {
 
         const workspaceName = workdir ? workdir.split('/').filter(Boolean).pop() || workdir : '—';
         const shortSession = sessionId ? sessionId.slice(0, 8) : '—';
+        // Tildified full path: `/Users/alice/projects/orb` → `~/projects/orb`.
+        // Keeps the visible string short enough to fit the hero card while
+        // still surfacing the absolute location of the active session.
+        const homePrefix = this._homeDir || '';
+        let displayPath = workdir || '';
+        if (homePrefix && displayPath.startsWith(homePrefix)) {
+            displayPath = '~' + displayPath.slice(homePrefix.length);
+        }
 
-        if (workdirEl) { workdirEl.textContent = workspaceName; workdirEl.title = workdir || ''; }
+        if (workdirEl) {
+            workdirEl.textContent = displayPath || '—';
+            workdirEl.title = workdir || '';
+        }
         if (composerWorkdirEl) {
-            composerWorkdirEl.textContent = workspaceName;
+            composerWorkdirEl.textContent = displayPath || '—';
             composerWorkdirEl.title = workdir || '';
         }
-        if (breadcrumbWorkdir) { breadcrumbWorkdir.textContent = workspaceName; breadcrumbWorkdir.title = workdir || ''; }
+        if (repoWorkdirEl) {
+            repoWorkdirEl.textContent = displayPath || '—';
+            repoWorkdirEl.title = workdir || '';
+        }
+        if (breadcrumbWorkdir) {
+            breadcrumbWorkdir.textContent = displayPath || '—';
+            breadcrumbWorkdir.title = workdir || '';
+        }
         if (breadcrumbSession) {
             breadcrumbSession.textContent = sessionId ? `run_${shortSession}` : '—';
             breadcrumbSession.title = sessionId || '';
@@ -1788,12 +1839,12 @@ class Dashboard {
         entry.innerHTML = `
             <div class="msg-header">
                 <span class="msg-time">${elapsed}</span>
-                <span class="${fromClass}">${msg.from}</span>
+                <span class="${fromClass}">${this._escapeHtml(msg.from)}</span>
                 ${modelLabel ? `<span class="msg-model-pill">${this._escapeHtml(modelLabel)}</span>` : ''}
                 <span class="msg-arrow">&rarr;</span>
-                <span class="${toClass}">${msg.to}</span>
-                <span class="msg-type-badge ${badgeCls}">${msgType}</span>
-                ${depth !== '' ? `<span class="msg-depth-badge">${depth}</span>` : ''}
+                <span class="${toClass}">${this._escapeHtml(msg.to)}</span>
+                <span class="msg-type-badge ${badgeCls}">${this._escapeHtml(msgType)}</span>
+                ${depth !== '' ? `<span class="msg-depth-badge">${this._escapeHtml(String(depth))}</span>` : ''}
             </div>
             <div class="msg-preview">${this._escapeHtml(preview)}</div>
             <div class="msg-expanded">
@@ -1936,7 +1987,7 @@ class Dashboard {
             <div class="ndp-overview-card">
                 <span class="ndp-overview-label">Peers</span>
                 <span class="ndp-overview-value">${peers.length}</span>
-                <span class="ndp-overview-note">${peers.slice(0, 3).join(', ') || 'none yet'}</span>
+                <span class="ndp-overview-note">${peers.slice(0, 3).map(p => this._escapeHtml(p)).join(', ') || 'none yet'}</span>
             </div>
         `;
 
@@ -1946,7 +1997,7 @@ class Dashboard {
                 <span class="ndp-topology-node">${this._escapeHtml(agentId)}</span>
             </div>
             <div class="ndp-topology-copy">
-                ${this._escapeHtml(agent.role || agentId)} is the ${this._escapeHtml(position)} and can communicate directly with ${uniqueNeighbors.length ? uniqueNeighbors.join(', ') : 'no current neighbors'}.
+                ${this._escapeHtml(agent.role || agentId)} is the ${this._escapeHtml(position)} and can communicate directly with ${uniqueNeighbors.length ? uniqueNeighbors.map(n => this._escapeHtml(n)).join(', ') : 'no current neighbors'}.
             </div>
             <div class="ndp-neighbor-row">
                 ${uniqueNeighbors.length
@@ -2044,7 +2095,7 @@ class Dashboard {
                         <span class="ndp-msg-from ${fromCls}">${this._escapeHtml(m.from)}</span>
                         <span class="ndp-msg-arrow">→</span>
                         <span class="ndp-msg-to ${toCls}">${this._escapeHtml(m.to)}</span>
-                        <span class="ndp-msg-type" style="${bstyle}">${mtype}</span>
+                        <span class="ndp-msg-type" style="${bstyle}">${this._escapeHtml(mtype)}</span>
                         ${elapsed ? `<span class="ndp-msg-elapsed">${elapsed}</span>` : ''}
                     </div>
                     <div class="ndp-msg-meta">
@@ -2085,8 +2136,12 @@ class Dashboard {
         this._addMessageEntry(msgData);
         this._refreshNodePanel();
 
+        if (!this._wsSessionId) {
+            document.getElementById('ndp-chat-input').focus();
+            return;
+        }
         try {
-            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: this.selectedAgent, message: text }),
@@ -2214,11 +2269,56 @@ class Dashboard {
         this._applyTheme(next);
     }
 
+    _handleGlobalKeydown(e) {
+        if (e.key !== 'Escape') return;
+        const sessionModal = document.getElementById('session-config-modal');
+        const settingsModal = document.getElementById('settings-modal');
+        const traceModal = document.getElementById('trace-admin-modal');
+        if (sessionModal && !sessionModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeSessionConfig();
+            return;
+        }
+        if (settingsModal && !settingsModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeSettings();
+            return;
+        }
+        if (traceModal && !traceModal.classList.contains('hidden')) {
+            e.preventDefault();
+            this._closeTraceAdmin();
+            return;
+        }
+    }
+
+    _focusFirstInModal(modal) {
+        if (!modal) return;
+        const sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        const first = modal.querySelector(sel);
+        if (first && typeof first.focus === 'function') first.focus();
+    }
+
+    _rememberModalFocus(modal) {
+        if (!modal || !this._modalPriorFocus) return;
+        this._modalPriorFocus.set(modal, document.activeElement);
+    }
+
+    _restoreModalFocus(modal) {
+        if (!modal || !this._modalPriorFocus) return;
+        const prior = this._modalPriorFocus.get(modal);
+        this._modalPriorFocus.delete(modal);
+        if (prior && typeof prior.focus === 'function' && document.contains(prior)) {
+            prior.focus();
+        }
+    }
+
     _openSettings() {
         const modal = document.getElementById('settings-modal');
         if (!modal) return;
+        this._rememberModalFocus(modal);
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
+        this._focusFirstInModal(modal);
     }
 
     _closeSettings() {
@@ -2226,13 +2326,17 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+        this._restoreModalFocus(modal);
     }
 
     async _openTraceAdmin() {
         const modal = document.getElementById('trace-admin-modal');
         if (!modal) return;
+        const wasHidden = modal.classList.contains('hidden');
+        if (wasHidden) this._rememberModalFocus(modal);
         modal.classList.remove('hidden');
         modal.setAttribute('aria-hidden', 'false');
+        if (wasHidden) this._focusFirstInModal(modal);
         await this._loadTraceSessions();
     }
 
@@ -2282,6 +2386,7 @@ class Dashboard {
         if (!modal) return;
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
+        this._restoreModalFocus(modal);
     }
 
     async _loadTraceSessions() {
@@ -2746,7 +2851,14 @@ class Dashboard {
             input.value = '';
             input.style.height = 'auto';
             this._hideMentionSuggestions();
-            await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
+            if (!this._wsSessionId) {
+                document.getElementById('result-agent').textContent = 'Error';
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').textContent = 'No session — click New Session first.';
+                document.getElementById('result-panel').classList.remove('hidden');
+                return;
+            }
+            await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ to: 'coordinator', message: query }),
@@ -2817,14 +2929,17 @@ class Dashboard {
                     }
                 }
             }
-            // v1 route: POST /api/v1/sessions/{id}/runs starts a run on
-            // a specific session. Falls back to the default session id if
-            // the UI hasn't captured one yet (first-boot race).
-            const sid = this._wsSessionId || this._defaultSessionId || '';
-            const url = sid
-                ? `/api/v1/sessions/${encodeURIComponent(sid)}/runs`
-                : '/api/start';  // legacy fallback before we know the id
-            res = await fetch(url, {
+            const sid = this._wsSessionId || '';
+            if (!sid) {
+                this._setRunActive(false);
+                this._hideLoader();
+                document.getElementById('result-agent').textContent = 'Error';
+                document.getElementById('result-elapsed').textContent = '';
+                document.getElementById('result-body').textContent = 'No session — click New Session first.';
+                document.getElementById('result-panel').classList.remove('hidden');
+                return;
+            }
+            res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}/runs`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(startBody),
@@ -2862,13 +2977,16 @@ class Dashboard {
         const snapshotSessionId = String(snapshot.session_id || '');
         const currentSessionId = String(this._wsSessionId || '');
         const sameSession = snapshotSessionId && currentSessionId && snapshotSessionId === currentSessionId;
+        if (!sameSession) return false;
+        const hasAgents = Object.keys(this.agents || {}).length > 0;
+        const hasTopology = Boolean(this._plan?.topology?.id);
+        if (hasAgents || hasTopology) return true;
         const hasLiveProgress = Boolean(
             (this._planSteps && this._planSteps.length) ||
             (this._rawMessages && this._rawMessages.length) ||
-            (this.messageLog && this.messageLog.querySelector('.msg-entry, .prediction-card')) ||
-            Object.keys(this.agents || {}).length
+            (this.messageLog && this.messageLog.querySelector('.msg-entry, .prediction-card'))
         );
-        return sameSession && hasLiveProgress;
+        return hasLiveProgress;
     }
 
     async _createNewSession() {
@@ -2910,7 +3028,8 @@ class Dashboard {
         const label = btn?.querySelector('.query-action-label');
         btn.disabled = true;
         if (label) label.textContent = 'Stopping…';
-        await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/stop` : '/api/stop', { method: 'POST' });
+        if (!this._wsSessionId) return;
+        await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/stop`, { method: 'POST' });
     }
 
     _handleRunStateChanged(data) {
@@ -3699,8 +3818,14 @@ class Dashboard {
         document.getElementById('question-panel').classList.add('hidden');
         input.value = '';
 
-        // Inject the reply directly to the agent that asked
-        await fetch((this._wsSessionId || this._defaultSessionId) ? `/api/v1/sessions/${encodeURIComponent(this._wsSessionId || this._defaultSessionId)}/runs/inject` : '/api/inject', {
+        if (!this._wsSessionId) {
+            document.getElementById('result-agent').textContent = 'Error';
+            document.getElementById('result-elapsed').textContent = '';
+            document.getElementById('result-body').textContent = 'No session — click New Session first.';
+            document.getElementById('result-panel').classList.remove('hidden');
+            return;
+        }
+        await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ to: this._questionAgent, message: text }),

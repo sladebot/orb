@@ -130,6 +130,41 @@ class TestBroadcastFanout:
         assert a._conversation_session.session_id in ids  # noqa: SLF001
         assert b._conversation_session.session_id in ids  # noqa: SLF001
 
+    async def test_list_trace_sessions_merges_across_sessions(self, tmp_path: Path):
+        """`list_trace_sessions` must aggregate across every registered
+        session's workspace, not short-circuit on the first one.
+
+        Two sessions in distinct workdirs each have their own
+        `.orb/sessions/` directory; both session_ids must surface in the
+        merged result, de-duplicated by session_id.
+        """
+        import json as _json
+
+        mgr = RuntimeManager()
+        dir_a = tmp_path / "a"; dir_a.mkdir()
+        dir_b = tmp_path / "b"; dir_b.mkdir()
+        a = mgr.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
+        b = mgr.create_session(workdir=str(dir_b), session_path=tmp_path / "b.json")
+
+        # Seed each session's workspace with a persisted session.json so
+        # `list_trace_sessions` will discover it via the sessions dir scan.
+        for sess, wd in ((a, dir_a), (b, dir_b)):
+            sessions_dir = wd / ".orb" / "sessions"
+            sessions_dir.mkdir(parents=True, exist_ok=True)
+            sid = sess._conversation_session.session_id  # noqa: SLF001
+            payload = {
+                "session_id": sid,
+                "generation": 1,
+                "agent_carryover": {},
+                "updated_at": 1.0,
+            }
+            (sessions_dir / f"{sid}.json").write_text(_json.dumps(payload))
+
+        merged = mgr.list_trace_sessions()
+        ids = {s["session_id"] for s in merged["sessions"]}
+        assert a._conversation_session.session_id in ids  # noqa: SLF001
+        assert b._conversation_session.session_id in ids  # noqa: SLF001
+
     async def test_unsubscribe_stops_manager_notifications(self, tmp_path: Path):
         mgr = RuntimeManager()
         session = mgr.create_session(session_path=tmp_path / "a.json")
@@ -148,3 +183,71 @@ class TestBroadcastFanout:
         await asyncio.sleep(0)
         # No new events hit the collector after unsubscribe.
         assert len(seen) == before
+
+
+class TestRegistryRestore:
+    """After a daemon restart the in-memory session registry is empty but
+    disk snapshots still exist. `try_restore` resurrects a session from
+    the persisted index so a page refresh doesn't blank the dashboard.
+    """
+
+    def test_try_restore_returns_none_for_unknown_id(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        mgr = RuntimeManager()
+        assert mgr.try_restore("nonexistent") is None
+
+    def test_try_restore_resurrects_session_after_restart(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+
+        # Session #1 — daemon A
+        mgr_a = RuntimeManager()
+        session = mgr_a.create_session(
+            workdir=str(workdir), session_path=workdir / ".orb" / "sessions" / "s.json"
+        )
+        sid = session._conversation_session.session_id  # noqa: SLF001
+        # Force a persist so the session file exists on disk (mimics what
+        # any run would do naturally).
+        session._persist_session()  # noqa: SLF001
+
+        # Daemon B — fresh process, empty in-memory registry, but the
+        # on-disk registry.json + snapshot survive.
+        mgr_b = RuntimeManager()
+        assert mgr_b.get_session(sid) is None
+        restored = mgr_b.try_restore(sid)
+        assert restored is not None
+        assert restored._conversation_session.workdir == str(workdir)  # noqa: SLF001
+        assert restored._conversation_session.session_id == sid  # noqa: SLF001
+        # And it's now in the live registry
+        assert mgr_b.get_session(sid) is restored
+
+    def test_try_restore_drops_index_entry_when_snapshot_is_gone(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        mgr = RuntimeManager()
+        session = mgr.create_session(
+            workdir=str(workdir), session_path=workdir / ".orb" / "sessions" / "s.json"
+        )
+        sid = session._conversation_session.session_id  # noqa: SLF001
+        session._persist_session()  # noqa: SLF001
+        # Simulate a disk wipe: both the session file and any snapshots gone.
+        (workdir / ".orb" / "sessions" / "s.json").unlink()
+
+        mgr2 = RuntimeManager()
+        assert mgr2.try_restore(sid) is None
+
+    def test_delete_session_removes_registry_entry(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        mgr = RuntimeManager()
+        session = mgr.create_session(session_path=tmp_path / "a.json")
+        sid = session._conversation_session.session_id  # noqa: SLF001
+        mgr.delete_session(sid)
+
+        mgr2 = RuntimeManager()
+        assert mgr2.try_restore(sid) is None

@@ -583,13 +583,74 @@ class TestTuiEventHandler:
         assert tui._routed == 7
         assert tui._last_elapsed == 5.2
 
-    # ── stopped ──────────────────────────────────────────────────────────────
+    # ── run_state_changed ────────────────────────────────────────────────────
 
-    def test_stopped_sets_error_status(self):
+    def test_run_state_changed_to_running_marks_active(self):
+        tui = _make_tui()
+        tui._run_status = "Waiting"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "planning",
+            "to": "running",
+            "event": "orchestrator_task_created",
+        })
+        assert tui._run_status == "Running"
+
+    def test_run_state_changed_to_planning_marks_active(self):
+        tui = _make_tui()
+        tui._run_status = "Waiting"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "idle",
+            "to": "planning",
+            "event": "start_run_begin",
+        })
+        assert tui._run_status == "Running"
+
+    def test_run_state_changed_to_completed_terminal(self):
         tui = _make_tui()
         tui._run_status = "Running"
-        tui._handle_server_event({"type": "stopped"})
-        assert tui._run_status == "Error"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "running",
+            "to": "completed",
+            "event": "orchestrator_succeeded",
+        })
+        assert tui._run_status == "Idle"
+
+    def test_run_state_changed_to_errored_terminal(self):
+        tui = _make_tui()
+        tui._run_status = "Running"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "running",
+            "to": "errored",
+            "event": "orchestrator_errored",
+        })
+        assert tui._run_status == "Errored"
+
+    def test_run_state_changed_to_idle_terminal(self):
+        tui = _make_tui()
+        tui._run_status = "Running"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "stopping",
+            "to": "idle",
+            "event": "stop_finished",
+        })
+        assert tui._run_status == "Idle"
+
+    def test_run_state_changed_to_stopping(self):
+        tui = _make_tui()
+        tui._run_status = "Running"
+        tui._handle_server_event({
+            "type": "run_state_changed",
+            "from": "running",
+            "to": "stopping",
+            "event": "stop_requested",
+        })
+        # Still "in flight" until stop_finished; leave as Running / Stopping text.
+        assert tui._run_status in ("Running", "Stopping")
 
     # ── unknown event type ────────────────────────────────────────────────────
 

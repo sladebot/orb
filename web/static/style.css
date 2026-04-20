@@ -4278,6 +4278,16 @@ body.v2 #repo-toolbar .stat-add { color: var(--success); }
 body.v2 #repo-toolbar .stat-del { color: var(--error); }
 body.v2 #repo-toolbar .repo-arrow,
 body.v2 #repo-toolbar .repo-sep { color: var(--text-muted); opacity: 0.4; }
+body.v2 #repo-toolbar .workdir-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-width: 36ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+}
 body.v2 #repo-toolbar .spacer { flex: 1; }
 
 body.v2 .seg {

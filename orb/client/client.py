@@ -65,7 +65,15 @@ class OrbClient:
 
     # ── Low-level helpers ──────────────────────────────────────────────
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | None:
+        """Issue a request and return the envelope's ``data`` payload.
+
+        Returns ``None`` iff the envelope explicitly had ``data: null``
+        (or the key was missing). Returns the dict otherwise. Callers
+        that contractually require a payload should check for ``None``
+        and raise :class:`OrbAPIError("EMPTY_DATA", ...)`; callers that
+        legitimately return nothing (delete, stop) can ignore ``None``.
+        """
         try:
             resp = await self._http.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
@@ -80,12 +88,34 @@ class OrbClient:
                 str(body.get("error") or resp.text[:200]),
                 resp.status_code,
             )
-        return body.get("data") or {}
+        data = body.get("data")
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise OrbAPIError(
+                "INVALID_DATA",
+                f"{method} {path}: expected object in `data`, got {type(data).__name__}",
+                resp.status_code,
+            )
+        return data
+
+    @staticmethod
+    def _require_data(data: dict[str, Any] | None, endpoint: str) -> dict[str, Any]:
+        """Guard helper for endpoints that must return a payload."""
+        if data is None:
+            raise OrbAPIError(
+                "EMPTY_DATA",
+                f"{endpoint} returned an empty envelope; expected payload.",
+            )
+        return data
 
     # ── Daemon introspection ──────────────────────────────────────────
 
     async def health(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/health")
+        return self._require_data(
+            await self._request("GET", "/api/v1/health"),
+            "GET /api/v1/health",
+        )
 
     # ── Session management ────────────────────────────────────────────
 
@@ -97,19 +127,29 @@ class OrbClient:
         body: dict[str, Any] = {}
         if workdir is not None:
             body["workdir"] = workdir
-        data = await self._request("POST", "/api/v1/sessions", json=body)
+        data = self._require_data(
+            await self._request("POST", "/api/v1/sessions", json=body),
+            "POST /api/v1/sessions",
+        )
         summary = SessionSummary.from_dict(data)
         return OrbSession(self, summary)
 
     async def get_session(self, session_id: str) -> "OrbSession":
-        data = await self._request("GET", f"/api/v1/sessions/{session_id}")
+        data = self._require_data(
+            await self._request("GET", f"/api/v1/sessions/{session_id}"),
+            f"GET /api/v1/sessions/{session_id}",
+        )
         return OrbSession(self, SessionSummary.from_dict(data))
 
     async def list_sessions(self) -> list[SessionSummary]:
-        data = await self._request("GET", "/api/v1/sessions")
+        data = self._require_data(
+            await self._request("GET", "/api/v1/sessions"),
+            "GET /api/v1/sessions",
+        )
         return [SessionSummary.from_dict(s) for s in data.get("sessions") or []]
 
     async def delete_session(self, session_id: str) -> None:
+        # delete returns no payload; tolerate null data in the envelope.
         await self._request("DELETE", f"/api/v1/sessions/{session_id}")
 
     # ── WebSocket ──────────────────────────────────────────────────────
@@ -170,7 +210,10 @@ class OrbSession:
     # ── REST helpers ──────────────────────────────────────────────────
 
     async def refresh(self) -> SessionSummary:
-        data = await self._client._request("GET", f"/api/v1/sessions/{self.session_id}")  # noqa: SLF001
+        data = OrbClient._require_data(  # noqa: SLF001
+            await self._client._request("GET", f"/api/v1/sessions/{self.session_id}"),  # noqa: SLF001
+            f"GET /api/v1/sessions/{self.session_id}",
+        )
         self._summary = SessionSummary.from_dict(data)
         return self._summary
 
@@ -195,18 +238,24 @@ class OrbSession:
             body["agent_models"] = agent_models
         if workdir:
             body["workdir"] = workdir
-        data = await self._client._request(  # noqa: SLF001
-            "POST",
-            f"/api/v1/sessions/{self.session_id}/runs",
-            json=body,
+        data = OrbClient._require_data(  # noqa: SLF001
+            await self._client._request(  # noqa: SLF001
+                "POST",
+                f"/api/v1/sessions/{self.session_id}/runs",
+                json=body,
+            ),
+            f"POST /api/v1/sessions/{self.session_id}/runs",
         )
         return RunSummary.from_dict(data)
 
     async def stop_run(self) -> dict[str, Any]:
-        return await self._client._request(  # noqa: SLF001
+        # stop may legitimately return null data; surface it as an empty
+        # dict for back-compat with callers that expect a dict.
+        data = await self._client._request(  # noqa: SLF001
             "POST",
             f"/api/v1/sessions/{self.session_id}/runs/stop",
         )
+        return data or {}
 
     async def inject(self, target: str, message: str) -> None:
         await self._client._request(  # noqa: SLF001
@@ -217,9 +266,12 @@ class OrbSession:
 
     async def state(self) -> dict[str, Any]:
         """Return the full init payload for the session (synchronous snapshot)."""
-        return await self._client._request(  # noqa: SLF001
-            "GET",
-            f"/api/v1/sessions/{self.session_id}/state",
+        return OrbClient._require_data(  # noqa: SLF001
+            await self._client._request(  # noqa: SLF001
+                "GET",
+                f"/api/v1/sessions/{self.session_id}/state",
+            ),
+            f"GET /api/v1/sessions/{self.session_id}/state",
         )
 
     # ── Event streaming ───────────────────────────────────────────────
@@ -242,7 +294,28 @@ class OrbSession:
 
         Returns the ``run_state_changed`` event that marked the transition.
         Useful for batch harness code that wants "submit and wait".
+
+        Semantics:
+          - If the session is already at rest (``idle`` / ``completed`` /
+            ``errored``) when the caller waits, return a synthetic
+            terminal event immediately — there is no run to wait on.
+          - Otherwise, only ``completed`` and ``errored`` transitions
+            unblock the waiter. An ``idle`` event emitted *during*
+            streaming is taken as terminal only if it was the tail of a
+            stop request (``from == "stopping"``) — this avoids the
+            stale-idle race where a pre-run idle event would falsely
+            unblock a fresh run.
         """
+        # Already at rest — no run to wait on.
+        if self._summary.run_state in {"idle", "completed", "errored"}:
+            return Event.from_payload({
+                "type": "run_state_changed",
+                "session_id": self.session_id,
+                "to": self._summary.run_state,
+                "from": self._summary.run_state,
+                "event": "already_terminal",
+            })
+
         async for event in self.stream_events():
             if event.type == "run_state_changed" and event.is_terminal:
                 return event

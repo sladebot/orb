@@ -1631,15 +1631,8 @@ class OrbTUI(App[None]):
             self._on_server_run_complete(data)
         elif t == "file_write":
             self._on_server_file_write(data)
-        elif t == "stopped":
-            self._run_status = "Error"
-            self._record_timeline_entry(TimelineEntry(
-                kind="status",
-                elapsed=self._last_elapsed,
-                title="Run cancelled",
-                summary="Execution stopped before completion.",
-            ))
-            self._refresh_all()
+        elif t == "run_state_changed":
+            self._on_server_run_state_changed(data)
         elif t == "stats":
             self._routed = data.get("message_count", self._routed)
             self._last_elapsed = data.get("elapsed", self._last_elapsed)
@@ -1874,6 +1867,49 @@ class OrbTUI(App[None]):
                 agent_id=aid,
             ))
         self._update_result_view()
+        self._refresh_all()
+
+    def _on_server_run_state_changed(self, data: dict) -> None:
+        """Mirror ``app.js:_handleRunStateChanged`` — FSM transitions are
+        the authoritative source of "is a run in flight" for the TUI.
+
+        States: ``idle`` / ``completed`` / ``errored`` are terminal (see
+        ``orb/runtime/run_state.py:TERMINAL_STATES``); ``planning`` /
+        ``running`` / ``stopping`` are in-flight.
+        """
+        to_state = str(data.get("to") or "idle")
+        in_flight = to_state in {"planning", "running", "stopping"}
+        if in_flight:
+            # Keep "Running" label across planning→running→stopping so
+            # the spinner / header stay active until we land terminal.
+            self._run_status = "Running"
+        elif to_state == "completed":
+            self._run_status = "Idle"
+        elif to_state == "errored":
+            self._run_status = "Errored"
+            self._record_timeline_entry(TimelineEntry(
+                kind="status",
+                elapsed=self._last_elapsed,
+                title="Run errored",
+                summary="Execution failed before completion.",
+            ))
+        elif to_state == "idle":
+            # Landing in idle from stopping is a user-initiated cancel;
+            # from anywhere else it's just the resting state.
+            from_state = str(data.get("from") or "")
+            if from_state == "stopping":
+                self._record_timeline_entry(TimelineEntry(
+                    kind="status",
+                    elapsed=self._last_elapsed,
+                    title="Run cancelled",
+                    summary="Execution stopped before completion.",
+                ))
+            self._run_status = "Idle"
+        # On any terminal state, clear per-agent activity spinners so the
+        # header stops pulsing.
+        if not in_flight:
+            for info in self._agents.values():
+                info.activity_text = ""
         self._refresh_all()
 
     def _on_server_run_complete(self, data: dict) -> None:

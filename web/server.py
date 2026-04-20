@@ -23,7 +23,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 @web.middleware
 async def _no_cache_middleware(request: web.Request, handler):
     response = await handler(request)
-    if request.path == "/" or request.path.startswith("/static/"):
+    if (
+        request.path == "/"
+        or request.path.startswith("/static/")
+        or request.path.startswith("/api/")
+    ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -79,7 +83,12 @@ class DashboardServer:
         self.manager.configure(providers, config, model_overrides, tier_override)
 
     async def start(self) -> None:
-        self.runtime.subscribe(self.broadcast)
+        # Subscribe the WS broadcaster to the MANAGER's subscriber pool so
+        # events from every session — not just the default one — reach
+        # connected clients. The manager's _forward_broadcast re-emits
+        # every per-session broadcast through this pool with the
+        # originating session_id embedded in the JSON payload.
+        self.manager.subscribe(self.broadcast)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
@@ -111,7 +120,7 @@ class DashboardServer:
             self._topology_watcher.stop()
         if self._catalog_refresh_task is not None and not self._catalog_refresh_task.done():
             self._catalog_refresh_task.cancel()
-        self.runtime.unsubscribe(self.broadcast)
+        self.manager.unsubscribe(self.broadcast)
         await self.runtime.stop()
         for ws in list(self._clients):
             await ws.close()
@@ -119,10 +128,22 @@ class DashboardServer:
             await self._runner.cleanup()
 
     async def broadcast(self, data: str) -> None:
+        # Parse the payload's session_id (every GraphRuntime broadcast is
+        # tagged) and fan out to clients whose filter matches. Clients with
+        # no filter receive everything. Payloads without a session_id tag
+        # (e.g. topology hot-reload pings) go to everyone.
+        payload_session_id: str | None = None
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict):
+                raw = parsed.get("session_id")
+                if isinstance(raw, str) and raw:
+                    payload_session_id = raw
+        except (ValueError, TypeError):
+            pass
         closed = []
-        current_session_id = self.runtime.state.session_id or None
-        for ws, session_id in self._clients.items():
-            if session_id and session_id != current_session_id:
+        for ws, client_filter in self._clients.items():
+            if client_filter and payload_session_id and client_filter != payload_session_id:
                 continue
             try:
                 await ws.send_str(data)
@@ -441,12 +462,23 @@ class DashboardServer:
         if workdir is None:
             return web.json_response({"ok": False, "error": "workdir must point to an existing directory"}, status=400)
         try:
-            target = (workdir / rel_raw).resolve(strict=False)
-        except (OSError, ValueError):
+            # strict=True follows symlinks AND requires every component to
+            # exist, so a link pointing outside the workdir resolves to its
+            # real target and the relative_to() check below catches the escape.
+            target = (workdir / rel_raw).resolve(strict=True)
+        except (OSError, ValueError, FileNotFoundError):
             return web.json_response({"ok": False, "error": "invalid path"}, status=400)
         # Prevent path traversal outside the workdir
         try:
             target.relative_to(workdir)
+        except ValueError:
+            return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
+        # Belt-and-suspenders: re-check against realpath in case of any
+        # remaining symlink trickery (e.g. TOCTOU or path component games).
+        import os as _os
+        real = Path(_os.path.realpath(str(target)))
+        try:
+            real.relative_to(workdir)
         except ValueError:
             return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
         if not target.exists() or not target.is_file():
@@ -471,12 +503,17 @@ class DashboardServer:
 
     async def _git_status_handler(self, request: web.Request) -> web.Response:
         raw = request.rel_url.query.get("path") or ""
+        if not raw:
+            return web.json_response(
+                {"ok": False, "error": "path is required"},
+                status=400,
+            )
         path = self._resolve_workdir(raw)
         if path is None:
-            # Fall back to the runtime's current session workdir rather than
-            # process CWD so multi-tenant daemons don't leak each other's paths.
-            session_workdir = getattr(self.runtime._conversation_session, "workdir", "")  # noqa: SLF001
-            path = self._resolve_workdir(session_workdir) or Path.cwd()
+            return web.json_response(
+                {"ok": False, "error": f"path must point to an existing directory: {raw}"},
+                status=400,
+            )
         info = self._git_status(path)
         return web.json_response(info)
 
