@@ -2,6 +2,16 @@
  * Dashboard app — WebSocket client, message log, agent cards, chat panel.
  */
 
+function safeParseWsMessage(data) {
+    if (typeof data !== 'string' || !data) return null;
+    try {
+        return JSON.parse(data);
+    } catch (err) {
+        console.warn('Discarding malformed WebSocket message', err);
+        return null;
+    }
+}
+
 const AGENT_CSS_CLASS = {
     coordinator: 'agent-coordinator',
     coder:       'agent-coder',
@@ -289,8 +299,9 @@ class Dashboard {
         this.ws.onerror = () => { this.ws.close(); };
 
         this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data && data.type === 'error' && data.code === 'SESSION_NOT_FOUND') {
+            const data = safeParseWsMessage(event.data);
+            if (!data) return;
+            if (data.type === 'error' && data.code === 'SESSION_NOT_FOUND') {
                 // Stale session in URL (daemon restart wiped it + no disk snapshot).
                 // Strip the ?session=... and let the next reconnect attach to
                 // the most-recent session instead of looping on the dead id.
@@ -4087,6 +4098,11 @@ class Dashboard {
     _sleep(ms) {
         return new Promise((resolve) => window.setTimeout(resolve, ms));
     }
+}
+
+// Expose helpers for unit tests (Node/Vitest). No-op in the browser.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { safeParseWsMessage };
 }
 
 // Initialize on load

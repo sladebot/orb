@@ -60,7 +60,8 @@ def _ollama_keep_alive() -> str | None:
                 return None
             value = str(value).strip()
             return value or None
-    except Exception:
+    except Exception as exc:
+        logger.warning("ollama keep_alive config unreadable: %s", exc)
         return None
     return None
 
@@ -76,7 +77,8 @@ def _vmlx_base_url() -> str:
             provider_cfg = get_config("providers") or {}
             entry = provider_cfg.get("vmlx") or {}
             base_url = str(entry.get("base_url") or "").rstrip("/") if isinstance(entry, dict) else ""
-        except Exception:
+        except Exception as exc:
+            logger.warning("vmlx base_url config unreadable: %s", exc)
             base_url = ""
     if not base_url:
         base_url = "http://localhost:1234/v1"
@@ -94,7 +96,8 @@ def _vmlx_api_key() -> str | None:
             entry = provider_cfg.get("vmlx") or {}
             if isinstance(entry, dict):
                 value = entry.get("api_key")
-        except Exception:
+        except Exception as exc:
+            logger.warning("vmlx api_key config unreadable: %s", exc)
             value = None
     if value is None:
         return None
@@ -113,7 +116,8 @@ def _omlx_base_url() -> str:
             provider_cfg = get_config("providers") or {}
             entry = provider_cfg.get("omlx") or {}
             base_url = str(entry.get("base_url") or "").rstrip("/") if isinstance(entry, dict) else ""
-        except Exception:
+        except Exception as exc:
+            logger.warning("omlx base_url config unreadable: %s", exc)
             base_url = ""
     if not base_url:
         base_url = "http://localhost:8000/v1"
@@ -131,7 +135,8 @@ def _omlx_api_key() -> str | None:
             entry = provider_cfg.get("omlx") or {}
             if isinstance(entry, dict):
                 value = entry.get("api_key")
-        except Exception:
+        except Exception as exc:
+            logger.warning("omlx api_key config unreadable: %s", exc)
             value = None
     if value is None:
         return None
@@ -173,7 +178,8 @@ def _ollama_enabled() -> bool:
     try:
         from ..cli.config import local_models_enabled
         return bool(local_models_enabled())
-    except Exception:
+    except Exception as exc:
+        logger.warning("ollama enabled-check failed: %s", exc)
         return False
 
 
@@ -186,7 +192,8 @@ def _vmlx_enabled() -> bool:
         providers = get_config("providers") or {}
         entry = providers.get("vmlx") or {}
         return bool(entry.get("enabled", False)) if isinstance(entry, dict) else False
-    except Exception:
+    except Exception as exc:
+        logger.warning("vmlx enabled-check failed: %s", exc)
         return False
 
 
@@ -199,7 +206,8 @@ def _omlx_enabled() -> bool:
         providers = get_config("providers") or {}
         entry = providers.get("omlx") or {}
         return bool(entry.get("enabled", False)) if isinstance(entry, dict) else False
-    except Exception:
+    except Exception as exc:
+        logger.warning("omlx enabled-check failed: %s", exc)
         return False
 
 

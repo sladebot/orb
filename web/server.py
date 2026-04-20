@@ -152,7 +152,9 @@ class DashboardServer:
         for ws in closed:
             self._clients.pop(ws, None)
 
-    async def _index_handler(self, request: web.Request) -> web.Response:
+    @staticmethod
+    def _read_index_assets() -> tuple[str, str]:
+        """Synchronous file I/O for the index page — call via asyncio.to_thread."""
         build_ts = str(max(
             int((STATIC_DIR / "style.css").stat().st_mtime),
             int((STATIC_DIR / "graph.js").stat().st_mtime),
@@ -160,6 +162,10 @@ class DashboardServer:
             int((STATIC_DIR / "index.html").stat().st_mtime),
         ))
         html = (STATIC_DIR / "index.html").read_text()
+        return build_ts, html
+
+    async def _index_handler(self, request: web.Request) -> web.Response:
+        build_ts, html = await asyncio.to_thread(self._read_index_assets)
         html = html.replace("/static/style.css", f"/static/style.css?v={build_ts}")
         html = html.replace("/static/graph.js", f"/static/graph.js?v={build_ts}")
         html = html.replace("/static/app.js", f"/static/app.js?v={build_ts}")

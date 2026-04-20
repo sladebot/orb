@@ -1,6 +1,7 @@
 """Tests for DashboardServer HTTP endpoints."""
 from __future__ import annotations
 
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -229,6 +230,40 @@ class TestServerAPI:
         )
         env = await resp.json()
         assert env["ok"] is False
+
+    async def test_index_handler_returns_cache_busted_html(self, client):
+        resp = await client.get("/")
+        assert resp.status == 200
+        body = await resp.text()
+        assert "/static/app.js?v=" in body
+        assert "/static/style.css?v=" in body
+        assert "/static/graph.js?v=" in body
+
+    async def test_index_handler_does_not_block_event_loop(self, client):
+        """Index handler must offload file I/O; a slow stat() must not starve other requests."""
+        import time as _time
+        from pathlib import Path as _Path
+        from unittest.mock import patch
+
+        real_stat = _Path.stat
+
+        def slow_stat(self, *args, **kwargs):
+            # Only slow down the files touched by the index handler.
+            if self.name in ("style.css", "graph.js", "app.js", "index.html"):
+                _time.sleep(0.2)
+            return real_stat(self, *args, **kwargs)
+
+        with patch.object(_Path, "stat", slow_stat):
+            start = _time.monotonic()
+            # Two parallel index requests. Each has 4 × 200ms of stat work.
+            # If stats block the event loop, the second request is serialized
+            # after the first → ~1.6s. With asyncio.to_thread the threads run
+            # side-by-side → ~0.8s.
+            results = await asyncio.gather(client.get("/"), client.get("/"))
+            elapsed = _time.monotonic() - start
+
+        assert all(r.status == 200 for r in results)
+        assert elapsed < 1.3, f"event loop blocked: elapsed={elapsed:.3f}s"
 
     async def test_trace_admin_endpoints_return_session_and_run_data(self, client):
         sid = await self._default_session_id(client)
