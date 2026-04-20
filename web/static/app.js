@@ -43,7 +43,14 @@ async function unwrapEnvelope(res) {
         return null;
     }
     if (env && typeof env === 'object' && 'ok' in env && 'data' in env) {
-        return env.ok ? env.data : { ok: false, error: env.error, code: env.code };
+        if (env.ok) {
+            // Merge ok:true into the payload so callers that still check
+            // `data.ok` keep working without caring about the envelope.
+            const merged = { ok: true };
+            if (env.data && typeof env.data === 'object') Object.assign(merged, env.data);
+            return merged;
+        }
+        return { ok: false, error: env.error, code: env.code };
     }
     return env;
 }
