@@ -11,7 +11,8 @@ from pathlib import Path
 from aiohttp import web
 from json import JSONDecodeError
 
-from orb.runtime import GraphRuntime
+from orb.runtime import GraphRuntime, RuntimeManager
+from .api_v1 import register_v1_routes
 from .state import DashboardState
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,14 @@ class DashboardServer:
         self.host = host
         self.port = port
         self.runtime = runtime or GraphRuntime(state)
+        # Multi-tenant control plane. The legacy routes still act on
+        # `self.runtime` as the "default session"; v1 routes go through
+        # the manager so harnesses can run multiple sessions concurrently.
+        self.manager = RuntimeManager()
+        self.manager._sessions[self.runtime._conversation_session.session_id] = self.runtime  # noqa: SLF001
+        # Bridge the default session's broadcasts through the manager too,
+        # so v1 subscribers see everything.
+        self.runtime.subscribe(self.manager._forward_broadcast)  # noqa: SLF001
         self._app = web.Application(middlewares=[_no_cache_middleware])
         self._clients: dict[web.WebSocketResponse, str | None] = {}
         self._runner: web.AppRunner | None = None
@@ -70,6 +79,10 @@ class DashboardServer:
         self._app.router.add_get("/api/admin/traces/run/{run_id}", self._trace_run_handler)
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
+
+        # v1 multi-tenant API — sits alongside the legacy routes during
+        # the transition; frontend + TUI will switch over in Phase 4.
+        register_v1_routes(self._app, self.manager, self)
 
     def set_agents(self, agents: dict) -> None:
         """Retained for compatibility; runtime owns live agents."""
