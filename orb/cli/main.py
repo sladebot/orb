@@ -927,7 +927,8 @@ async def async_main() -> None:
         daemon_host = args.host or "127.0.0.1"
         daemon_port = args.port or DEFAULT_DAEMON_PORT
         daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
-        os.chdir(daemon_workdir)
+        # No process-level chdir — each Session owns its workdir and the
+        # sandbox gets it explicitly through the orchestrator factory.
         _save_daemon_state(pid=os.getpid(), host=daemon_host, port=daemon_port, workdir=daemon_workdir)
 
         dash_state = DashboardState()

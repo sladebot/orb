@@ -365,7 +365,10 @@ async def test_async_main_runs_daemon_server():
         await async_main()
 
     basic_config.assert_not_called()
-    chdir.assert_called_once_with(Path("/tmp/orb-daemon-test").resolve())
+    # Daemon no longer chdirs — each Session owns its workdir. This
+    # invariant is what unlocks multi-tenant (different sessions can
+    # point at different folders on the same daemon).
+    chdir.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -435,7 +438,10 @@ async def test_async_main_daemon_honors_explicit_workdir():
         await async_main()
 
     mkdir.assert_called()
-    chdir.assert_called_once_with(Path("/tmp/orb-fixed").resolve())
+    # Workdir still resolved (so mkdir gets called for a user-specified
+    # path) but we no longer chdir the process — the Session owns the
+    # workdir and threads it explicitly into the orchestrator.
+    chdir.assert_not_called()
 
 
 @pytest.mark.asyncio

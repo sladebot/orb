@@ -32,8 +32,14 @@ def create_orchestrator(
     trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
+    workdir: str | Path | None = None,
 ) -> Orchestrator:
-    """Build an Orchestrator from a YAML-defined topology."""
+    """Build an Orchestrator from a YAML-defined topology.
+
+    ``workdir`` anchors the shared :class:`Sandbox` for every file-enabled
+    agent. Pass the session's workdir explicitly so multi-tenant daemons
+    never rely on the process CWD.
+    """
     loader = get_loader()
     topology_id = normalize_topology_id(topology_id)
     topo_def = loader.get(topology_id)
@@ -52,6 +58,7 @@ def create_orchestrator(
         trace_recorder=trace_recorder,
         tier_override=tier_override,
         agent_model_map=agent_model_map,
+        workdir=workdir,
     )
 
 
@@ -69,6 +76,7 @@ def _build_from_schema(
     trace_recorder: RunTrace | None = None,
     tier_override: "ModelTier | None" = None,
     agent_model_map: dict[str, "ModelConfig"] | None = None,
+    workdir: str | Path | None = None,
 ) -> Orchestrator:
     config = config or OrchestratorConfig()
     # Only override entry_agent from YAML if user hasn't set a custom one
@@ -133,8 +141,10 @@ def _build_from_schema(
         max_cooldown=config.max_cooldown,
     )
 
-    # Shared sandbox
-    sandbox = Sandbox(root=Path.cwd())
+    # Shared sandbox — anchored to the caller's explicit workdir so
+    # multi-tenant daemons don't depend on process CWD.
+    sandbox_root = Path(workdir) if workdir else Path.cwd()
+    sandbox = Sandbox(root=sandbox_root)
     trace_recorder = trace_recorder or (RunTrace() if trace else None)
 
     # Build agents

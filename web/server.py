@@ -471,7 +471,12 @@ class DashboardServer:
 
     async def _git_status_handler(self, request: web.Request) -> web.Response:
         raw = request.rel_url.query.get("path") or ""
-        path = self._resolve_workdir(raw) or Path.cwd()
+        path = self._resolve_workdir(raw)
+        if path is None:
+            # Fall back to the runtime's current session workdir rather than
+            # process CWD so multi-tenant daemons don't leak each other's paths.
+            session_workdir = getattr(self.runtime._conversation_session, "workdir", "")  # noqa: SLF001
+            path = self._resolve_workdir(session_workdir) or Path.cwd()
         info = self._git_status(path)
         return web.json_response(info)
 

@@ -828,7 +828,7 @@ class GraphRuntime:
             logger.warning("Failed to persist dashboard snapshot: %s", exc)
 
     def _trace_dir(self) -> Path:
-        return Path.cwd() / ".orb" / "traces"
+        return self._workspace_state_dir() / "traces"
 
     def _trace_session_index_dir(self) -> Path:
         return self._trace_dir() / "by-session"
@@ -998,7 +998,15 @@ class GraphRuntime:
         return self._session_path or self._default_session_path(self._conversation_session.session_id)
 
     def _workspace_state_dir(self) -> Path:
-        return Path.cwd() / ".orb"
+        """Root of the .orb state dir for this runtime.
+
+        Prefers the session's workdir when set so multi-tenant daemons
+        keep each session's state/traces/sessions in the right repo.
+        Falls back to the process CWD for the unscoped case (tests,
+        `orb trace` invocations before any session exists).
+        """
+        base = self._conversation_session.workdir if hasattr(self, "_conversation_session") and self._conversation_session.workdir else str(Path.cwd())
+        return Path(base) / ".orb"
 
     def _workspace_sessions_dir(self) -> Path:
         return self._workspace_state_dir() / "sessions"
@@ -1020,7 +1028,7 @@ class GraphRuntime:
                     session_id = current_path.read_text().strip()
             except OSError:
                 session_id = ""
-            path = self._default_session_path(session_id) if session_id else (Path.cwd() / ".orb" / "session.json")
+            path = self._default_session_path(session_id) if session_id else (self._workspace_state_dir() / "session.json")
         if not path.exists():
             return ConversationSession()
         try:
@@ -1041,7 +1049,10 @@ class GraphRuntime:
             logger.warning("Failed to persist conversation session: %s", exc)
 
     def _sync_session_state(self) -> None:
-        self.state.workdir = str(Path.cwd())
+        # Dashboard's workdir reflects the *session's* scoped folder, not
+        # the daemon's process CWD — crucial once a daemon can host
+        # multiple concurrent sessions in different workdirs.
+        self.state.workdir = self._conversation_session.workdir or str(Path.cwd())
         self.state.session_turn = self._conversation_session.user_turn_count()
         self.state.session_id = self._conversation_session.session_id
         self.state.session_generation = self._conversation_session.generation
@@ -1251,11 +1262,8 @@ class GraphRuntime:
             return 409, {"ok": False, "error": f"Cannot start a run: {exc}"}
 
         if resolved_workdir:
-            try:
-                os.chdir(resolved_workdir)
-            except OSError as exc:
-                self._fsm.maybe_fire("orchestrator_errored")
-                return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
+            # Store on the session — the sandbox + state-dir resolvers read
+            # from here instead of process CWD, enabling multi-tenant runs.
             self._conversation_session.workdir = resolved_workdir
 
         # Everything from here through orchestrator_task_created is "planning":
@@ -1510,11 +1518,9 @@ class GraphRuntime:
             expanded = Path(workdir.strip()).expanduser()
             if not expanded.exists() or not expanded.is_dir():
                 return 400, {"ok": False, "error": f"Workdir does not exist or is not a directory: {expanded}"}
+            # Store on the session; no process-level chdir so this daemon
+            # can host other sessions pointed at different folders.
             resolved_workdir = str(expanded.resolve())
-            try:
-                os.chdir(resolved_workdir)
-            except OSError as exc:
-                return 500, {"ok": False, "error": f"Failed to chdir to {resolved_workdir}: {exc}"}
 
         # COMPLETED/ERRORED → IDLE (IDLE → IDLE is a no-op). The FSM guard
         # on ``session_reset`` rejects in-flight states; ``self.is_run_in_flight``
@@ -2171,6 +2177,7 @@ class GraphRuntime:
             trace_recorder=trace_recorder,
             tier_override=self._tier_override,
             agent_model_map=agent_model_map or None,
+            workdir=self._conversation_session.workdir or None,
         )
         self._last_trace = trace_recorder
         self._last_trace.record_stage_start(
