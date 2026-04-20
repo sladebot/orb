@@ -1380,11 +1380,13 @@ class GraphRuntime:
                 explicit_topology = True
                 if not model_pin or model_pin == "auto":
                     model_pin = self._conversation_session.locked_model_pin or "auto"
-                # Feed the locked per-agent model map through manual mode so
-                # _manual_prediction runs instead of predict_topology.
-                if self._conversation_session.locked_agent_models:
-                    agent_models = dict(self._conversation_session.locked_agent_models)
-                    manual_models = True
+                # Route through the manual-prediction path to skip the
+                # classifier — even when the user only pinned the topology
+                # and left per-agent models on "auto". The heuristic
+                # allocator (_build_agent_model_map) still fills in the
+                # models downstream; we just don't re-classify.
+                agent_models = dict(self._conversation_session.locked_agent_models or {})
+                manual_models = True
 
         logger.info(
             "run start session=%s requested_topology=%s requested_target=%s model_pin=%s manual_models=%s workdir=%s query=%s",
