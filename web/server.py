@@ -57,26 +57,9 @@ class DashboardServer:
         self._runner: web.AppRunner | None = None
         self._catalog_refresh_task: asyncio.Task | None = None
 
-        self._app.router.add_get("/ws", self._ws_handler)
-        self._app.router.add_get("/api/state", self._state_handler)
-        self._app.router.add_post("/api/inject", self._inject_handler)
-        self._app.router.add_post("/api/start", self._start_handler)
-        self._app.router.add_post("/api/session/new", self._new_session_handler)
-        self._app.router.add_post("/api/stop", self._stop_run_handler)
-        self._app.router.add_get("/api/run-status", self._run_status_handler)
-        self._app.router.add_get("/api/predict-topology", self._predict_topology_handler)
-        self._app.router.add_get("/api/models", self._models_handler)
-        self._app.router.add_get("/api/settings", self._settings_get_handler)
-        self._app.router.add_get("/api/topologies", self._topologies_handler)
-        self._app.router.add_get("/api/fs/list", self._fs_list_handler)
-        self._app.router.add_get("/api/fs/files", self._fs_files_handler)
-        self._app.router.add_get("/api/fs/read", self._fs_read_handler)
-        self._app.router.add_get("/api/git/status", self._git_status_handler)
-        self._app.router.add_post("/api/git/init", self._git_init_handler)
-        self._app.router.add_post("/api/git/pr-url", self._git_pr_url_handler)
-        self._app.router.add_get("/api/admin/traces/sessions", self._trace_sessions_handler)
-        self._app.router.add_get("/api/admin/traces/session/{session_id}", self._trace_session_runs_handler)
-        self._app.router.add_get("/api/admin/traces/run/{run_id}", self._trace_run_handler)
+        # Legacy routes removed — every surface is under /api/v1/... now.
+        # Handler methods are kept on this class because the v1 layer
+        # still delegates to a few of them (git status, for instance).
         self._app.router.add_get("/", self._index_handler)
         self._app.router.add_static("/static", STATIC_DIR)
 

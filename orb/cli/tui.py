@@ -1484,14 +1484,14 @@ class OrbTUI(App[None]):
             self._awaiting_user_question = ""
             self.query_one("#query-label", Label).update(" task > ")
             self._hide_question_banner()
-            await self._post_json("/api/inject", {"to": target, "message": raw})
+            await self._post_json(self._v1_session_path("/runs/inject"), {"to": target, "message": raw})
             return
 
         # Mid-run: inject to entry agent
         if self._run_status == "Running":
             entry = next((aid for aid in self._agents if aid == "coordinator"),
                          next(iter(self._agents), "coordinator"))
-            await self._post_json("/api/inject", {"to": entry, "message": raw})
+            await self._post_json(self._v1_session_path("/runs/inject"), {"to": entry, "message": raw})
             return
 
         # New run
@@ -1546,7 +1546,7 @@ class OrbTUI(App[None]):
         self._set_workspace_tab("timeline")
         self._refresh_all()
 
-        resp = await self._post_json("/api/start", {
+        resp = await self._post_json(self._v1_session_path("/runs"), {
             "query": query,
             "topology": self._topology_name,
         })
@@ -1563,18 +1563,36 @@ class OrbTUI(App[None]):
     # ── WebSocket client ──────────────────────────────────────────────────────
 
     async def _post_json(self, path: str, payload: dict) -> dict:
+        """POST and unwrap a v1 envelope `{ok, code, data}` into a flat dict.
+
+        Legacy routes that return top-level fields fall through unchanged.
+        """
         url = f"{self._server_scheme}://{self._server_host}:{self._server_port}{path}"
         try:
             async with self._http_session.post(url, json=payload) as resp:
-                return await resp.json()
+                body = await resp.json()
         except Exception as exc:
             logger.warning("POST %s failed: %s", path, exc)
             return {"ok": False, "error": str(exc)}
+        if isinstance(body, dict) and "ok" in body and "data" in body:
+            if body["ok"]:
+                merged = {"ok": True}
+                merged.update(body.get("data") or {})
+                return merged
+            return {"ok": False, "error": body.get("error"), "code": body.get("code")}
+        return body
+
+    def _v1_session_path(self, suffix: str) -> str:
+        """Build a /api/v1/sessions/{id}/... URL for the TUI's session."""
+        session_id = self._session_id or ""
+        if not session_id:
+            return suffix  # legacy fallback until init arrives
+        return f"/api/v1/sessions/{session_id}{suffix}"
 
     async def _start_ws_client(self) -> None:
         import aiohttp
         ws_scheme = "wss" if self._server_scheme == "https" else "ws"
-        url = f"{ws_scheme}://{self._server_host}:{self._server_port}/ws"
+        url = f"{ws_scheme}://{self._server_host}:{self._server_port}/api/v1/ws"
         while True:
             try:
                 async with self._http_session.ws_connect(url, heartbeat=30) as ws:
@@ -2196,7 +2214,7 @@ class OrbTUI(App[None]):
 
     async def action_cancel_run(self) -> None:
         if self._run_status == "Running":
-            await self._post_json("/api/stop", {})
+            await self._post_json(self._v1_session_path("/runs/stop"), {})
 
     def action_clear_feed(self) -> None:
         self._timeline_entries.clear()

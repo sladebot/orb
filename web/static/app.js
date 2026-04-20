@@ -29,6 +29,25 @@ const MSG_TYPE_BADGE_CLASS = {
     system:   'msg-type-system',
 };
 
+/**
+ * Unwrap a v1 JSON envelope `{ok, code, data}` into its payload.
+ * Falls through to the raw JSON when the response isn't wrapped
+ * (legacy shape or hand-rolled error responses). Returns null on
+ * parse failure so callers can branch cleanly.
+ */
+async function unwrapEnvelope(res) {
+    let env;
+    try {
+        env = await res.json();
+    } catch {
+        return null;
+    }
+    if (env && typeof env === 'object' && 'ok' in env && 'data' in env) {
+        return env.ok ? env.data : { ok: false, error: env.error, code: env.code };
+    }
+    return env;
+}
+
 class Dashboard {
     constructor() {
         this.canvas      = document.getElementById('graph-canvas');
@@ -425,8 +444,8 @@ class Dashboard {
         if (!path) { host.innerHTML = ''; return; }
         host.innerHTML = `<span class="git-pill">checking…</span>`;
         try {
-            const res = await fetch(`/api/git/status?path=${encodeURIComponent(path)}`);
-            const data = await res.json();
+            const res = await fetch(`/api/v1/git/status?path=${encodeURIComponent(path)}`);
+            const data = await unwrapEnvelope(res);
             if (!data.ok) { host.innerHTML = `<span class="git-pill">—</span>`; return; }
             if (data.is_git_repo) {
                 const unc = data.has_uncommitted ? ' · uncommitted' : '';
@@ -445,7 +464,7 @@ class Dashboard {
         const btn = document.getElementById('sc-git-init');
         if (btn) { btn.disabled = true; btn.textContent = 'Initializing…'; }
         try {
-            await fetch('/api/git/init', {
+            await fetch('/api/v1/git/init', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path }),
@@ -518,8 +537,8 @@ class Dashboard {
             const qs = new URLSearchParams();
             if (path) qs.set('path', path);
             if (this._fsShowHidden) qs.set('hidden', '1');
-            const res = await fetch(`/api/fs/list?${qs.toString()}`);
-            const data = await res.json();
+            const res = await fetch(`/api/v1/fs/list?${qs.toString()}`);
+            const data = await unwrapEnvelope(res);
             if (!data.ok) {
                 list.innerHTML = `<div class="sc-fs-error">${this._escapeHtml(data.error || 'Failed to list')}</div>`;
                 return;
@@ -716,8 +735,8 @@ class Dashboard {
     async _loadWorkspaceFiles(workdir) {
         if (!workdir) { this._workspaceFiles = []; this._renderLiveCodeChanges(); return; }
         try {
-            const res = await fetch(`/api/fs/files?path=${encodeURIComponent(workdir)}`);
-            const data = await res.json();
+            const res = await fetch(`/api/v1/fs/files?path=${encodeURIComponent(workdir)}`);
+            const data = await unwrapEnvelope(res);
             if (data.ok) {
                 this._workspaceFiles = (data.files || []).map((p) => ({
                     path: p,
@@ -749,8 +768,8 @@ class Dashboard {
     async _ensureTopologyList() {
         if (this._topologyList && this._topologyList.length) return;
         try {
-            const res = await fetch('/api/topologies');
-            const data = await res.json();
+            const res = await fetch('/api/v1/topologies');
+            const data = await unwrapEnvelope(res);
             this._topologyList = Array.isArray(data.topologies) ? data.topologies : [];
         } catch {
             this._topologyList = [];
@@ -760,8 +779,8 @@ class Dashboard {
     async _ensureModelList() {
         if (this._modelCatalog && this._modelCatalog.length) return;
         try {
-            const res = await fetch('/api/models');
-            const data = await res.json();
+            const res = await fetch('/api/v1/models');
+            const data = await unwrapEnvelope(res);
             this._modelCatalog = Array.isArray(data.models) ? data.models : [];
         } catch {
             this._modelCatalog = [];
@@ -984,8 +1003,8 @@ class Dashboard {
 
     async _refreshRepoBranch(workdir) {
         try {
-            const res = await fetch(`/api/git/status?path=${encodeURIComponent(workdir)}`);
-            const data = await res.json();
+            const res = await fetch(`/api/v1/git/status?path=${encodeURIComponent(workdir)}`);
+            const data = await unwrapEnvelope(res);
             if (!data.ok || !data.is_git_repo) return;
             const branchEl = document.getElementById('repo-branch');
             if (branchEl) {
@@ -1010,7 +1029,7 @@ class Dashboard {
         }
         if (btn) { btn.disabled = true; btn.textContent = 'Opening…'; }
         try {
-            const res = await fetch('/api/git/pr-url', {
+            const res = await fetch('/api/v1/git/pr-url', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: workdir }),
@@ -2061,8 +2080,8 @@ class Dashboard {
     // ── Query bar ─────────────────────────────────────────────
 
     async _loadModelOptions() {
-        const res = await fetch('/api/models');
-        const data = await res.json();
+        const res = await fetch('/api/v1/models');
+        const data = await unwrapEnvelope(res);
         this._modelLabels = {};
         this._models = data.models || [];
         this._indexModelsByProvider(this._models);
@@ -2074,8 +2093,8 @@ class Dashboard {
     }
 
     async _loadSettings() {
-        const res = await fetch('/api/settings');
-        const data = await res.json();
+        const res = await fetch('/api/v1/settings');
+        const data = await unwrapEnvelope(res);
         const providers = data.providers || {};
         const enabledProviders = Object.entries(providers)
             .filter(([, meta]) => meta && meta.enabled)
@@ -2248,8 +2267,8 @@ class Dashboard {
     }
 
     async _loadTraceSessions() {
-        const res = await fetch('/api/admin/traces/sessions');
-        const data = await res.json();
+        const res = await fetch('/api/v1/traces/sessions');
+        const data = await unwrapEnvelope(res);
         this._traceSessions = Array.isArray(data.sessions) ? data.sessions : [];
         const preferredSession = this._selectedTraceSession || data.current_session_id || '';
         const nextSession = this._traceSessions.find((item) => item.session_id === preferredSession)?.session_id
@@ -2268,8 +2287,8 @@ class Dashboard {
     }
 
     async _loadTraceRuns(sessionId) {
-        const res = await fetch(`/api/admin/traces/session/${encodeURIComponent(sessionId)}`);
-        const data = await res.json();
+        const res = await fetch(`/api/v1/traces/sessions/${encodeURIComponent(sessionId)}`);
+        const data = await unwrapEnvelope(res);
         this._traceRuns = Array.isArray(data.runs) ? data.runs : [];
         const nextRun = this._traceRuns.find((item) => item.run_id === this._selectedTraceRun)?.run_id
             || this._traceRuns[0]?.run_id
@@ -2284,12 +2303,12 @@ class Dashboard {
     }
 
     async _loadTraceDetail(runId) {
-        const res = await fetch(`/api/admin/traces/run/${encodeURIComponent(runId)}`);
+        const res = await fetch(`/api/v1/traces/runs/${encodeURIComponent(runId)}`);
         if (!res.ok) {
             this._renderTraceDetail(null);
             return;
         }
-        const data = await res.json();
+        const data = await unwrapEnvelope(res);
         this._renderTraceDetail(data);
     }
 
@@ -2495,8 +2514,8 @@ class Dashboard {
     }
 
     async _loadTopologyOptions() {
-        const res = await fetch('/api/topologies');
-        const data = await res.json();
+        const res = await fetch('/api/v1/topologies');
+        const data = await unwrapEnvelope(res);
         this._topologyList = data.topologies || [];
         this._renderTopologyMenu();
         this._updateTopologyTrigger();
@@ -2843,7 +2862,7 @@ class Dashboard {
             button.textContent = 'Starting…';
         }
         try {
-            const res = await fetch('/api/session/new', { method: 'POST' });
+            const res = await fetch('/api/v1/sessions', { method: 'POST' });
             let data = null;
             try {
                 data = await res.json();
@@ -3208,8 +3227,8 @@ class Dashboard {
         }
         host.innerHTML = `<div class="repo-empty">Loading ${this._escapeHtml(file.path)}…</div>`;
         try {
-            const res = await fetch(`/api/fs/read?workdir=${encodeURIComponent(workdir)}&path=${encodeURIComponent(file.path)}`);
-            const data = await res.json();
+            const res = await fetch(`/api/v1/fs/read?workdir=${encodeURIComponent(workdir)}&path=${encodeURIComponent(file.path)}`);
+            const data = await unwrapEnvelope(res);
             if (!data.ok) {
                 host.innerHTML = `<div class="repo-empty">${this._escapeHtml(data.error || 'Could not read file')}</div>`;
                 return;

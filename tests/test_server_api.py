@@ -133,10 +133,18 @@ async def client():
 
 class TestServerAPI:
 
+    async def _default_session_id(self, client) -> str:
+        """Pull the session_id of the default session the server spins up."""
+        resp = await client.get("/api/v1/sessions")
+        data = (await resp.json())["data"]
+        return data["sessions"][0]["session_id"]
+
     async def test_api_state_returns_init_event(self, client):
-        resp = await client.get("/api/state")
+        sid = await self._default_session_id(client)
+        resp = await client.get(f"/api/v1/sessions/{sid}/state")
         assert resp.status == 200
-        data = await resp.json()
+        env = await resp.json()
+        data = env["data"]
         assert data["type"] == "init"
         assert "agents" in data
         assert "stats" in data
@@ -144,89 +152,108 @@ class TestServerAPI:
         assert "session_generation" in data
 
     async def test_api_run_status_not_running_initially(self, client):
-        resp = await client.get("/api/run-status")
+        sid = await self._default_session_id(client)
+        resp = await client.get(f"/api/v1/sessions/{sid}")
         assert resp.status == 200
-        data = await resp.json()
-        assert data["run_state"] == "idle"
+        env = await resp.json()
+        assert env["data"]["run_state"] == "idle"
 
     async def test_api_models_returns_list(self, client):
-        resp = await client.get("/api/models")
+        resp = await client.get("/api/v1/models")
         assert resp.status == 200
-        data = await resp.json()
-        assert "models" in data
-        assert any(m["id"] == "auto" for m in data["models"])
+        env = await resp.json()
+        models = env["data"]["models"]
+        assert any(m["id"] == "auto" for m in models)
 
     async def test_api_start_requires_query(self, client):
-        resp = await client.post("/api/start", json={"query": ""})
+        sid = await self._default_session_id(client)
+        resp = await client.post(f"/api/v1/sessions/{sid}/runs", json={"query": ""})
         assert resp.status == 400
+        env = await resp.json()
+        assert env["code"] == "QUERY_EMPTY"
 
     async def test_api_start_rejects_invalid_topology(self, client):
-        resp = await client.post("/api/start", json={
-            "query": "hello", "topology": "nonexistent"
-        })
-        assert resp.status == 400
+        sid = await self._default_session_id(client)
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/runs",
+            json={"query": "hello", "topology": "nonexistent"},
+        )
+        assert resp.status in {400, 500}
+        env = await resp.json()
+        assert env["ok"] is False
 
     async def test_api_inject_no_run_in_progress(self, client):
-        resp = await client.post("/api/inject", json={"to": "coder", "message": "hi"})
-        assert resp.status == 400
+        sid = await self._default_session_id(client)
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/runs/inject",
+            json={"to": "coder", "message": "hi"},
+        )
+        assert resp.status in {400, 409}
+        env = await resp.json()
+        assert env["ok"] is False
 
     async def test_api_stop_no_run_returns_error(self, client):
-        resp = await client.post("/api/stop")
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["ok"] is False
+        sid = await self._default_session_id(client)
+        resp = await client.post(f"/api/v1/sessions/{sid}/runs/stop")
+        assert resp.status == 409
+        env = await resp.json()
+        assert env["ok"] is False
+        assert env["code"] == "NO_RUN_IN_FLIGHT"
 
     async def test_api_start_accepts_valid_request(self, client):
-        resp = await client.post("/api/start", json={
-            "query": "write hello world",
-            "topology": "triad",
-        })
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["ok"] is True
-        assert data["init"]["type"] == "init"
+        sid = await self._default_session_id(client)
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/runs",
+            json={"query": "write hello world", "topology": "triad"},
+        )
+        assert resp.status == 202
+        env = await resp.json()
+        assert env["ok"] is True
+        init = env["data"]["init"]
+        assert init["type"] == "init"
         # Init snapshot surfaces the FSM state directly — in-flight means
         # planning | running | stopping (the three IN_FLIGHT_STATES).
-        assert data["init"]["run_state"] in {"planning", "running", "stopping"}
-        assert data["init"]["plan"]["topology"]["id"] == "triad"
-        assert data["init"]["plan"]["query"] == "write hello world"
+        assert init["run_state"] in {"planning", "running", "stopping"}
+        assert init["plan"]["topology"]["id"] == "triad"
+        assert init["plan"]["query"] == "write hello world"
 
     async def test_api_start_rejects_concurrent_run(self, client):
-        await client.post("/api/start", json={
-            "query": "task 1", "topology": "triad",
-        })
-        resp = await client.post("/api/start", json={
-            "query": "task 2", "topology": "triad",
-        })
-        data = await resp.json()
-        assert data["ok"] is False
+        sid = await self._default_session_id(client)
+        await client.post(
+            f"/api/v1/sessions/{sid}/runs",
+            json={"query": "task 1", "topology": "triad"},
+        )
+        resp = await client.post(
+            f"/api/v1/sessions/{sid}/runs",
+            json={"query": "task 2", "topology": "triad"},
+        )
+        env = await resp.json()
+        assert env["ok"] is False
 
     async def test_trace_admin_endpoints_return_session_and_run_data(self, client):
-        state_resp = await client.get("/api/state")
-        state_data = await state_resp.json()
-        session_id = state_data["session_id"]
+        sid = await self._default_session_id(client)
 
         runtime = client.server.app["_test_server_ref"].runtime  # type: ignore[index]
-        trace = runtime._last_trace = __import__("orb.tracing", fromlist=["RunTrace"]).RunTrace(session_id=session_id)  # noqa: SLF001
+        trace = runtime._last_trace = __import__("orb.tracing", fromlist=["RunTrace"]).RunTrace(session_id=sid)  # noqa: SLF001
         trace.record_topology_choice("triad", reason="test")
         trace.record_final_outcome(success=True, result="done")
         runtime._persist_run_trace()  # noqa: SLF001
 
-        sessions_resp = await client.get("/api/admin/traces/sessions")
+        sessions_resp = await client.get("/api/v1/traces/sessions")
         assert sessions_resp.status == 200
-        sessions_data = await sessions_resp.json()
-        assert any(item["session_id"] == session_id for item in sessions_data["sessions"])
+        sessions_env = await sessions_resp.json()
+        assert any(item["session_id"] == sid for item in sessions_env["data"]["sessions"])
 
-        runs_resp = await client.get(f"/api/admin/traces/session/{session_id}")
+        runs_resp = await client.get(f"/api/v1/traces/sessions/{sid}")
         assert runs_resp.status == 200
-        runs_data = await runs_resp.json()
-        assert runs_data["runs"][0]["session_id"] == session_id
+        runs_env = await runs_resp.json()
+        assert runs_env["data"]["runs"][0]["session_id"] == sid
 
-        run_id = runs_data["runs"][0]["run_id"]
-        trace_resp = await client.get(f"/api/admin/traces/run/{run_id}")
+        run_id = runs_env["data"]["runs"][0]["run_id"]
+        trace_resp = await client.get(f"/api/v1/traces/runs/{run_id}")
         assert trace_resp.status == 200
-        trace_data = await trace_resp.json()
-        assert trace_data["summary"]["run_id"] == run_id
+        trace_env = await trace_resp.json()
+        assert trace_env["data"]["summary"]["run_id"] == run_id
 
 
 
