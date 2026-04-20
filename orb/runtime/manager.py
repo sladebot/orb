@@ -98,7 +98,24 @@ class RuntimeManager:
         If `workdir` is provided, the session's conversation is scoped to
         that folder — file writes and tool calls land there regardless of
         what CWD the daemon was launched from.
+
+        When ``session_path`` is omitted we allocate a fresh path under
+        ``.orb/sessions/`` so concurrent sessions don't collide on a
+        shared ``session.json`` on disk. The path uses the brand-new
+        session's uuid so there's no chance of two sessions picking the
+        same file.
         """
+        if session_path is None:
+            # Seed a throwaway runtime just to get a fresh uuid, then
+            # discard it — we'll construct the real runtime with the
+            # pre-allocated path so _load_session reads from disk exactly
+            # once against the right file.
+            from .transcript import ConversationSession as _CS
+            fresh_id = _CS().session_id
+            from pathlib import Path as _P
+            base = _P(workdir) if workdir else _P.cwd()
+            session_path = base / ".orb" / "sessions" / f"{fresh_id}.json"
+            session_path.parent.mkdir(parents=True, exist_ok=True)
         runtime = GraphRuntime(session_path=session_path, compactor=self._compactor)
         if self._providers:
             runtime.configure(
