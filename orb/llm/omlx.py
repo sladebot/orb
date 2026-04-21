@@ -15,7 +15,11 @@ from ..cli.config import provider_default_model
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
-_TIMEOUT = 600.0
+# See orb/llm/ollama.py for rationale — split timeouts surface stalls
+# (e.g. a model listed by /v1/models but not actually loaded) in minutes
+# instead of tens of minutes.
+import httpx as _httpx
+_TIMEOUT = _httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
 
 logger = logging.getLogger(__name__)
 

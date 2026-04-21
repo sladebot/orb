@@ -15,8 +15,12 @@ from ._format import to_openai_messages
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL    = "llama3.2:latest"
-# Local models (qwen3.5:27b at 8192 tokens) can take several minutes
-_TIMEOUT = 600.0
+# Local models can be slow, but a flat 600s timeout hid real bugs: a model
+# listed by /v1/models that isn't actually loaded would hang the whole
+# connection for 10 minutes × 3 retries. Split timeouts fail fast on
+# connection issues while still allowing for model load + generation.
+import httpx as _httpx
+_TIMEOUT = _httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
 
 logger = logging.getLogger(__name__)
 

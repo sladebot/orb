@@ -197,6 +197,50 @@ class TestLLMAgent:
 
         assert agent_a.status == AgentStatus.WAITING
 
+    async def test_llm_retry_activity_includes_failure_reason(self):
+        """When an LLM call fails and is retried, the activity text must
+        include *why* — otherwise users see 'Retrying...' and assume progress
+        while every retry hits the same dead end (e.g. model not loaded).
+        """
+        class _FailingClient:
+            async def complete(self, request):
+                raise httpx.ReadTimeout("timed out waiting for model")
+            async def close(self):
+                pass
+
+        import httpx
+        mock = _FailingClient()
+        from orb.llm.types import ModelConfig
+        mock_model = ModelConfig(tier=ModelTier.LOCAL_SMALL, model_id="gemma4", provider="omlx")
+        overrides = {t: mock_model for t in ModelTier}
+        providers = {"omlx": mock}
+
+        graph = Graph(); graph.add_node("agent_a"); graph.add_node("agent_b")
+        graph.add_edge("agent_a", "agent_b")
+        bus = MessageBus(graph)
+        ch_a = AgentChannel(); ch_b = AgentChannel()
+        bus.register_channel("agent_a", ch_a); bus.register_channel("agent_b", ch_b)
+        config_a = AgentConfig(node_id="agent_a", role="Coder", description="Writes code")
+        agent_a = LLMAgent(config_a, ch_a, bus, providers, model_overrides=overrides)
+        agent_a.initialize({"agent_b": "Reviewer"})
+
+        activities: list[str] = []
+        async def capture(_agent, activity, _details=None):
+            activities.append(activity)
+        agent_a._on_activity = capture
+
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="go")
+        await agent_a.process(msg)
+
+        retry_lines = [a for a in activities if "Retrying" in a]
+        assert retry_lines, f"expected at least one Retrying activity, got: {activities}"
+        # At least one retry line must surface the error reason. ReadTimeout
+        # is a very specific httpx exception name — test that *something*
+        # concrete about the failure appears in the retry UX.
+        assert any("timeout" in a.lower() or "ReadTimeout" in a for a in retry_lines), (
+            f"retry activities don't mention the failure reason: {retry_lines}"
+        )
+
     async def test_send_to_user_preserves_full_question_in_details(self):
         """The user-facing question must not be truncated before reaching the UI.
 

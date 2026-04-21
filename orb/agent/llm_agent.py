@@ -297,9 +297,12 @@ class LLMAgent(AgentNode):
                         f"({model_config.provider}/{model_config.model_id}) attempt {attempt}/{MAX_SAME_MODEL_RETRIES}: {exc}"
                     )
                     if attempt < MAX_SAME_MODEL_RETRIES:
+                        reason = type(exc).__name__
+                        detail = str(exc).splitlines()[0][:80] if str(exc) else ""
+                        suffix = f" — {reason}" + (f": {detail}" if detail else "")
                         await self._emit(
                             f"Retrying {_display_model_name(model_config.model_id)} "
-                            f"({attempt + 1}/{MAX_SAME_MODEL_RETRIES})…"
+                            f"({attempt + 1}/{MAX_SAME_MODEL_RETRIES}){suffix}"
                         )
                         await asyncio.sleep(0.5 * attempt)
 
