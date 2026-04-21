@@ -18,11 +18,12 @@ sparkline.
 ### Workflow
 
 1. Open the dashboard (`orb dashboard`). The **Session** modal auto-opens on first load so you can pick a workdir before anything else happens.
-2. Browse to a folder with the built-in file picker or paste an absolute path. Orb auto-detects whether it's a git repo and surfaces Sync + Open PR affordances when it is.
+2. Browse to a folder with the built-in file picker or paste an absolute path. Orb auto-detects whether it's a git repo and offers to run `git init` inline if it isn't.
 3. Pick a topology (with inline SVG preview) and optionally pin a model per node — or leave everything on Auto.
 4. Type a task in the composer and press **Send** (⌘↵).
 5. The topology panel lights up as nodes start working; file writes stream into the Repository changes panel with per-author attribution; the Conversation drawer streams agent-to-agent messages live.
 6. When planning completes, Orb pins the topology + per-node model map onto the session — follow-up turns reuse that allocation instead of re-classifying.
+7. To return to a prior session after a daemon restart (or just to continue an older run), click **Resume** in the chrome — the modal lists every known session with workdir, topology, and last-touched timestamp; clicking one reattaches the dashboard.
 
 ### Session config
 
@@ -48,10 +49,10 @@ with per-hunk author chips.
 
 ### Topologies
 
-| Triad | Dual Review | Hierarchy |
-|---|---|---|
-| ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
-| Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
+| Solo | Triad | Dual Review | Hierarchy |
+|---|---|---|---|
+| (single agent) | ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
+| One agent end-to-end — pick for trivial / one-off tasks | Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
 
 ### Mobile
 
@@ -67,7 +68,7 @@ to the bottom of the viewport so it's always reachable on a phone.
 
 ## What Orb Does
 
-- Runs coding tasks through explicit topologies such as `triad`, `dual-review`, and `hierarchy`
+- Runs coding tasks through explicit topologies (`solo`, `triad`, `dual-review`, `hierarchy`) — picks the smallest one the task actually needs
 - Hosts **N concurrent sessions on one daemon** — each with its own workdir, FSM, sandbox, and dashboard state (Option B multi-tenancy for harness integration)
 - Classifies tasks before execution and records the chosen topology, routing reason, and classifier model
 - Assigns models per node instead of forcing one model across the whole run
@@ -76,8 +77,9 @@ to the bottom of the viewport so it's always reachable on a phone.
 - Drives run lifecycle through an explicit **state machine** (`idle → planning → running → completed | errored | stopping`) with broadcasts for every transition
 - Streams incremental dashboard activity as nodes work, including node-local activity cards, message flow, and payload/context details for `send_message` events
 - **Auto-restores sessions from disk** on daemon restart — a page refresh or URL share transparently resurrects the session
+- **Resume** any prior session from the dashboard header or `Ctrl+R` in the TUI; stale in-flight markers from a crashed daemon are sanitized on restore so the UI never shows phantom "running" state
 - Persists session-aware traces for replay, inspection, and future routing work
-- Supports local and cloud providers, including `vmlx`, `openai-codex`, `ollama`, and `anthropic`
+- Supports local and cloud providers, including `vmlx`, `omlx`, `openai-codex`, `ollama`, and `anthropic`
 - Stores GraphRAG memory in Chroma-backed topology/cluster stores
 
 ## Current Defaults
@@ -87,6 +89,7 @@ Out of the box, Orb currently defaults to:
 - `vmlx`: enabled
 - `openai-codex`: enabled
 - `ollama`: disabled
+- `omlx`: disabled
 - `anthropic`: disabled
 
 This default mix gives Orb one local provider path and one cloud provider path without requiring all providers to be configured.
@@ -131,6 +134,7 @@ pip install -e ".[dev]"
 Depending on the providers you want to use:
 
 - `vmlx` expects a local OpenAI-compatible endpoint, defaulting to `http://localhost:1234/v1`
+- `omlx` expects a local OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`
 - `openai-codex` uses your OpenAI/Codex credentials
 - `anthropic` uses your Anthropic credentials
 - `ollama` expects a reachable Ollama server
@@ -193,9 +197,8 @@ Stop the daemon:
 orb daemon stop
 ```
 
-By default, the daemon binds to `http://0.0.0.0:1337`.
-
-Recommended startup:
+By default, the daemon binds to `http://127.0.0.1:1337`. For
+dashboards on other machines or containers, bind to all interfaces:
 
 ```bash
 orb daemon start --host 0.0.0.0 --port 1337
@@ -269,8 +272,9 @@ Useful global flags:
 
 ## Topologies
 
-Orb ships with three bundled topologies:
+Orb ships with four bundled topologies:
 
+- `solo`: single agent, no coordinator — for trivial / throwaway tasks
 - `triad`: coordinator, coder, reviewer, tester
 - `dual-review`: stronger correctness/review shape
 - `hierarchy`: broader planning and execution shape
@@ -278,6 +282,7 @@ Orb ships with three bundled topologies:
 You can request one explicitly:
 
 ```bash
+orb tui --topology solo
 orb tui --topology triad
 orb tui --topology dual-review
 orb tui --topology hierarchy
@@ -345,12 +350,21 @@ The daemon writes more descriptive run and dashboard event logs to `~/.orb/run.l
 
 ## Providers and Model Selection
 
-Orb supports four provider families:
+Orb supports five provider families:
 
-- `vmlx`
-- `openai-codex`
-- `ollama`
-- `anthropic`
+- `vmlx` (local, OpenAI-compatible)
+- `omlx` (local, OpenAI-compatible)
+- `openai-codex` (cloud)
+- `ollama` (local)
+- `anthropic` (cloud)
+
+All three local providers use a bounded, split httpx timeout
+(`connect=10s`, `read=180s`) so a model that the server advertises
+but hasn't actually loaded surfaces as a `ReadTimeout` in minutes,
+not the 10-minute flat hang it used to be. When an LLM call does
+fail, the agent's retry activity reports the specific exception
+(e.g. `Retrying gemma-4-e4b-it-8bit (2/3) — ReadTimeout: …`) so
+stalls are attributable instead of opaque.
 
 Model catalogs can be inspected and refreshed through:
 
@@ -403,10 +417,11 @@ orb trace tail --current-session
 orb trace show <run_id>
 ```
 
-Trace files are stored under:
+Trace files are stored per-session under the daemon anchor (never inside
+your project repo):
 
 ```text
-.orb/traces/
+~/.orb/daemon/sessions/{session_id}/traces/{run_id}.json
 ```
 
 ## Custom Topologies
@@ -456,16 +471,18 @@ npx chromadb-admin
 orb/
 ├── agent/          # agent runtime, tools, compaction, prompting
 ├── cli/            # CLI entrypoints, daemon management, auth, config, TUI
-├── llm/            # provider integrations and model typing
+│   └── paths.py    # single source of truth for ~/.orb/ layout
+├── llm/            # provider integrations (vmlx, omlx, ollama, openai-codex, anthropic)
 ├── memory/         # GraphRAG and Chroma-backed memory backends
 ├── messaging/      # message bus, channels, message types
 ├── orchestrator/   # orchestrator runtime
 ├── runtime/        # graph runtime, classifier, session and trace plumbing
-├── topologies/     # bundled topology definitions, schema, loader, factory
+├── topologies/     # bundled topology definitions (solo/triad/dual-review/hierarchy), schema, loader, factory
 ├── tracing/        # run trace schema and persistence helpers
 web/
 ├── bridge.py       # runtime events -> dashboard state
 ├── server.py       # API, websocket, dashboard, trace admin endpoints
+├── api_v1.py       # envelope-based /api/v1/* routes
 └── static/         # browser UI
 ```
 
@@ -508,6 +525,33 @@ async with OrbClient("http://127.0.0.1:1337") as client:
 `OrbClient.stream_events(session_id)` yields every WebSocket event as a typed
 `Event` dataclass; `Event.is_terminal` is true for `completed` and `errored`.
 
+## Filesystem Layout
+
+Orb anchors all of its own state under `~/.orb/` — your project workdir
+is never polluted with bookkeeping files. The session's `workdir` is
+strictly the sandbox root for agent file operations; Orb writes zero
+bytes there.
+
+```text
+~/.orb/
+├── config.json                  # provider + model config
+├── run.log                      # shared daemon log
+└── daemon/                      # fixed anchor (never /tmp)
+    ├── daemon.json              # pid / host / port
+    ├── registry.json            # session index (survives restarts)
+    └── sessions/
+        └── {session_id}/
+            ├── snapshot.json    # ConversationSession (turns, carryover)
+            ├── dashboard.json   # dashboard state
+            └── traces/
+                ├── {run_id}.json
+                └── by-session/{session_id}.json
+```
+
+The daemon always anchors at `~/.orb/daemon/` regardless of the shell's
+CWD — so registries, snapshots, and traces survive restarts and
+reboot-wiped `/tmp`.
+
 ## Multi-Tenant Daemon
 
 A single daemon registers N `GraphRuntime` instances keyed by session_id.
@@ -515,11 +559,16 @@ Broadcasts are multiplexed onto one WebSocket (`/api/v1/ws?session_id=X`);
 every payload is tagged with its originating session so the dashboard can
 filter per-client.
 
-A daemon-scoped registry (`<cwd>/.orb/registry.json`) maps each session to
-its workdir + session file. On daemon restart, the dashboard's stale
+The registry at `~/.orb/daemon/registry.json` maps each session to its
+workdir + snapshot path. On daemon restart, the dashboard's stale
 `?session=...` URL transparently resurrects the session from disk; on
-genuinely missing sessions the WS handler emits `SESSION_NOT_FOUND` and the
-frontend drops the stale URL before reconnecting.
+genuinely missing sessions the WS handler emits `SESSION_NOT_FOUND` and
+the frontend drops the stale URL before reconnecting.
+
+If a daemon died mid-run, the resurrected session's dashboard state is
+**sanitized** on restore — any `run_state: running` or stuck agent
+statuses from the crashed daemon are rewritten to `errored` / `idle` so
+the UI doesn't show a phantom in-flight run.
 
 Inspect and manage active sessions from the CLI:
 
@@ -530,19 +579,37 @@ orb sessions rm <prefix>
 orb sessions prune --older-than 7d
 ```
 
+### Resuming a session
+
+Every prior session that still has a snapshot on disk can be reattached:
+
+- **Dashboard**: click **Resume** in the header; pick a session from the
+  modal (workdir, topology, last updated).
+- **TUI**: press **Ctrl+R** to open the chooser; press 1–9 to switch.
+- **API**: `GET /api/v1/sessions?include=known` returns both in-memory
+  and registry-only sessions.
+
+Resume preserves conversation turns, agent carryover, and locked
+topology/models. Running LLM calls are *not* replayed — agent tool
+calls (bash, partial file writes) aren't idempotent, so resume lands
+you in an `idle` session with full context, ready for a new turn.
+
 ## Status
 
 Orb currently has:
 
 - multi-tenant daemon hosting N concurrent sessions with per-session workdir isolation
+- fixed daemon anchor at `~/.orb/daemon/` — session snapshots, traces, and registry never pollute your project repo
 - daemon-backed TUI and dashboard (WS multiplexed by session_id)
+- session resume surface in dashboard and TUI; auto-sanitization of stale in-flight markers after a crashed daemon
 - Python SDK + `/api/v1/*` envelope-based HTTP API for harness integration
 - persistent session registry with auto-restore after daemon restart
 - explicit runtime state machine (`idle → planning → running → completed | errored | stopping`)
 - persisted session-aware traces
-- explicit topologies with hot-reload and inline SVG preview in the dashboard
-- provider-backed topology classification
+- four bundled topologies (`solo`, `triad`, `dual-review`, `hierarchy`) with hot-reload and inline SVG preview
+- provider-backed topology classification with complexity-aware routing (solo for trivial tasks, up through hierarchy for larger work)
 - per-node model allocation
+- five supported providers (`vmlx`, `omlx`, `openai-codex`, `ollama`, `anthropic`) with bounded timeouts and user-visible retry reasons
 - configurable provider catalogs/defaults
 - dashboard visibility into routing and model choices
 
