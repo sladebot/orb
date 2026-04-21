@@ -248,15 +248,15 @@ class RuntimeManager:
         workdir = entry.get("workdir", "") or None
         if not session_path:
             return None
-        # If BOTH the session file AND the dashboard snapshot are gone,
-        # the session is truly dead — drop the stale index entry. Both
-        # live under the session's state dir now; session.workdir is the
-        # user's repo, which Orb no longer writes into.
+        # Resuming a session requires a ConversationSession snapshot —
+        # otherwise GraphRuntime loads a blank session with a fresh
+        # session_id, silently losing prior turns/carryover and letting
+        # a stale id "restore" into an empty runtime. dashboard.json is
+        # a secondary artifact and does not qualify on its own.
         from orb.cli.paths import session_state_dir
         state_dir = session_state_dir(session_id)
         snapshot_file = state_dir / "snapshot.json"
-        dashboard_file = state_dir / "dashboard.json"
-        if not session_path.exists() and not snapshot_file.exists() and not dashboard_file.exists():
+        if not session_path.exists() and not snapshot_file.exists():
             self._drop_registry_entry(session_id)
             return None
         try:

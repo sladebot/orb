@@ -2358,11 +2358,22 @@ class OrbTUI(App[None]):
         try:
             url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions/{session_id}/state"
             async with self._http_session.get(url) as resp:
+                status = resp.status
                 body = await resp.json()
         except Exception as exc:
             logger.warning("Failed to fetch session state for %s: %s", session_id, exc)
             return
-        payload = body.get("data") if isinstance(body, dict) and "data" in body else body
+        # Refuse error envelopes (e.g. 404 after a session was deleted
+        # between listing and click). Mutating _session_id here would
+        # silently attach the TUI to a dead session id and route every
+        # subsequent inject/run to a session that doesn't exist.
+        if status != 200 or not isinstance(body, dict) or body.get("ok") is False:
+            logger.warning(
+                "Refusing to attach to session %s: status=%s body=%s",
+                session_id, status, body,
+            )
+            return
+        payload = body.get("data") if "data" in body else body
         if not isinstance(payload, dict):
             return
         payload.setdefault("type", "init")

@@ -59,6 +59,33 @@ def test_list_known_sessions_includes_registry_only_entries(fake_home, tmp_path)
     assert prior["workdir"] == "/some/repo"
 
 
+def test_try_restore_requires_snapshot_file(fake_home, tmp_path):
+    """A registry entry with only dashboard.json (no snapshot.json) must
+    be treated as dead. Otherwise GraphRuntime loads a blank
+    ConversationSession with a fresh session_id, and we'd "restore" the
+    stale id into an empty runtime — silently losing prior context.
+    """
+    from orb.cli.paths import session_state_dir, daemon_home
+
+    sid = "dashboard-only"
+    registry_path = daemon_home() / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps({
+        sid: {"workdir": str(tmp_path), "session_path": str(session_state_dir(sid) / "snapshot.json")},
+    }))
+    state_dir = session_state_dir(sid)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Only dashboard.json — no snapshot.json.
+    (state_dir / "dashboard.json").write_text(json.dumps({"type": "init"}))
+
+    mgr = RuntimeManager()
+    assert mgr.try_restore(sid) is None, (
+        "try_restore hydrated a session whose ConversationSession snapshot is gone"
+    )
+    # Registry entry should also be pruned so the ghost doesn't resurface.
+    assert sid not in json.loads(registry_path.read_text())
+
+
 def test_list_known_sessions_skips_registry_entries_without_snapshot(fake_home, tmp_path):
     """A ghost entry (in registry but snapshot deleted) must not surface —
     clicking 'resume' on a ghost would 404 in the UI.
@@ -115,6 +142,43 @@ async def test_api_v1_sessions_include_known_surfaces_registry_entries(fake_home
 
 
 @pytest.mark.asyncio
+async def test_tui_attach_rejects_error_envelope(monkeypatch):
+    """If the state fetch returns an error envelope (e.g. 404 after a
+    session was deleted between listing and click), the TUI must not
+    coerce it into an init event and must leave _session_id untouched.
+    """
+    from orb.cli.tui import OrbTUI
+
+    tui = OrbTUI.__new__(OrbTUI)
+    tui._server_scheme = "http"
+    tui._server_host = "127.0.0.1"
+    tui._server_port = 1337
+    tui._session_id = "old-sid"
+
+    class _FakeResp:
+        status = 404
+        ok = False
+        async def json(self):
+            return {"ok": False, "code": "SESSION_NOT_FOUND", "error": "gone"}
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    class _FakeHTTP:
+        def get(self, url):
+            return _FakeResp()
+
+    tui._http_session = _FakeHTTP()
+    handled = []
+    tui._handle_server_event = lambda data: handled.append(data)
+
+    await tui._attach_to_session("missing-sid")
+
+    # Must NOT have switched session or dispatched anything.
+    assert tui._session_id == "old-sid", "attached to a failed session!"
+    assert handled == [], f"dispatched event from error envelope: {handled}"
+
+
+@pytest.mark.asyncio
 async def test_tui_attach_to_session_updates_session_id(monkeypatch):
     """Calling OrbTUI._attach_to_session must swap the attached session and
     dispatch the incoming init payload so every widget re-renders.
@@ -129,6 +193,7 @@ async def test_tui_attach_to_session_updates_session_id(monkeypatch):
     tui._session_id = "old-sid"
 
     class _FakeResp:
+        status = 200
         async def json(self):
             return {"ok": True, "data": {"type": "init", "session_id": "new-sid", "agents": []}}
         async def __aenter__(self): return self
