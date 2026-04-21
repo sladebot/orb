@@ -151,6 +151,14 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         return ok("SESSION_CREATED", _session_summary(runtime), status=201)
 
     async def list_sessions(request: web.Request) -> web.Response:
+        include = (request.rel_url.query.get("include") or "").strip().lower()
+        if include == "known":
+            # Union of active + registry-only sessions for the resume picker.
+            sessions = manager.list_known_sessions()
+            return ok("SESSIONS_LISTED", {
+                "sessions": sessions,
+                "total": len(sessions),
+            })
         sessions = [_session_summary(rt) for rt in manager.list_sessions()]
         return ok("SESSIONS_LISTED", {
             "sessions": sessions,

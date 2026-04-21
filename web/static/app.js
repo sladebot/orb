@@ -187,6 +187,9 @@ class Dashboard {
         document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
         document.getElementById('trace-admin-close')?.addEventListener('click', () => this._closeTraceAdmin());
         document.getElementById('trace-admin-backdrop')?.addEventListener('click', () => this._closeTraceAdmin());
+        document.getElementById('resume-session-button')?.addEventListener('click', () => this._openResumeSession());
+        document.getElementById('resume-session-close')?.addEventListener('click', () => this._closeResumeSession());
+        document.getElementById('resume-session-backdrop')?.addEventListener('click', () => this._closeResumeSession());
 
         this._modalPriorFocus = new WeakMap();
         document.addEventListener('keydown', (e) => this._handleGlobalKeydown(e));
@@ -2344,6 +2347,95 @@ class Dashboard {
         modal.classList.add('hidden');
         modal.setAttribute('aria-hidden', 'true');
         this._restoreModalFocus(modal);
+    }
+
+    async _openResumeSession() {
+        const modal = document.getElementById('resume-session-modal');
+        if (!modal) return;
+        this._rememberModalFocus(modal);
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+        await this._loadKnownSessions();
+    }
+
+    _closeResumeSession() {
+        const modal = document.getElementById('resume-session-modal');
+        if (!modal) return;
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+        this._restoreModalFocus(modal);
+    }
+
+    async _loadKnownSessions() {
+        const listEl = document.getElementById('resume-session-list');
+        const emptyEl = document.getElementById('resume-session-empty');
+        if (!listEl || !emptyEl) return;
+        listEl.innerHTML = '';
+        emptyEl.classList.add('hidden');
+        try {
+            const res = await fetch('/api/v1/sessions?include=known');
+            const data = await unwrapEnvelope(res);
+            const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+            if (!sessions.length) {
+                emptyEl.classList.remove('hidden');
+                return;
+            }
+            // Skip the session the user is currently attached to — clicking
+            // it would just reload into itself.
+            const current = this._wsSessionId || '';
+            const rows = sessions.filter((s) => s.session_id !== current);
+            if (!rows.length) {
+                emptyEl.textContent = 'Only the current session is known.';
+                emptyEl.classList.remove('hidden');
+                return;
+            }
+            for (const s of rows) {
+                const row = document.createElement('div');
+                row.className = 'resume-session-row';
+                row.dataset.sessionId = s.session_id;
+                const when = this._formatRelativeTime(s.updated_at);
+                const active = s.active ? '<span class="rs-badge">active</span>' : '<span class="rs-badge dormant">dormant</span>';
+                row.innerHTML = `
+                    <div class="rs-main">
+                        <div class="rs-workdir">${this._escapeHtml(s.workdir || '(no workdir)')}</div>
+                        <div class="rs-sid">${this._escapeHtml(s.session_id)}</div>
+                        <div class="rs-meta">
+                            <span>updated ${this._escapeHtml(when)}</span>
+                            ${s.locked_topology ? `<span>· ${this._escapeHtml(s.locked_topology)}</span>` : ''}
+                            ${typeof s.user_turns === 'number' && s.user_turns > 0 ? `<span>· ${s.user_turns} turn${s.user_turns === 1 ? '' : 's'}</span>` : ''}
+                        </div>
+                    </div>
+                    ${active}
+                `;
+                row.addEventListener('click', () => this._resumeSession(s.session_id));
+                listEl.appendChild(row);
+            }
+        } catch (err) {
+            emptyEl.textContent = `Failed to load sessions: ${err?.message || err}`;
+            emptyEl.classList.remove('hidden');
+        }
+    }
+
+    _resumeSession(sessionId) {
+        if (!sessionId) return;
+        // Reattach by updating the URL and letting the WS reconnect flow
+        // pick up the new session filter. The server-side ws_handler calls
+        // manager.try_restore() on unknown session_ids, so registry-only
+        // sessions get hydrated on the fly.
+        const url = new URL(window.location.href);
+        url.searchParams.set('session', sessionId);
+        window.location.assign(url.toString());
+    }
+
+    _formatRelativeTime(ts) {
+        if (!ts || typeof ts !== 'number' || ts <= 0) return 'never';
+        const delta = Date.now() / 1000 - ts;
+        if (delta < 60) return 'just now';
+        if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+        if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+        const days = Math.floor(delta / 86400);
+        if (days < 30) return `${days}d ago`;
+        return new Date(ts * 1000).toISOString().slice(0, 10);
     }
 
     async _loadTraceSessions() {
