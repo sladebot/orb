@@ -37,6 +37,42 @@ const STATUS_COLORS = {
     running:   '#94bfff',
     completed: '#86d8ab',
     error:     '#f3afa7',
+    waiting:   '#f0c982',
+};
+
+// Flat status-tinted fills for node pill bodies. Solid, no gradients,
+// no glows — the color carries the state read, not luminance.
+const STATUS_FILL = {
+    dark: {
+        idle:      '#0d1218',
+        running:   'rgba(148, 191, 255, 0.14)',
+        completed: 'rgba(134, 216, 171, 0.14)',
+        error:     'rgba(243, 175, 167, 0.12)',
+        waiting:   'rgba(240, 201, 130, 0.14)',
+    },
+    light: {
+        idle:      '#f7fafc',
+        running:   'rgba(37, 99, 235, 0.08)',
+        completed: 'rgba(22, 163, 74, 0.08)',
+        error:     'rgba(199, 67, 67, 0.09)',
+        waiting:   'rgba(184, 119, 30, 0.10)',
+    },
+};
+const STATUS_BORDER = {
+    dark: {
+        idle:      'rgba(148, 163, 184, 0.35)',
+        running:   'rgba(148, 191, 255, 0.65)',
+        completed: 'rgba(134, 216, 171, 0.60)',
+        error:     'rgba(243, 175, 167, 0.60)',
+        waiting:   'rgba(240, 201, 130, 0.60)',
+    },
+    light: {
+        idle:      'rgba(129, 147, 166, 0.55)',
+        running:   'rgba(37, 99, 235, 0.60)',
+        completed: 'rgba(22, 163, 74, 0.55)',
+        error:     'rgba(199, 67, 67, 0.55)',
+        waiting:   'rgba(184, 119, 30, 0.55)',
+    },
 };
 
 const STATUS_BADGE = {
@@ -917,7 +953,10 @@ class GraphRenderer {
         const isComplete = this.runState === 'completed';
         const isLight = this.theme === 'light';
         const isLive = node.thinking || node.status === 'running';
-        const isDone = isComplete && node.status === 'completed';
+        const isDone = (isComplete && node.status === 'completed') || node.status === 'completed';
+        const isError = node.status === 'error' || node.status === 'errored';
+        const isWaiting = node.status === 'waiting'
+            || (typeof node.activity_text === 'string' && node.activity_text.startsWith('⏳'));
         const width = node.w || (isCore ? CORE_NODE_W : NODE_W);
         const height = node.h || (isCore ? CORE_NODE_H : NODE_H);
         const x = node.x - width / 2;
@@ -933,56 +972,55 @@ class GraphRenderer {
             else node.pulseStart = null;
         }
 
-        ctx.save();
-
-        // ── 1. Soft role-colored glow halo — live / selected / hover / done ──
-        if (isLive || isSelected || isHovered || pulse > 0.08 || isDone) {
-            const haloColor = isDone
-                ? (isLight ? '#16a34a' : '#86d8ab')
-                : roleAccent;
-            const haloAlpha = isSelected ? 0.32 : isHovered ? 0.22 : isLive ? 0.22 + pulse * 0.12 : 0.16;
-            ctx.save();
-            ctx.shadowColor = haloColor;
-            ctx.shadowBlur = 0;
-            ctx.globalAlpha = haloAlpha;
-            ctx.fillStyle   = haloColor;
-            roundRect(ctx, x - 4, y - 4, width + 8, height + 8, radius + 4);
-            ctx.fill();
-            ctx.restore();
-        }
-
-        // ── 2. Pill body — very dark fill matching panel tone, crisp 1px border ──
-        const borderColor = isSelected
-            ? roleAccent
-            : isLive
-                ? (isLight ? 'rgba(40,50,68,0.92)' : 'rgba(226,234,246,0.95)')
-                : isDone
-                    ? (isLight ? 'rgba(19,133,77,0.55)' : 'rgba(134,216,171,0.55)')
-                    : (isLight ? 'rgba(129,147,166,0.55)' : 'rgba(148,163,184,0.35)');
-        const fillColor = isLight
-            ? (isLive ? '#ffffff' : isDone ? '#f5fdf9' : '#f7fafc')
-            : (isLive ? '#11181f' : isDone ? '#0f1a16' : '#0d1218');
+        // Resolve status key → pick flat fill + border from palettes.
+        // Precedence: error > waiting > running > completed > idle.
+        const statusKey = isError
+            ? 'error'
+            : isWaiting
+                ? 'waiting'
+                : isLive
+                    ? 'running'
+                    : isDone
+                        ? 'completed'
+                        : 'idle';
+        const palette = isLight ? 'light' : 'dark';
+        // Flat fill: start from the panel-matching base, then tint by status.
+        // For dark mode the status fills are translucent so they sit on top
+        // of the panel; for light mode they already render as pastel.
+        const baseFill = isLight ? '#ffffff' : '#0d1218';
+        const statusTint = STATUS_FILL[palette][statusKey];
 
         ctx.save();
-        ctx.fillStyle = fillColor;
+
+        // ── Pill body: flat base + flat status tint stacked once.
+        ctx.fillStyle = baseFill;
         roundRect(ctx, x, y, width, height, radius);
         ctx.fill();
-        ctx.lineWidth   = isCore ? 1.4 : 1.1;
-        ctx.strokeStyle = borderColor;
+        if (statusKey !== 'idle') {
+            ctx.fillStyle = statusTint;
+            roundRect(ctx, x, y, width, height, radius);
+            ctx.fill();
+        }
+
+        // ── Border: status color. Selected gets a brighter role-accent
+        // to distinguish focus from mere status. No glow.
+        ctx.lineWidth = isSelected || isCore ? 1.6 : 1.1;
+        ctx.strokeStyle = isSelected
+            ? roleAccent
+            : isHovered
+                ? (isLight ? 'rgba(37, 99, 235, 0.75)' : 'rgba(148, 191, 255, 0.75)')
+                : STATUS_BORDER[palette][statusKey];
         roundRect(ctx, x + 0.5, y + 0.5, width - 1, height - 1, radius - 0.5);
         ctx.stroke();
-        ctx.restore();
 
-        // ── 3. v2 chip contents: [status dot] [name] — no glyph, no caption ──
+        // ── Chip contents: [status dot] [name] ───────────────────────────
         const padX = 12;
         const labelColor = isLive
             ? (isLight ? '#0d141d' : '#f0f4fa')
             : (isLight ? '#17202b' : '#c4ced9');
-        const dotColor = isLive
-            ? roleAccent
-            : isDone
-                ? (isLight ? '#16a34a' : '#86d8ab')
-                : (isLight ? '#8796a7' : '#7a8499');
+        // Status dot uses the same palette as the border so the two read
+        // as a matched set (no mixed messages about what state the node is in).
+        const dotColor = statusColor(statusKey, isLight ? '#8796a7' : '#7a8499');
 
         const dotRadius = 3 + pulse * 1;
         const dotX = x + padX;
