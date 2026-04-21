@@ -227,6 +227,80 @@ async def test_async_main_tui_subcommand_defaults_to_local_daemon():
 
 
 @pytest.mark.asyncio
+async def test_async_main_tui_defaults_session_workdir_to_cwd(tmp_path, monkeypatch):
+    """Invoking `orb tui` without --workdir must scope the session to the
+    shell's current working directory, not leave it blank.
+    """
+    monkeypatch.chdir(tmp_path)
+    args = _base_args(subcommand="tui", query="hello")
+
+    captured: dict = {}
+
+    class _FakeResp:
+        async def json(self):
+            return {"ok": True, "session_id": "sid-1"}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeSess:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, url, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResp()
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("aiohttp.ClientSession", lambda *a, **kw: _FakeSess()), \
+         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock):
+        await async_main()
+
+    assert captured.get("url", "").endswith("/api/session/new"), captured
+    assert captured.get("json", {}).get("workdir") == str(tmp_path.resolve()), captured
+
+
+@pytest.mark.asyncio
+async def test_async_main_tui_workdir_flag_overrides_cwd(tmp_path, monkeypatch):
+    """--workdir should win over CWD when both are available."""
+    cwd = tmp_path / "cwd"; cwd.mkdir()
+    explicit = tmp_path / "explicit"; explicit.mkdir()
+    monkeypatch.chdir(cwd)
+    args = _base_args(subcommand="tui", query="hello", workdir=str(explicit))
+
+    captured: dict = {}
+
+    class _FakeResp:
+        async def json(self):
+            return {"ok": True, "session_id": "sid-2"}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeSess:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, url, json=None):
+            captured["json"] = json
+            return _FakeResp()
+
+    with patch("orb.cli.main.parse_args", return_value=args), \
+         patch("orb.cli.main._setup_log_file"), \
+         patch("aiohttp.ClientSession", lambda *a, **kw: _FakeSess()), \
+         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock):
+        await async_main()
+
+    assert captured["json"]["workdir"] == str(explicit.resolve())
+
+
+@pytest.mark.asyncio
 async def test_async_main_tui_uses_file_only_logging():
     args = _base_args(subcommand="tui", verbose=True, quiet=False)
 
