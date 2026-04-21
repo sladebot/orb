@@ -384,7 +384,8 @@ async def test_async_main_dashboard_connect_starts_remote_run():
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._setup_log_file"), \
          patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")), \
-         patch("aiohttp.ClientSession", return_value=fake_session):
+         patch("aiohttp.ClientSession", return_value=fake_session), \
+         patch("webbrowser.open"):
         await async_main()
 
     fake_session.post.assert_called_once()
