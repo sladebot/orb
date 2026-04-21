@@ -83,6 +83,7 @@ AGENT_KEY_MAP: dict[str, str] = {
 }
 
 TOPOLOGY_LABELS: dict[str, str] = {
+    "solo": "Solo",
     "triad": "Triad",
     "dual-review": "Dual Review",
     "hierarchy": "Hierarchy",

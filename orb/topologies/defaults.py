@@ -4,6 +4,53 @@ BUILTIN_TOPOLOGIES_YAML = """\
 version: "1.0"
 
 topologies:
+  solo:
+    id: "solo"
+    label: "Solo"
+    description: "A single agent handles the task end-to-end. No coordination, no review — pick for trivial or throwaway tasks."
+    entry_agent: "solo"
+
+    agents:
+      solo:
+        role: "Solo Agent"
+        category: "implementation"
+        position_label: "sole worker"
+        description: >
+          You are the only agent on this task. There are no neighbors to
+          delegate to and no reviewer to check your work. Read any
+          relevant files, make the change directly in the shared sandbox,
+          and complete the task when done. Be terse — you own every step.
+        base_complexity: 30
+        enable_filesystem: true
+
+    edges: []
+
+    workflow_steps:
+      - "Read the task."
+      - "Inspect any relevant files in the sandbox."
+      - "Make the change (or answer the question) directly."
+      - "Call complete_task with the result."
+
+    completion_rules:
+      solo:
+        - "You have no neighbors — do not attempt to send_message to anyone."
+        - "Do the whole task yourself, then complete."
+        - "If the task is larger than expected, note it in the result rather than trying to recruit help."
+
+    graph_view:
+      order: ["solo"]
+      rows:
+        - [{text: "        "}, {node: "solo"}]
+
+    selection_hints:
+      ideal_for:
+        - "trivial one-off changes (rename, typo, one-line edit)"
+        - "short explanatory questions about existing code"
+        - "tasks a single engineer would finish in under five minutes"
+      keywords: ["quick", "simple", "one-off", "rename", "typo", "trivial", "explain"]
+      min_complexity: 0
+      max_complexity: 20
+
   triad:
     id: "triad"
     label: "Triad"
@@ -92,7 +139,7 @@ topologies:
         - "compact implementation tasks with one coding path"
         - "small to medium coding requests"
       keywords: ["bugfix", "feature", "script", "tool", "prototype"]
-      min_complexity: 0
+      min_complexity: 15
       max_complexity: 60
 
   dual-review:
