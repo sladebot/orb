@@ -274,8 +274,15 @@ class RuntimeManager:
             if self._topology_classifier is not None:
                 runtime.set_topology_classifier(self._topology_classifier)
             runtime.subscribe(self._forward_broadcast)
+            # Scrub any stale in-flight markers left by the daemon that
+            # originally wrote this snapshot; otherwise the UI shows a
+            # phantom running state the fresh runtime can't back up.
+            recovered = runtime.recover_stale_run_state()
             self._sessions[session_id] = runtime
-            logger.info("session restored from disk id=%s workdir=%s", session_id, workdir or "<cwd>")
+            logger.info(
+                "session restored from disk id=%s workdir=%s recovered_stale=%s",
+                session_id, workdir or "<cwd>", recovered,
+            )
             return runtime
         except Exception:  # noqa: BLE001
             logger.exception("failed to restore session %s", session_id)

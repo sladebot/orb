@@ -809,6 +809,45 @@ class GraphRuntime:
         tmp.write_text(json.dumps(payload, indent=2))
         tmp.replace(path)
 
+    def recover_stale_run_state(self) -> bool:
+        """Sanitize a snapshot left in-flight by a crashed daemon.
+
+        If the previous daemon died while the FSM was planning / running /
+        stopping, the persisted ``dashboard.json`` still claims that. But
+        the fresh runtime has no orchestrator — there is nothing running.
+        Rewrite the snapshot to ``run_state: errored`` and flip any agents
+        stuck in ``running`` / ``planning`` / ``pending`` to ``idle`` so the
+        UI doesn't lie about an already-dead run.
+
+        Returns ``True`` when the snapshot was modified, ``False`` otherwise.
+        """
+        sid = self._conversation_session.session_id
+        if not sid:
+            return False
+        snapshot = self._load_dashboard_snapshot(sid)
+        if not snapshot:
+            return False
+        stale_run_states = {"planning", "running", "stopping"}
+        dirty = False
+        if snapshot.get("run_state") in stale_run_states:
+            snapshot["run_state"] = "errored"
+            snapshot["resume_note"] = "Previous run aborted — daemon restarted."
+            dirty = True
+        stale_agent_statuses = {"running", "planning", "pending", "waiting"}
+        for agent in snapshot.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            if agent.get("status") in stale_agent_statuses:
+                agent["status"] = "idle"
+                dirty = True
+        if dirty:
+            try:
+                self._write_dashboard_snapshot(snapshot, session_id=sid)
+            except OSError as exc:
+                logger.warning("Failed to persist sanitized snapshot for %s: %s", sid, exc)
+                return False
+        return dirty
+
     def _load_dashboard_file_changes(self, session_id: str | None = None) -> list[dict]:
         snapshot = self._load_dashboard_snapshot(session_id) or {}
         file_changes = snapshot.get("file_changes") or []
