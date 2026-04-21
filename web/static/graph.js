@@ -744,7 +744,7 @@ class GraphRenderer {
                 ctx.strokeStyle = glowColor;
                 ctx.lineWidth   = srcActive ? 7 : 6;
                 ctx.shadowColor = arrowColor;
-                ctx.shadowBlur  = srcActive ? 12 : 8;
+                ctx.shadowBlur = 0;
                 ctx.setLineDash([]);
                 this._traceRoute(ctx, route);
                 ctx.stroke();
@@ -776,7 +776,7 @@ class GraphRenderer {
             if ((srcActive || isComplete) && glowColor) {
                 ctx.save();
                 ctx.shadowColor = arrowColor;
-                ctx.shadowBlur  = srcActive ? 8 : 5;
+                ctx.shadowBlur = 0;
                 this._drawArrow(ctx, route[route.length - 2], route[route.length - 1], arrowColor, srcActive ? 11 : 9, srcActive ? 6 : 5);
                 ctx.restore();
             } else {
@@ -788,44 +788,8 @@ class GraphRenderer {
     }
 
     _drawCoreBackdrop(ctx, W, H) {
-        const cx = W / 2;
-        const cy = H / 2;
-        const completePulse = this.runState === 'completed'
-            ? Math.min(1, (performance.now() - this.runStateChangedAt) / 900)
-            : 0;
-        ctx.save();
-
-        const outer = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(W, H) * 0.42);
-        outer.addColorStop(0, completePulse > 0 ? 'rgba(134, 216, 171, 0.14)' : 'rgba(148, 191, 255, 0.08)');
-        outer.addColorStop(0.45, completePulse > 0 ? 'rgba(134, 216, 171, 0.06)' : 'rgba(42, 70, 112, 0.08)');
-        outer.addColorStop(1, 'rgba(10, 15, 19, 0)');
-        ctx.fillStyle = outer;
-        ctx.beginPath();
-        ctx.arc(cx, cy, Math.min(W, H) * 0.42, 0, Math.PI * 2);
-        ctx.fill();
-
-        for (const band of this._layoutBands || []) {
-            const laneGlow = ctx.createLinearGradient(56, band.y, W - 56, band.y);
-            laneGlow.addColorStop(0, 'rgba(10, 15, 19, 0)');
-            laneGlow.addColorStop(0.18, completePulse > 0 ? 'rgba(134, 216, 171, 0.04)' : 'rgba(148, 191, 255, 0.025)');
-            laneGlow.addColorStop(0.5, completePulse > 0 ? 'rgba(134, 216, 171, 0.08)' : 'rgba(121, 143, 166, 0.08)');
-            laneGlow.addColorStop(0.82, completePulse > 0 ? 'rgba(134, 216, 171, 0.04)' : 'rgba(148, 191, 255, 0.025)');
-            laneGlow.addColorStop(1, 'rgba(10, 15, 19, 0)');
-            ctx.fillStyle = laneGlow;
-            roundRect(ctx, 58, band.top, W - 116, band.bottom - band.top, 24);
-            ctx.fill();
-
-            ctx.strokeStyle = completePulse > 0 ? 'rgba(134, 216, 171, 0.08)' : 'rgba(121, 143, 166, 0.08)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([10, 14]);
-            ctx.beginPath();
-            ctx.moveTo(72, band.y);
-            ctx.lineTo(W - 72, band.y);
-            ctx.stroke();
-        }
-        ctx.setLineDash([]);
-
-        ctx.restore();
+        // Flat UI: no decorative halo or lane glows.
+        return;
     }
 
     _drawNetworkStatus(ctx, W, H) {
@@ -855,7 +819,7 @@ class GraphRenderer {
 
         ctx.save();
         ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-        ctx.shadowBlur = 18;
+        ctx.shadowBlur = 0;
         ctx.fillStyle = fill;
         roundRect(ctx, x, y, boxW, boxH, 16);
         ctx.fill();
@@ -921,7 +885,7 @@ class GraphRenderer {
 
             ctx.save();
             ctx.shadowColor = color;
-            ctx.shadowBlur  = 8;
+            ctx.shadowBlur = 0;
             ctx.fillStyle   = color;
             ctx.beginPath();
             ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
@@ -979,7 +943,7 @@ class GraphRenderer {
             const haloAlpha = isSelected ? 0.32 : isHovered ? 0.22 : isLive ? 0.22 + pulse * 0.12 : 0.16;
             ctx.save();
             ctx.shadowColor = haloColor;
-            ctx.shadowBlur  = isSelected ? 22 : isLive ? 18 : 14;
+            ctx.shadowBlur = 0;
             ctx.globalAlpha = haloAlpha;
             ctx.fillStyle   = haloColor;
             roundRect(ctx, x - 4, y - 4, width + 8, height + 8, radius + 4);
@@ -1027,7 +991,7 @@ class GraphRenderer {
         ctx.save();
         if (isLive) {
             ctx.shadowColor = roleAccent;
-            ctx.shadowBlur = 8 + pulse * 6;
+            ctx.shadowBlur = 0;
         }
         ctx.fillStyle = dotColor;
         ctx.globalAlpha = isLive ? 1 : 0.55;
@@ -1144,7 +1108,7 @@ class GraphRenderer {
         const boxY = Math.max(worldMinY + 16 / this.zoom, Math.min(worldMaxY - boxH - 16 / this.zoom, desiredY));
 
         ctx.shadowColor = 'rgba(0, 0, 0, 0.42)';
-        ctx.shadowBlur = isCore ? 22 : 16;
+        ctx.shadowBlur = 0;
         ctx.fillStyle = this.theme === 'light'
             ? (isCore ? 'rgba(255,255,255,0.96)' : 'rgba(248,250,252,0.97)')
             : (isCore ? 'rgba(28, 35, 43, 0.92)' : 'rgba(20, 26, 33, 0.94)');
