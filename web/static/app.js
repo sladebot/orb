@@ -122,8 +122,6 @@ class Dashboard {
         document.getElementById('drawer-close-inline')?.addEventListener('click', () => this._setDrawerOpen(false));
         document.getElementById('drawer-open')?.addEventListener('click', () => this._setDrawerOpen(true));
         document.getElementById('stop-run-button')?.addEventListener('click', () => this._requestStopRun());
-        document.getElementById('repo-sync-button')?.addEventListener('click', () => this._syncWorkspace());
-        document.getElementById('repo-pr-button')?.addEventListener('click', () => this._openPullRequest());
         document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((btn) => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('#repo-view-toggle .seg-btn').forEach((b) => b.classList.toggle('on', b === btn));
@@ -760,11 +758,18 @@ class Dashboard {
             this._focusFirstInModal(modal);
         }
 
-        // Ensure topology + model catalogs are cached, then render
-        await Promise.all([
+        // Ensure topology + model catalogs are cached, then render. A
+        // rejection here used to hang the modal with stale/empty lists;
+        // allSettled lets rendering proceed with whatever succeeded.
+        const results = await Promise.allSettled([
             this._ensureTopologyList(),
             this._ensureModelList(),
         ]);
+        for (const r of results) {
+            if (r.status === 'rejected') {
+                console.warn('session-config catalog fetch failed', r.reason);
+            }
+        }
         // Preselect based on what's locked or configured
         const seedTopology =
             this._sessionLock.topology
@@ -1046,70 +1051,6 @@ class Dashboard {
         try {
             await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/stop`, { method: 'POST' });
         } catch (err) { /* ignore */ }
-    }
-
-    async _syncWorkspace() {
-        const btn = document.getElementById('repo-sync-button');
-        const original = btn?.textContent;
-        if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-        try {
-            const workdir = this._sessionLock?.workdir || '';
-            if (workdir) {
-                await Promise.all([
-                    this._loadWorkspaceFiles(workdir),
-                    this._refreshRepoBranch(workdir),
-                ]);
-            } else {
-                this._renderLiveCodeChanges();
-            }
-        } finally {
-            if (btn) { btn.disabled = false; btn.textContent = original || '↻ Sync'; }
-        }
-    }
-
-    async _refreshRepoBranch(workdir) {
-        try {
-            const res = await fetch(`/api/v1/git/status?path=${encodeURIComponent(workdir)}`);
-            const data = await unwrapEnvelope(res);
-            if (!data.ok || !data.is_git_repo) return;
-            const branchEl = document.getElementById('repo-branch');
-            if (branchEl) {
-                branchEl.textContent = data.branch || 'HEAD';
-                branchEl.title = data.remote_url || '';
-            }
-            const baseEl = document.getElementById('repo-base-branch');
-            if (baseEl && data.github_slug) baseEl.title = data.github_slug;
-        } catch {
-            /* ignore */
-        }
-    }
-
-    async _openPullRequest() {
-        const workdir = this._sessionLock?.workdir || '';
-        const btn = document.getElementById('repo-pr-button');
-        const original = btn?.textContent;
-        if (!workdir) {
-            if (btn) { btn.textContent = 'Set workdir first'; btn.disabled = true; }
-            setTimeout(() => { if (btn) { btn.textContent = original || 'Open PR →'; btn.disabled = false; } }, 1800);
-            return;
-        }
-        if (btn) { btn.disabled = true; btn.textContent = 'Opening…'; }
-        try {
-            const res = await fetch('/api/v1/git/pr-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: workdir }),
-            });
-            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-            if (!data.ok) {
-                if (btn) btn.textContent = (data.error || 'PR not available').slice(0, 28);
-                setTimeout(() => { if (btn) btn.textContent = original || 'Open PR →'; }, 2400);
-                return;
-            }
-            window.open(data.compare_url, '_blank', 'noopener');
-        } finally {
-            if (btn) { btn.disabled = false; if (btn.textContent === 'Opening…') btn.textContent = original || 'Open PR →'; }
-        }
     }
 
     _restorePanelWidths() {

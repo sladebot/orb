@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from json import JSONDecodeError
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from orb.llm.client import LLMClient
 
 import httpx
 from orb.agent.compaction import COMPACT_THRESHOLD, DEFAULT_COMPACTOR, CompactionStrategy
@@ -52,8 +56,8 @@ class GraphRuntime:
         # so dashboards can react to the explicit lifecycle without
         # reconstructing it from several independent flags.
         self._fsm.subscribe(self._on_fsm_state_changed)
-        self._providers: dict = {}
-        self._all_providers: dict = {}
+        self._providers: dict[str, LLMClient] = {}
+        self._all_providers: dict[str, LLMClient] = {}
         self._enabled_providers: list[str] = []
         self._config = None
         self._model_overrides = None

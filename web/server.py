@@ -352,6 +352,10 @@ class DashboardServer:
             timeout=15,
         )
 
+    async def _git_status_async(self, path: Path) -> dict:
+        """Async wrapper — offloads the blocking subprocess calls to a thread."""
+        return await asyncio.to_thread(self._git_status, path)
+
     def _git_status(self, path: Path) -> dict:
         """Inspect a folder for git repo state — used by the dashboard."""
         info: dict = {
@@ -419,7 +423,7 @@ class DashboardServer:
         files: list[str] = []
         used_git = False
         try:
-            result = self._run_git(["ls-files", "-z"], path)
+            result = await asyncio.to_thread(self._run_git, ["ls-files", "-z"], path)
             if result.returncode == 0:
                 used_git = True
                 files = [
@@ -511,7 +515,7 @@ class DashboardServer:
                 {"ok": False, "error": f"path must point to an existing directory: {raw}"},
                 status=400,
             )
-        info = self._git_status(path)
+        info = await self._git_status_async(path)
         return web.json_response(info)
 
     async def _git_init_handler(self, request: web.Request) -> web.Response:
@@ -523,12 +527,12 @@ class DashboardServer:
         if path is None:
             return web.json_response({"ok": False, "error": "path must point to an existing directory"}, status=400)
         try:
-            result = self._run_git(["init"], path)
+            result = await asyncio.to_thread(self._run_git, ["init"], path)
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             return web.json_response({"ok": False, "error": f"git CLI failed: {exc}"}, status=500)
         if result.returncode != 0:
             return web.json_response({"ok": False, "error": result.stderr.strip() or "git init failed"}, status=500)
-        return web.json_response({"ok": True, "status": self._git_status(path)})
+        return web.json_response({"ok": True, "status": await self._git_status_async(path)})
 
     async def _git_pr_url_handler(self, request: web.Request) -> web.Response:
         """Return a GitHub compare URL for the current branch vs. the repo's
@@ -543,7 +547,7 @@ class DashboardServer:
         path = self._resolve_workdir(body.get("path"))
         if path is None:
             return web.json_response({"ok": False, "error": "path must point to an existing directory"}, status=400)
-        status = self._git_status(path)
+        status = await self._git_status_async(path)
         if not status.get("is_git_repo"):
             return web.json_response({"ok": False, "error": "Not a git repo"}, status=400)
         slug = status.get("github_slug")
@@ -554,7 +558,7 @@ class DashboardServer:
         # back to `main`.
         default_branch = "main"
         try:
-            rev = self._run_git(["symbolic-ref", "refs/remotes/origin/HEAD"], path)
+            rev = await asyncio.to_thread(self._run_git, ["symbolic-ref", "refs/remotes/origin/HEAD"], path)
             if rev.returncode == 0 and rev.stdout.strip():
                 default_branch = rev.stdout.strip().split("/")[-1]
         except (FileNotFoundError, subprocess.TimeoutExpired):

@@ -858,7 +858,9 @@ class TUILogHandler(logging.Handler):
                 message=self.format(record),
             ))
         except Exception:
-            pass
+            # Fall back to stderr via logging.Handler.handleError so a broken
+            # TUI post_message doesn't silently drop diagnostic records.
+            self.handleError(record)
 
 
 # ─── Main App ─────────────────────────────────────────────────────────────────

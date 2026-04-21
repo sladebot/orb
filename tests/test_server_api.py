@@ -265,6 +265,41 @@ class TestServerAPI:
         assert all(r.status == 200 for r in results)
         assert elapsed < 1.3, f"event loop blocked: elapsed={elapsed:.3f}s"
 
+    async def test_git_status_does_not_block_event_loop(self, client, tmp_path):
+        """/api/v1/git/status shells out to git N times; must not stall the loop."""
+        import time as _time
+        import subprocess as _sub
+        from unittest.mock import patch
+
+        workdir = tmp_path / "repo"
+        workdir.mkdir()
+        # Initialize a real git repo so _git_status makes all 5 git calls
+        # (otherwise it short-circuits after rev-parse --is-inside-work-tree).
+        _sub.run(["git", "init", "-q"], cwd=str(workdir), check=True, timeout=10)
+        _sub.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "--allow-empty", "-m", "x", "-q"],
+                 cwd=str(workdir), check=True, timeout=10)
+        real_run = _sub.run
+
+        def slow_run(args, *a, **kw):
+            if isinstance(args, (list, tuple)) and args and args[0] == "git":
+                _time.sleep(0.15)
+            return real_run(args, *a, **kw)
+
+        with patch.object(_sub, "run", slow_run):
+            start = _time.monotonic()
+            results = await asyncio.gather(
+                client.get("/api/v1/git/status", params={"path": str(workdir)}),
+                client.get("/api/v1/git/status", params={"path": str(workdir)}),
+            )
+            elapsed = _time.monotonic() - start
+
+        # Each request makes 5 git calls × 150ms = 750ms. If sync subprocess
+        # blocks the event loop, the second request serializes → ~1500ms.
+        # With asyncio.to_thread the two requests overlap → ~750ms.
+        assert all(r.status == 200 for r in results)
+        assert elapsed < 1.2, f"git_status blocked the event loop: elapsed={elapsed:.3f}s"
+
     async def test_trace_admin_endpoints_return_session_and_run_data(self, client):
         sid = await self._default_session_id(client)
 

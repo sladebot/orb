@@ -535,7 +535,7 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         path = Path(raw).expanduser().resolve() if raw else Path.cwd()
         if not path.exists() or not path.is_dir():
             return err("INVALID_PATH", f"Not a directory: {path}", status=400)
-        info = server._git_status(path)  # noqa: SLF001
+        info = await server._git_status_async(path)  # noqa: SLF001
         return ok("GIT_STATUS_FETCHED", info)
 
     async def git_init(request: web.Request) -> web.Response:
@@ -551,12 +551,15 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         if not path.exists() or not path.is_dir():
             return err("INVALID_PATH", f"Not a directory: {path}", status=400)
         try:
-            result = subprocess.run(["git", "init"], cwd=str(path), capture_output=True, text=True, timeout=15)
+            result = await asyncio.to_thread(
+                subprocess.run, ["git", "init"],
+                cwd=str(path), capture_output=True, text=True, timeout=15,
+            )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             return err("GIT_UNAVAILABLE", f"git CLI failed: {exc}", status=500)
         if result.returncode != 0:
             return err("GIT_INIT_FAILED", result.stderr.strip() or "git init failed", status=500)
-        info = server._git_status(path)  # noqa: SLF001
+        info = await server._git_status_async(path)  # noqa: SLF001
         return ok("GIT_INITIALIZED", {"status": info})
 
     async def git_pr_url(request: web.Request) -> web.Response:
@@ -569,7 +572,7 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         if not raw:
             return err("INVALID_PATH", "path is required", status=400)
         path = Path(raw).expanduser().resolve()
-        info = server._git_status(path)  # noqa: SLF001
+        info = await server._git_status_async(path)  # noqa: SLF001
         if not info.get("is_git_repo"):
             return err("NOT_A_GIT_REPO", "Not a git repo", status=400)
         slug = info.get("github_slug")
