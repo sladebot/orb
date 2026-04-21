@@ -56,21 +56,31 @@ def _base_args(**overrides) -> Namespace:
     return Namespace(**data)
 
 
+def _seed_session_traces(home: Path, session_id: str, trace: RunTrace) -> None:
+    """Lay out a session's on-disk traces under ~/.orb/daemon/sessions/{sid}/."""
+    session_dir = home / ".orb" / "daemon" / "sessions" / session_id
+    trace_dir = session_dir / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace.save(trace_dir / f"{trace.run_id}.json")
+    (trace_dir / "by-session").mkdir(parents=True, exist_ok=True)
+    (trace_dir / "by-session" / f"{session_id}.json").write_text(
+        __import__("json").dumps({"session_id": session_id, "runs": [trace.summary()]})
+    )
+    # Seed the registry so _current_session_id() resolves to this sid.
+    registry = home / ".orb" / "daemon" / "registry.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(__import__("json").dumps({session_id: {"workdir": "", "session_path": ""}}))
+
+
 def test_cmd_trace_latest_and_list_are_session_aware(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.chdir(tmp_path)
-    session_dir = tmp_path / ".orb"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "current_session").write_text("session-a")
 
     trace = RunTrace(session_id="session-a")
     trace.record_topology_choice("triad", reason="test")
     trace.record_final_outcome(success=True, result="ok")
-    trace.save(tmp_path / ".orb" / "traces" / f"{trace.run_id}.json")
-    index_dir = tmp_path / ".orb" / "traces" / "by-session"
-    index_dir.mkdir(parents=True, exist_ok=True)
-    index_dir.joinpath("session-a.json").write_text(
-        __import__("json").dumps({"session_id": "session-a", "runs": [trace.summary()]})
-    )
+    _seed_session_traces(home, "session-a", trace)
 
     from orb.cli.main import _cmd_trace
 
@@ -86,20 +96,14 @@ def test_cmd_trace_latest_and_list_are_session_aware(tmp_path, monkeypatch, caps
 
 
 def test_cmd_trace_tail_streams_current_session_events(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.chdir(tmp_path)
-    session_dir = tmp_path / ".orb"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "current_session").write_text("session-a")
 
     trace = RunTrace(session_id="session-a")
     trace.record_topology_choice("triad", reason="test")
     trace.record_stage_start("planning", actor="router", message="planning started")
-    trace.save(tmp_path / ".orb" / "traces" / f"{trace.run_id}.json")
-    index_dir = tmp_path / ".orb" / "traces" / "by-session"
-    index_dir.mkdir(parents=True, exist_ok=True)
-    index_dir.joinpath("session-a.json").write_text(
-        __import__("json").dumps({"session_id": "session-a", "runs": [trace.summary()]})
-    )
+    _seed_session_traces(home, "session-a", trace)
 
     from orb.cli.main import _cmd_trace
 
@@ -115,20 +119,22 @@ def test_cmd_trace_tail_streams_current_session_events(tmp_path, monkeypatch, ca
     assert "topology_choice" in output
 
 
-def test_current_session_falls_back_to_managed_daemon_workdir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    daemon_workdir = tmp_path / "daemon-workdir"
-    daemon_state_dir = tmp_path / "home" / ".orb"
-    daemon_state_dir.mkdir(parents=True, exist_ok=True)
-    daemon_workdir.joinpath(".orb").mkdir(parents=True, exist_ok=True)
-    daemon_workdir.joinpath(".orb", "current_session").write_text("daemon-session")
+def test_current_session_reads_latest_from_daemon_registry(tmp_path, monkeypatch):
+    """`_current_session_id()` resolves the most recent session from the
+    daemon registry at ``~/.orb/daemon/registry.json``. The old per-workdir
+    ``current_session`` pointer file is no longer consulted.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    registry_path = tmp_path / "home" / ".orb" / "daemon" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    # Insertion order → most recent last. _current_session_id returns the last.
+    registry_path.write_text(__import__("json").dumps({
+        "older-session": {"workdir": "/tmp/a", "session_path": "x"},
+        "latest-session": {"workdir": "/tmp/b", "session_path": "y"},
+    }))
 
-    with patch("orb.cli.main.DAEMON_STATE_FILE", str(daemon_state_dir / "daemon.json")):
-        (daemon_state_dir / "daemon.json").write_text(
-            __import__("json").dumps({"workdir": str(daemon_workdir)})
-        )
-        from orb.cli.main import _current_session_id
-        assert _current_session_id() == "daemon-session"
+    from orb.cli.main import _current_session_id
+    assert _current_session_id() == "latest-session"
 
 
 @pytest.mark.asyncio
@@ -655,7 +661,8 @@ async def test_stop_managed_daemon_rejects_non_orb_listener():
 def test_daemon_state_file_uses_stable_home_path():
     import orb.cli.main as main_mod
 
-    assert str(main_mod._daemon_state_path()).endswith(".orb/daemon.json")
+    # Always under ~/.orb/daemon/daemon.json now (was ~/.orb/daemon.json).
+    assert str(main_mod._daemon_state_path()).endswith(".orb/daemon/daemon.json")
 
 
 @pytest.mark.asyncio

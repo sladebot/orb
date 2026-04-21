@@ -777,10 +777,19 @@ class GraphRuntime:
         }
 
     def _dashboard_sessions_dir(self) -> Path:
-        return self._workspace_state_dir() / "sessions"
+        """This session's state dir — not to be confused with the daemon-
+        wide sessions root at ``_workspace_sessions_dir()``.
+
+        Returns ``~/.orb/daemon/sessions/{session_id}/``. The name is kept
+        for backward-compat; two sessions will still return different dirs
+        (the session_id-keyed isolation guarantee).
+        """
+        return self._workspace_state_dir()
 
     def _dashboard_session_path(self, session_id: str | None = None) -> Path:
-        return self._dashboard_sessions_dir() / f"{session_id or self._conversation_session.session_id}.json"
+        from orb.cli.paths import session_state_dir
+        sid = session_id or self._conversation_session.session_id
+        return session_state_dir(sid) / "dashboard.json"
 
     def _load_dashboard_snapshot(self, session_id: str | None = None) -> dict | None:
         path = self._dashboard_session_path(session_id)
@@ -903,14 +912,21 @@ class GraphRuntime:
         except OSError as exc:
             logger.warning("Failed to persist dashboard snapshot: %s", exc)
 
-    def _trace_dir(self) -> Path:
+    def _trace_dir(self, session_id: str | None = None) -> Path:
+        """Traces dir for a session — defaults to this runtime's session."""
+        from orb.cli.paths import session_state_dir
+        sid = session_id or (self._conversation_session.session_id if hasattr(self, "_conversation_session") else "")
+        if sid:
+            return session_state_dir(sid) / "traces"
         return self._workspace_state_dir() / "traces"
 
-    def _trace_session_index_dir(self) -> Path:
-        return self._trace_dir() / "by-session"
+    def _trace_session_index_dir(self, session_id: str | None = None) -> Path:
+        return self._trace_dir(session_id) / "by-session"
 
     def _trace_session_index_path(self, session_id: str) -> Path:
-        return self._trace_session_index_dir() / f"{session_id}.json"
+        # Each session's index lives next to its own trace files, under
+        # that session's state dir — not self's.
+        return self._trace_session_index_dir(session_id) / f"{session_id}.json"
 
     def _load_trace_session_index(self, session_id: str) -> dict:
         path = self._trace_session_index_path(session_id)
@@ -953,10 +969,19 @@ class GraphRuntime:
             logger.warning("Failed to persist run trace: %s", exc)
 
     def list_trace_sessions(self) -> dict:
-        sessions_dir = self._workspace_sessions_dir()
+        sessions_root = self._workspace_sessions_dir()
         summaries_by_id: dict[str, dict] = {}
-        session_paths = sorted(sessions_dir.glob("*.json")) if sessions_dir.exists() else []
-        for path in session_paths:
+        # Each session gets its own subdir ``{sid}/`` under the daemon root,
+        # with ``snapshot.json`` inside. Walk the root to aggregate.
+        snapshot_paths: list[Path] = []
+        if sessions_root.exists():
+            for child in sorted(sessions_root.iterdir()):
+                if not child.is_dir():
+                    continue
+                snapshot = child / "snapshot.json"
+                if snapshot.exists():
+                    snapshot_paths.append(snapshot)
+        for path in snapshot_paths:
             try:
                 session = ConversationSession.load(path)
             except (OSError, JSONDecodeError, ValueError, TypeError):
@@ -975,31 +1000,39 @@ class GraphRuntime:
                 "last_run_at": runs[0].get("last_event_at") if runs else None,
                 "active": session.session_id == self._conversation_session.session_id,
             }
-        index_dir = self._trace_session_index_dir()
-        index_paths = sorted(index_dir.glob("*.json")) if index_dir.exists() else []
-        for path in index_paths:
-            try:
-                payload = json.loads(path.read_text())
-            except (OSError, JSONDecodeError, ValueError, TypeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            session_id = str(payload.get("session_id") or path.stem)
-            if not session_id or session_id in summaries_by_id:
-                continue
-            runs = [item for item in (payload.get("runs") or []) if isinstance(item, dict)]
-            last_updated = max(
-                [float(item.get("last_event_at") or 0.0) for item in runs] or [0.0]
-            )
-            summaries_by_id[session_id] = {
-                "session_id": session_id,
-                "generation": 1,
-                "user_turns": 0,
-                "updated_at": last_updated,
-                "run_count": len(runs),
-                "last_run_at": runs[0].get("last_event_at") if runs else None,
-                "active": session_id == self._conversation_session.session_id,
-            }
+        # Orphan index fallback: sessions with traces but no snapshot (e.g.
+        # a crashed run before first save). Each session_id-keyed dir has
+        # its own traces/by-session/{sid}.json index; walk them all.
+        if sessions_root.exists():
+            for child in sorted(sessions_root.iterdir()):
+                if not child.is_dir():
+                    continue
+                sid_dir_index = child / "traces" / "by-session"
+                if not sid_dir_index.exists():
+                    continue
+                for path in sorted(sid_dir_index.glob("*.json")):
+                    try:
+                        payload = json.loads(path.read_text())
+                    except (OSError, JSONDecodeError, ValueError, TypeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    session_id = str(payload.get("session_id") or path.stem)
+                    if not session_id or session_id in summaries_by_id:
+                        continue
+                    runs = [item for item in (payload.get("runs") or []) if isinstance(item, dict)]
+                    last_updated = max(
+                        [float(item.get("last_event_at") or 0.0) for item in runs] or [0.0]
+                    )
+                    summaries_by_id[session_id] = {
+                        "session_id": session_id,
+                        "generation": 1,
+                        "user_turns": 0,
+                        "updated_at": last_updated,
+                        "run_count": len(runs),
+                        "last_run_at": runs[0].get("last_event_at") if runs else None,
+                        "active": session_id == self._conversation_session.session_id,
+                    }
         summaries = list(summaries_by_id.values())
         summaries.sort(key=lambda item: float(item.get("updated_at") or 0.0), reverse=True)
         return {
@@ -1018,9 +1051,22 @@ class GraphRuntime:
         }
 
     def get_trace_payload(self, run_id: str) -> dict | None:
+        # run_ids aren't prefixed with their session, so check this
+        # runtime's traces first (hot path), then fall back to scanning
+        # every session dir.
         path = self._trace_dir() / f"{run_id}.json"
         if not path.exists():
-            return None
+            sessions_root = self._workspace_sessions_dir()
+            if sessions_root.exists():
+                for child in sorted(sessions_root.iterdir()):
+                    candidate = child / "traces" / f"{run_id}.json"
+                    if candidate.exists():
+                        path = candidate
+                        break
+                else:
+                    return None
+            else:
+                return None
         try:
             trace = RunTrace.load(path)
         except (OSError, JSONDecodeError, ValueError, TypeError):
@@ -1074,24 +1120,47 @@ class GraphRuntime:
         return self._session_path or self._default_session_path(self._conversation_session.session_id)
 
     def _workspace_state_dir(self) -> Path:
-        """Root of the .orb state dir for this runtime.
+        """Internal state dir for this runtime (NOT the user's workdir).
 
-        Prefers the session's workdir when set so multi-tenant daemons
-        keep each session's state/traces/sessions in the right repo.
-        Falls back to the process CWD for the unscoped case (tests,
-        `orb trace` invocations before any session exists).
+        Orb never pollutes the session's ``workdir`` — that stays pure as
+        the sandbox root for agent file operations. Orb's own state
+        (session snapshot, dashboard state, traces) lives under the
+        fixed daemon anchor, keyed by session_id:
+        ``~/.orb/daemon/sessions/{session_id}/``.
+
+        When a session has no id yet (tests constructing ``GraphRuntime``
+        directly without a session), fall back to a scratch directory
+        under the daemon home so even unkeyed runs don't touch user dirs.
         """
-        base = self._conversation_session.workdir if hasattr(self, "_conversation_session") and self._conversation_session.workdir else str(Path.cwd())
-        return Path(base) / ".orb"
+        from orb.cli.paths import session_state_dir, daemon_home
+        sid = ""
+        if hasattr(self, "_conversation_session") and self._conversation_session is not None:
+            sid = self._conversation_session.session_id or ""
+        if sid:
+            return session_state_dir(sid)
+        return daemon_home() / "_scratch"
 
     def _workspace_sessions_dir(self) -> Path:
-        return self._workspace_state_dir() / "sessions"
+        """Root directory containing every session's state dir.
+
+        Returns ``~/.orb/daemon/sessions/``. Callers that want to enumerate
+        sessions (e.g. ``list_trace_sessions``) iterate this.
+        """
+        from orb.cli.paths import daemon_sessions_dir
+        return daemon_sessions_dir()
 
     def _workspace_current_session_path(self) -> Path:
+        """Legacy pointer path — returns under the current session's dir.
+
+        The daemon registry is now the source of truth for "which session
+        is current"; keeping this helper only so legacy callers don't crash.
+        """
         return self._workspace_state_dir() / "current_session"
 
     def _default_session_path(self, session_id: str) -> Path:
-        return self._workspace_sessions_dir() / f"{session_id}.json"
+        """ConversationSession snapshot path for a given session_id."""
+        from orb.cli.paths import session_state_dir
+        return session_state_dir(session_id) / "snapshot.json"
 
     def _load_session(self) -> ConversationSession:
         if self._session_path_explicit:

@@ -24,12 +24,15 @@ from ..llm.types import ModelTier, ModelConfig, DEFAULT_MODELS
 from ..orchestrator.types import OrchestratorConfig
 from ..topologies import create_orchestrator, get_loader
 from .display import print_header, print_result, print_error
+from . import paths as orb_paths
 from .repl import run_repl
 
 
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
-DAEMON_STATE_FILE = os.path.join(os.path.expanduser("~"), ".orb", "daemon.json")
+# Kept for legacy references / tests that compare ``.endswith(".orb/daemon.json")``;
+# the authoritative path is ``orb_paths.daemon_state_file()``.
+DAEMON_STATE_FILE = str(orb_paths.daemon_state_file())
 DEFAULT_DAEMON_PORT = 1337
 DEFAULT_CONNECT_URL = f"http://127.0.0.1:{DEFAULT_DAEMON_PORT}"
 _LEVEL_COLORS = {
@@ -117,7 +120,13 @@ def _managed_daemon_workdir() -> Path | None:
 
 
 def _trace_dir(workspace_root: Path | None = None) -> Path:
-    return (workspace_root or Path.cwd()) / ".orb" / "traces"
+    """Trace directory for a session state root.
+
+    ``workspace_root`` is now a per-session dir under
+    ``~/.orb/daemon/sessions/{sid}/``; traces live directly at
+    ``{root}/traces/``.
+    """
+    return (workspace_root or orb_paths.daemon_home()) / "traces"
 
 
 def _trace_index_dir(workspace_root: Path | None = None) -> Path:
@@ -125,23 +134,35 @@ def _trace_index_dir(workspace_root: Path | None = None) -> Path:
 
 
 def _trace_roots() -> list[Path]:
-    roots = [Path.cwd()]
-    daemon_root = _managed_daemon_workdir()
-    if daemon_root is not None and daemon_root not in roots:
-        roots.append(daemon_root)
-    return roots
+    """Every session's state dir — the CLI scans these to find trace files."""
+    sessions_dir = orb_paths.daemon_sessions_dir()
+    if not sessions_dir.exists():
+        return []
+    return sorted(
+        (p for p in sessions_dir.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
 
 
 def _current_session_id() -> str:
-    for root in _trace_roots():
-        path = root / ".orb" / "current_session"
-        try:
-            session_id = path.read_text().strip()
-        except OSError:
-            session_id = ""
-        if session_id:
-            return session_id
-    return ""
+    """Return the most-recently-active session id, or "".
+
+    Previously read from a ``<workdir>/.orb/current_session`` pointer;
+    now the daemon's registry is the single source of truth.
+    """
+    registry_path = orb_paths.daemon_registry_file()
+    if not registry_path.exists():
+        return ""
+    try:
+        registry = json.loads(registry_path.read_text())
+    except Exception:
+        return ""
+    if not isinstance(registry, dict) or not registry:
+        return ""
+    # Registry insertion order ~= session-creation order; the last key is
+    # the most recent. This is sufficient for `orb trace --current-session`.
+    return next(reversed(registry), "")
 
 
 def _latest_trace_path(session_id: str | None = None) -> Path | None:
@@ -741,15 +762,20 @@ def _init_topologies_file(force: bool = False) -> Path:
 
 
 def _resolve_daemon_workdir(workdir: str | None) -> Path:
-    if workdir:
-        path = Path(workdir).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    return Path(tempfile.mkdtemp(prefix="orb-daemon-", dir="/tmp")).resolve()
+    """The daemon always anchors at ``~/.orb/daemon/``.
+
+    The ``workdir`` argument is kept for CLI back-compat but is ignored —
+    a fixed anchor means session indexes (registry.json), session
+    snapshots, and traces live in one predictable place across restarts
+    and across daemon-spawning commands.
+    """
+    # ``workdir`` is accepted for CLI back-compat but deliberately unused.
+    _ = workdir
+    return orb_paths.ensure_daemon_home()
 
 
 def _daemon_state_path() -> Path:
-    return Path(DAEMON_STATE_FILE)
+    return orb_paths.daemon_state_file()
 
 
 def _load_daemon_state() -> dict | None:

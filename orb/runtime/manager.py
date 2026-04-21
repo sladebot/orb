@@ -31,9 +31,11 @@ logger = logging.getLogger(__name__)
 
 def _registry_path() -> Path:
     # Daemon-scoped index so sessions created in one daemon process can be
-    # resurrected after a restart. Lives in the daemon's CWD (which is the
-    # ``--workdir`` flag when launched via `orb daemon run`).
-    return Path.cwd() / ".orb" / "registry.json"
+    # resurrected after a restart. Lives under the daemon's fixed anchor
+    # (~/.orb/daemon/) so the registry survives --workdir changes and
+    # process CWD moves.
+    from orb.cli.paths import daemon_registry_file
+    return daemon_registry_file()
 
 
 class RuntimeManager:

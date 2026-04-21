@@ -130,15 +130,19 @@ class TestBroadcastFanout:
         assert a._conversation_session.session_id in ids  # noqa: SLF001
         assert b._conversation_session.session_id in ids  # noqa: SLF001
 
-    async def test_list_trace_sessions_merges_across_sessions(self, tmp_path: Path):
+    async def test_list_trace_sessions_merges_across_sessions(
+        self, tmp_path: Path, monkeypatch,
+    ):
         """`list_trace_sessions` must aggregate across every registered
-        session's workspace, not short-circuit on the first one.
-
-        Two sessions in distinct workdirs each have their own
-        `.orb/sessions/` directory; both session_ids must surface in the
-        merged result, de-duplicated by session_id.
+        session. Each session owns a state dir under
+        ``~/.orb/daemon/sessions/{sid}/`` with a ``snapshot.json``.
         """
         import json as _json
+        from orb.cli.paths import session_state_dir
+
+        # Redirect ~/.orb/daemon/ into tmp_path so the test doesn't
+        # touch the real user home (and doesn't race other tests).
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
 
         mgr = RuntimeManager()
         dir_a = tmp_path / "a"; dir_a.mkdir()
@@ -146,19 +150,19 @@ class TestBroadcastFanout:
         a = mgr.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
         b = mgr.create_session(workdir=str(dir_b), session_path=tmp_path / "b.json")
 
-        # Seed each session's workspace with a persisted session.json so
-        # `list_trace_sessions` will discover it via the sessions dir scan.
-        for sess, wd in ((a, dir_a), (b, dir_b)):
-            sessions_dir = wd / ".orb" / "sessions"
-            sessions_dir.mkdir(parents=True, exist_ok=True)
+        # Persist a minimal ConversationSession snapshot for each; the
+        # snapshot is what list_trace_sessions scans.
+        for sess in (a, b):
             sid = sess._conversation_session.session_id  # noqa: SLF001
+            target = session_state_dir(sid) / "snapshot.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "session_id": sid,
                 "generation": 1,
                 "agent_carryover": {},
                 "updated_at": 1.0,
             }
-            (sessions_dir / f"{sid}.json").write_text(_json.dumps(payload))
+            target.write_text(_json.dumps(payload))
 
         merged = mgr.list_trace_sessions()
         ids = {s["session_id"] for s in merged["sessions"]}

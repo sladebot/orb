@@ -66,6 +66,11 @@ class TestConversationSession:
 
 class TestGraphRuntimeSession:
     def test_runtime_default_session_paths_are_per_session(self, tmp_path: Path, monkeypatch):
+        """Session state lands at ``~/.orb/daemon/sessions/{sid}/snapshot.json``,
+        keyed by session_id — not under the user's CWD.
+        """
+        home = tmp_path / "home"; home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
         monkeypatch.chdir(tmp_path)
 
         runtime = GraphRuntime()
@@ -73,12 +78,16 @@ class TestGraphRuntimeSession:
         first_id = runtime._conversation_session.session_id  # noqa: SLF001
         runtime._persist_session()  # noqa: SLF001
 
-        assert first_path == tmp_path / ".orb" / "sessions" / f"{first_id}.json"
+        expected = home / ".orb" / "daemon" / "sessions" / first_id / "snapshot.json"
+        assert first_path == expected
         assert first_path.exists()
-        assert (tmp_path / ".orb" / "current_session").read_text().strip() == first_id
+        # No state written under the user's CWD any more.
+        assert not (tmp_path / ".orb").exists()
 
     @pytest.mark.asyncio
     async def test_new_session_uses_new_session_file_by_default(self, tmp_path: Path, monkeypatch):
+        home = tmp_path / "home"; home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
         monkeypatch.chdir(tmp_path)
 
         runtime = GraphRuntime()
@@ -92,7 +101,10 @@ class TestGraphRuntimeSession:
         assert payload["ok"] is True
         assert second_path != first_path
         assert second_path.exists()
-        assert (tmp_path / ".orb" / "current_session").read_text().strip() == runtime._conversation_session.session_id  # noqa: SLF001
+        # Both snapshots live under ~/.orb/daemon/sessions/, in different sid dirs.
+        daemon_sessions = home / ".orb" / "daemon" / "sessions"
+        assert daemon_sessions in first_path.parents
+        assert daemon_sessions in second_path.parents
 
     def test_runtime_init_event_uses_persisted_user_turn_count(self, tmp_path: Path):
         path = tmp_path / "session.json"

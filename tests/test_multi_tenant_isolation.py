@@ -306,21 +306,34 @@ class TestSDKMultiSession:
 
 
 class TestWorkdirIsolation:
-    def test_state_dirs_resolve_per_session_workdir(self, manager: RuntimeManager, tmp_path: Path):
+    def test_state_dirs_are_keyed_by_session_id_under_daemon_home(
+        self, manager: RuntimeManager, tmp_path: Path
+    ):
+        """State dirs live under ~/.orb/daemon/sessions/{sid}/ — NOT in the
+        user's workdir. Each session must get its own sid-keyed dir so
+        concurrent sessions don't collide.
+        """
+        from orb.cli.paths import daemon_home
         dir_a = tmp_path / "a"; dir_a.mkdir()
         dir_b = tmp_path / "b"; dir_b.mkdir()
         a = manager.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
         b = manager.create_session(workdir=str(dir_b), session_path=tmp_path / "b.json")
 
-        # _workspace_state_dir resolves to <session.workdir>/.orb, NOT
-        # process CWD — the guarantee the Phase 1 de-chdir made possible.
-        assert str(a._workspace_state_dir()) == str(dir_a / ".orb")  # noqa: SLF001
-        assert str(b._workspace_state_dir()) == str(dir_b / ".orb")  # noqa: SLF001
+        assert a._workspace_state_dir() != b._workspace_state_dir()  # noqa: SLF001
+        assert daemon_home() in a._workspace_state_dir().parents  # noqa: SLF001
+        assert daemon_home() in b._workspace_state_dir().parents  # noqa: SLF001
+        # Must not live inside the user's workdir any more.
+        assert dir_a not in a._workspace_state_dir().parents  # noqa: SLF001
+        assert dir_b not in b._workspace_state_dir().parents  # noqa: SLF001
 
-    def test_trace_dirs_follow_workdir(self, manager: RuntimeManager, tmp_path: Path):
+    def test_trace_dirs_isolated_per_session(self, manager: RuntimeManager, tmp_path: Path):
+        from orb.cli.paths import daemon_home
         dir_a = tmp_path / "a"; dir_a.mkdir()
         a = manager.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
-        assert str(a._trace_dir()) == str(dir_a / ".orb" / "traces")  # noqa: SLF001
+        trace_dir = a._trace_dir()  # noqa: SLF001
+        assert daemon_home() in trace_dir.parents
+        assert trace_dir.name == "traces"
+        assert dir_a not in trace_dir.parents
 
     def test_dashboard_state_workdir_syncs_from_session(self, manager: RuntimeManager, tmp_path: Path):
         dir_a = tmp_path / "a"; dir_a.mkdir()
@@ -328,19 +341,19 @@ class TestWorkdirIsolation:
         a._sync_session_state()  # noqa: SLF001
         assert a.state.workdir == str(dir_a)
 
-    def test_dashboard_sessions_dir_follows_workdir(self, manager: RuntimeManager, tmp_path: Path):
-        """Two sessions in different workdirs must write snapshots to different dirs.
+    def test_dashboard_sessions_dirs_differ_per_session(
+        self, manager: RuntimeManager, tmp_path: Path
+    ):
+        """Two sessions must write dashboard snapshots to different dirs.
 
-        Regression: `_dashboard_sessions_dir` used to hardcode
-        `~/.orb/sessions`, so sessions with colliding uuids across repos
-        clobbered each other's snapshots on disk.
+        Previously keyed by ``{workdir}/.orb/sessions``; now keyed by
+        session_id under ``~/.orb/daemon/sessions/`` — different key,
+        same isolation guarantee.
         """
         dir_a = tmp_path / "a"; dir_a.mkdir()
         dir_b = tmp_path / "b"; dir_b.mkdir()
         a = manager.create_session(workdir=str(dir_a), session_path=tmp_path / "a.json")
         b = manager.create_session(workdir=str(dir_b), session_path=tmp_path / "b.json")
-        assert str(a._dashboard_sessions_dir()) == str(dir_a / ".orb" / "sessions")  # noqa: SLF001
-        assert str(b._dashboard_sessions_dir()) == str(dir_b / ".orb" / "sessions")  # noqa: SLF001
         assert a._dashboard_sessions_dir() != b._dashboard_sessions_dir()  # noqa: SLF001
 
 
