@@ -248,10 +248,14 @@ class RuntimeManager:
         workdir = entry.get("workdir", "") or None
         if not session_path:
             return None
-        # If BOTH the session file AND the dashboard snapshot are gone,
-        # the session is truly dead — drop the stale index entry.
-        snapshot_dir = (Path(workdir) if workdir else Path.cwd()) / ".orb" / "sessions"
-        snapshot_file = snapshot_dir / f"{session_id}.json"
+        # Resuming a session requires a ConversationSession snapshot —
+        # otherwise GraphRuntime loads a blank session with a fresh
+        # session_id, silently losing prior turns/carryover and letting
+        # a stale id "restore" into an empty runtime. dashboard.json is
+        # a secondary artifact and does not qualify on its own.
+        from orb.cli.paths import session_state_dir
+        state_dir = session_state_dir(session_id)
+        snapshot_file = state_dir / "snapshot.json"
         if not session_path.exists() and not snapshot_file.exists():
             self._drop_registry_entry(session_id)
             return None
@@ -270,8 +274,15 @@ class RuntimeManager:
             if self._topology_classifier is not None:
                 runtime.set_topology_classifier(self._topology_classifier)
             runtime.subscribe(self._forward_broadcast)
+            # Scrub any stale in-flight markers left by the daemon that
+            # originally wrote this snapshot; otherwise the UI shows a
+            # phantom running state the fresh runtime can't back up.
+            recovered = runtime.recover_stale_run_state()
             self._sessions[session_id] = runtime
-            logger.info("session restored from disk id=%s workdir=%s", session_id, workdir or "<cwd>")
+            logger.info(
+                "session restored from disk id=%s workdir=%s recovered_stale=%s",
+                session_id, workdir or "<cwd>", recovered,
+            )
             return runtime
         except Exception:  # noqa: BLE001
             logger.exception("failed to restore session %s", session_id)
@@ -309,6 +320,65 @@ class RuntimeManager:
 
     def list_sessions(self) -> list[GraphRuntime]:
         return list(self._sessions.values())
+
+    def list_known_sessions(self) -> list[dict]:
+        """Merged view of in-memory + on-disk sessions for the resume UI.
+
+        Each entry:
+        ``{session_id, workdir, snapshot_path, active, updated_at, run_count}``.
+        Active sessions are those currently loaded in this daemon; the rest
+        come from the registry and can be restored via ``try_restore()``.
+        Sorted most-recent-updated-first so the picker shows useful options.
+        """
+        from orb.cli.paths import session_state_dir
+        import time as _time
+
+        summaries: dict[str, dict] = {}
+
+        for sid, runtime in self._sessions.items():
+            sess = runtime._conversation_session  # noqa: SLF001
+            summaries[sid] = {
+                "session_id": sid,
+                "workdir": sess.workdir or "",
+                "active": True,
+                "updated_at": float(sess.updated_at or 0.0),
+                "user_turns": sess.user_turn_count(),
+                "locked_topology": sess.locked_topology or "",
+            }
+
+        registry_path = _registry_path()
+        if registry_path.exists():
+            try:
+                registry = json.loads(registry_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                registry = {}
+            if isinstance(registry, dict):
+                for sid, entry in registry.items():
+                    if sid in summaries:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    workdir = str(entry.get("workdir") or "")
+                    state_dir = session_state_dir(sid)
+                    snapshot_path = state_dir / "snapshot.json"
+                    if not snapshot_path.exists():
+                        continue
+                    try:
+                        updated_at = float(snapshot_path.stat().st_mtime)
+                    except OSError:
+                        updated_at = 0.0
+                    summaries[sid] = {
+                        "session_id": sid,
+                        "workdir": workdir,
+                        "active": False,
+                        "updated_at": updated_at,
+                        "user_turns": 0,  # not loaded; don't lie about it
+                        "locked_topology": "",
+                    }
+
+        items = list(summaries.values())
+        items.sort(key=lambda s: float(s.get("updated_at") or 0.0), reverse=True)
+        return items
 
     def active_session_count(self) -> int:
         return sum(1 for s in self._sessions.values() if s.is_run_in_flight)

@@ -51,7 +51,10 @@ def test_resolve_daemon_workdir_always_returns_daemon_home(fake_home):
     """The legacy /tmp/orb-daemon-* fallback must be gone."""
     resolved = main_mod._resolve_daemon_workdir(None)  # noqa: SLF001
     assert resolved == orb_paths.daemon_home()
-    assert "/tmp/" not in str(resolved)
+    # Guard against the specific pre-refactor artifact (tempfile.mkdtemp
+    # with prefix "orb-daemon-"), not all /tmp/-rooted paths — CI runners
+    # root their tmp at /tmp so a plain "/tmp/" check fails there.
+    assert "orb-daemon-" not in str(resolved)
 
 
 def test_resolve_daemon_workdir_ignores_user_workdir(fake_home, tmp_path):

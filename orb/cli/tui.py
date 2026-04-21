@@ -467,6 +467,79 @@ class HelpScreen(Screen):
 
 
 
+class ResumeSessionScreen(Screen):
+    """Modal showing prior sessions; press a number to switch to one."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Back"),
+        Binding("q", "dismiss_screen", "Back"),
+    ]
+
+    DEFAULT_CSS = """
+    ResumeSessionScreen {
+        align: center middle;
+        background: rgba(5, 8, 12, 0.72);
+    }
+    #resume-box {
+        width: 88;
+        height: auto;
+        background: #11161d;
+        border: round #2f3b4a;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, sessions: list[dict]) -> None:
+        super().__init__()
+        # Cap at 9 so users can press 1-9 to pick. With more sessions, the
+        # dashboard's modal is the right tool for browsing.
+        self._sessions = sessions[:9]
+        for i in range(1, len(self._sessions) + 1):
+            self._bindings.bind(str(i), f"pick({i})", show=False)
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="resume-box")
+
+    def on_mount(self) -> None:
+        box = self.query_one("#resume-box", Static)
+        if not self._sessions:
+            box.update(
+                "[bold white]Resume session[/bold white]\n\n"
+                "[dim]No prior sessions found.[/dim]\n\n"
+                "[dim]Esc[/dim] Close"
+            )
+            return
+        lines = ["[bold white]Resume session[/bold white]"]
+        lines.append("[dim]Press a number to switch; Esc to close.[/dim]\n")
+        for i, s in enumerate(self._sessions, start=1):
+            active = " [green]active[/green]" if s.get("active") else ""
+            workdir = s.get("workdir") or "(no workdir)"
+            sid = s.get("session_id", "")[:12]
+            turns = s.get("user_turns", 0)
+            topo = s.get("locked_topology") or ""
+            meta = []
+            if topo:
+                meta.append(topo)
+            if turns:
+                meta.append(f"{turns} turn" + ("" if turns == 1 else "s"))
+            meta_str = f"  [dim]({', '.join(meta)})[/dim]" if meta else ""
+            lines.append(f"[dim]{i}[/dim]  {workdir}  [dim]{sid}…[/dim]{active}{meta_str}")
+        box.update("\n".join(lines))
+
+    async def action_pick(self, index: int) -> None:
+        idx = int(index) - 1
+        if not (0 <= idx < len(self._sessions)):
+            return
+        target = self._sessions[idx]
+        app = self.app
+        self.app.pop_screen()
+        if hasattr(app, "_attach_to_session"):
+            await app._attach_to_session(target.get("session_id", ""))  # noqa: SLF001
+
+    def action_dismiss_screen(self) -> None:
+        self.app.pop_screen()
+
+
 class CommandScreen(Screen):
     """Compact command launcher for the TUI."""
 
@@ -1094,6 +1167,7 @@ class OrbTUI(App[None]):
         Binding("d",          "show_changes", "Changes", show=False),
         Binding("o",          "show_output", "Output", show=False),
         Binding("ctrl+p",     "show_commands", "Commands", show=False),
+        Binding("ctrl+r",     "resume_session", "Resume"),
         Binding("ctrl+k",     "cancel_run",   "Cancel run"),
         Binding("ctrl+l",     "clear_feed",   "Clear feed"),
         Binding("ctrl+g",     "cancel_reply", "Clear reply", show=False),
@@ -2254,6 +2328,58 @@ class OrbTUI(App[None]):
 
     def action_show_commands(self) -> None:
         self.push_screen(CommandScreen())
+
+    async def action_resume_session(self) -> None:
+        """Open the session picker — lists known sessions from the daemon."""
+        sessions: list[dict] = []
+        try:
+            url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions?include=known"
+            async with self._http_session.get(url) as resp:
+                body = await resp.json()
+            if isinstance(body, dict) and body.get("ok"):
+                data = body.get("data") or {}
+                candidates = data.get("sessions") or []
+                current = self._session_id or ""
+                sessions = [s for s in candidates if s.get("session_id") != current]
+        except Exception as exc:
+            logger.warning("Failed to list known sessions: %s", exc)
+        self.push_screen(ResumeSessionScreen(sessions))
+
+    async def _attach_to_session(self, session_id: str) -> None:
+        """Switch the TUI's attached session.
+
+        Fetches ``/api/v1/sessions/{sid}/state`` and dispatches the init
+        event so every widget rebuilds against the new session. The WS
+        client keeps running and will pick up subsequent broadcasts for
+        this session via the manager's per-session fanout.
+        """
+        if not session_id or session_id == self._session_id:
+            return
+        try:
+            url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions/{session_id}/state"
+            async with self._http_session.get(url) as resp:
+                status = resp.status
+                body = await resp.json()
+        except Exception as exc:
+            logger.warning("Failed to fetch session state for %s: %s", session_id, exc)
+            return
+        # Refuse error envelopes (e.g. 404 after a session was deleted
+        # between listing and click). Mutating _session_id here would
+        # silently attach the TUI to a dead session id and route every
+        # subsequent inject/run to a session that doesn't exist.
+        if status != 200 or not isinstance(body, dict) or body.get("ok") is False:
+            logger.warning(
+                "Refusing to attach to session %s: status=%s body=%s",
+                session_id, status, body,
+            )
+            return
+        payload = body.get("data") if "data" in body else body
+        if not isinstance(payload, dict):
+            return
+        payload.setdefault("type", "init")
+        payload.setdefault("session_id", session_id)
+        self._session_id = session_id
+        self._handle_server_event(payload)
 
     def action_show_results(self) -> None:
         if self._run_status not in ("Complete", "Idle") or not self._completions:

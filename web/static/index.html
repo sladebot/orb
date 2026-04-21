@@ -35,6 +35,7 @@
                     <span id="connection-label">Daemon Offline</span>
                 </div>
                 <button id="session-config-button" class="v2-btn" type="button" title="Start a new session: workdir, topology, per-node models">⊘ New Session</button>
+                <button id="resume-session-button" class="v2-btn" type="button" title="Reattach to a prior session">Resume</button>
                 <button id="new-session-button" class="v2-btn hidden" type="button" title="Start a fresh auto session">↺ New</button>
                 <button id="stop-run-button" class="v2-btn danger hidden" type="button" title="Stop current run">■ Stop</button>
                 <button id="traces-button" class="v2-btn" type="button" title="Browse traces">Traces</button>
@@ -432,6 +433,23 @@
                         <pre id="trace-detail-json"></pre>
                     </details>
                 </section>
+            </div>
+        </div>
+    </div>
+
+    <div id="resume-session-modal" class="hidden" aria-hidden="true">
+        <div id="resume-session-backdrop"></div>
+        <div id="resume-session-panel" role="dialog" aria-modal="true" aria-labelledby="resume-session-title">
+            <div id="resume-session-header">
+                <div>
+                    <div class="settings-kicker">Sessions</div>
+                    <h2 id="resume-session-title">Resume a session</h2>
+                </div>
+                <button id="resume-session-close" type="button" title="Close">×</button>
+            </div>
+            <div id="resume-session-body">
+                <div id="resume-session-empty" class="hidden">No prior sessions found.</div>
+                <div id="resume-session-list" class="resume-session-list"></div>
             </div>
         </div>
     </div>
