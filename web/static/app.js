@@ -202,7 +202,10 @@ class Dashboard {
         });
         // Result panel close
         document.getElementById('result-close').addEventListener('click', () => {
-            document.getElementById('result-panel').classList.add('hidden');
+            const panel = document.getElementById('result-panel');
+            panel.classList.add('hidden');
+            // Clear state classes so a future reveal starts from a neutral base.
+            panel.classList.remove('is-success', 'is-error', 'result-panel-enter');
         });
 
         // Result panel copy
@@ -2901,10 +2904,10 @@ class Dashboard {
             input.style.height = 'auto';
             this._hideMentionSuggestions();
             if (!this._wsSessionId) {
-                document.getElementById('result-agent').textContent = 'Error';
-                document.getElementById('result-elapsed').textContent = '';
-                document.getElementById('result-body').textContent = 'No session — click New Session first.';
-                document.getElementById('result-panel').classList.remove('hidden');
+                this._showResultPanel({
+                    kind: 'error', agent: '', elapsed: '',
+                    bodyText: 'No session — click New Session first.',
+                });
                 return;
             }
             await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {
@@ -2982,10 +2985,10 @@ class Dashboard {
             if (!sid) {
                 this._setRunActive(false);
                 this._hideLoader();
-                document.getElementById('result-agent').textContent = 'Error';
-                document.getElementById('result-elapsed').textContent = '';
-                document.getElementById('result-body').textContent = 'No session — click New Session first.';
-                document.getElementById('result-panel').classList.remove('hidden');
+                this._showResultPanel({
+                    kind: 'error', agent: '', elapsed: '',
+                    bodyText: 'No session — click New Session first.',
+                });
                 return;
             }
             res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}/runs`, {
@@ -3007,10 +3010,10 @@ class Dashboard {
         if (!payload.ok) {
             this._setRunActive(false);
             this._hideLoader();
-            document.getElementById('result-agent').textContent = 'Error';
-            document.getElementById('result-elapsed').textContent = '';
-            document.getElementById('result-body').textContent = payload.error || `Failed to start run (HTTP ${res?.status || '?'}).`;
-            document.getElementById('result-panel').classList.remove('hidden');
+            this._showResultPanel({
+                kind: 'error', agent: '', elapsed: '',
+                bodyText: payload.error || `Failed to start run (HTTP ${res?.status || '?'}).`,
+            });
             return;
         }
         if (payload.session_id) {
@@ -3055,10 +3058,10 @@ class Dashboard {
                 data = { ok: false, error: `New session endpoint returned ${res.status}. The daemon may need a restart.` };
             }
             if (!data.ok) {
-                document.getElementById('result-agent').textContent = 'Session Error';
-                document.getElementById('result-elapsed').textContent = '';
-                document.getElementById('result-body').textContent = data.error || 'Failed to start a new session.';
-                document.getElementById('result-panel').classList.remove('hidden');
+                this._showResultPanel({
+                    kind: 'error', badge: '⚠ Session Error', agent: '', elapsed: '',
+                    bodyText: data.error || 'Failed to start a new session.',
+                });
                 return;
             }
             this._resetForSession(data.init || {});
@@ -3170,14 +3173,40 @@ class Dashboard {
         });
 
         // V2: surface the final result in the drawer's result panel since #changes-log is hidden
-        const resAgentEl = document.getElementById('result-agent');
-        const resElapsedEl = document.getElementById('result-elapsed');
-        const resBodyEl = document.getElementById('result-body');
-        const resPanel = document.getElementById('result-panel');
-        if (resAgentEl) resAgentEl.textContent = this._roleDisplayName(data.agent, data.agent || 'run');
-        if (resElapsedEl) resElapsedEl.textContent = elapsed;
-        if (resBodyEl) resBodyEl.innerHTML = this._renderResult(result);
-        if (resPanel) resPanel.classList.remove('hidden');
+        this._showResultPanel({
+            kind: 'success',
+            badge: '✓ Complete',
+            agent: this._roleDisplayName(data.agent, data.agent || 'run'),
+            elapsed,
+            bodyHtml: this._renderResult(result),
+        });
+    }
+
+    _showResultPanel({ kind, badge, agent, elapsed, bodyHtml, bodyText }) {
+        const panel = document.getElementById('result-panel');
+        if (!panel) return;
+        const badgeEl = document.getElementById('result-badge');
+        const agentEl = document.getElementById('result-agent');
+        const elapsedEl = document.getElementById('result-elapsed');
+        const bodyEl = document.getElementById('result-body');
+
+        panel.classList.remove('is-success', 'is-error');
+        if (kind === 'success') panel.classList.add('is-success');
+        else if (kind === 'error') panel.classList.add('is-error');
+
+        if (badgeEl) badgeEl.textContent = badge || (kind === 'error' ? '⚠ Error' : '✓ Complete');
+        if (agentEl) agentEl.textContent = agent || '';
+        if (elapsedEl) elapsedEl.textContent = elapsed || '';
+        if (bodyEl) {
+            if (typeof bodyHtml === 'string') bodyEl.innerHTML = bodyHtml;
+            else if (typeof bodyText === 'string') bodyEl.textContent = bodyText;
+        }
+        panel.classList.remove('hidden');
+        // Re-trigger the entrance animation every time the panel appears.
+        panel.classList.remove('result-panel-enter');
+        // Force reflow so the animation restarts when re-applied.
+        void panel.offsetWidth;
+        panel.classList.add('result-panel-enter');
     }
 
     _renderInitialCodeChanges(result, diff, elapsed = '', sessionTurn = 0) {
@@ -3868,10 +3897,10 @@ class Dashboard {
         input.value = '';
 
         if (!this._wsSessionId) {
-            document.getElementById('result-agent').textContent = 'Error';
-            document.getElementById('result-elapsed').textContent = '';
-            document.getElementById('result-body').textContent = 'No session — click New Session first.';
-            document.getElementById('result-panel').classList.remove('hidden');
+            this._showResultPanel({
+                kind: 'error', agent: '', elapsed: '',
+                bodyText: 'No session — click New Session first.',
+            });
             return;
         }
         await fetch(`/api/v1/sessions/${encodeURIComponent(this._wsSessionId)}/runs/inject`, {

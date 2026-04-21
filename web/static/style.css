@@ -4736,11 +4736,129 @@ body.v2 #right-drawer #drawer-stream {
 }
 
 body.v2 #result-panel {
+    position: relative;
     margin: 10px 12px;
-    border-radius: 10px;
+    border-radius: 12px;
     background: rgba(23, 29, 39, 0.6);
     box-shadow: inset 0 0 0 1px rgba(172, 190, 212, 0.12);
     overflow: hidden;
+    padding-left: 20px; /* room for the accent strip */
+}
+
+/* Colored accent strip on the left edge — colored per state. */
+body.v2 #result-accent {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: rgba(172, 190, 212, 0.2);
+    transition: background 180ms ease;
+}
+
+/* Success state ----------------------------------------------------------- */
+body.v2 #result-panel.is-success {
+    background:
+        linear-gradient(180deg, rgba(28, 55, 42, 0.55) 0%, rgba(23, 29, 39, 0.6) 60%),
+        rgba(23, 29, 39, 0.6);
+    box-shadow:
+        inset 0 0 0 1px rgba(134, 216, 171, 0.24),
+        0 16px 40px -28px rgba(134, 216, 171, 0.4);
+}
+body.v2 #result-panel.is-success #result-accent {
+    background: linear-gradient(180deg, var(--success), rgba(134, 216, 171, 0.45));
+    box-shadow: 0 0 14px rgba(134, 216, 171, 0.35);
+}
+body.v2 #result-panel.is-success #result-badge {
+    color: var(--success);
+}
+
+/* Error state ------------------------------------------------------------- */
+body.v2 #result-panel.is-error {
+    background:
+        linear-gradient(180deg, rgba(64, 30, 30, 0.55) 0%, rgba(23, 29, 39, 0.6) 60%),
+        rgba(23, 29, 39, 0.6);
+    box-shadow:
+        inset 0 0 0 1px rgba(243, 175, 167, 0.22),
+        0 16px 40px -28px rgba(199, 67, 67, 0.35);
+}
+body.v2 #result-panel.is-error #result-accent {
+    background: linear-gradient(180deg, var(--error), rgba(243, 175, 167, 0.45));
+    box-shadow: 0 0 14px rgba(243, 175, 167, 0.3);
+}
+body.v2 #result-panel.is-error #result-badge {
+    color: var(--error);
+}
+
+/* Header layout: badge+meta on the left, actions pinned right. */
+body.v2 #result-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 !important; /* padding lives on the panel */
+}
+body.v2 .result-header-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+body.v2 .result-header-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+body.v2 #result-badge {
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.2;
+}
+body.v2 .result-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-display);
+    font-size: 11px;
+    color: var(--text-muted);
+    letter-spacing: 0.03em;
+}
+body.v2 .result-meta-sep {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.45;
+}
+body.v2 .result-meta #result-agent:empty + .result-meta-sep,
+body.v2 .result-meta #result-agent:empty + .result-meta-sep + #result-elapsed:empty {
+    display: none;
+}
+body.v2 .result-meta #result-elapsed:empty,
+body.v2 .result-meta #result-agent:empty {
+    display: none;
+}
+
+/* Entrance animation — slide down + fade. */
+@keyframes result-panel-enter-kf {
+    from {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+body.v2 #result-panel.result-panel-enter {
+    animation: result-panel-enter-kf 220ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+    body.v2 #result-panel.result-panel-enter {
+        animation: none;
+    }
 }
 
 body.v2 #question-panel {

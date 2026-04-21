@@ -247,12 +247,20 @@
                         </div>
 
                         <div id="result-panel" class="hidden">
+                            <div id="result-accent" aria-hidden="true"></div>
                             <div id="result-header">
-                                <span id="result-badge">✓ Complete</span>
-                                <span id="result-agent"></span>
-                                <span id="result-elapsed"></span>
-                                <button id="result-copy" title="Copy to clipboard">Copy</button>
-                                <button id="result-close" title="Dismiss">×</button>
+                                <div class="result-header-main">
+                                    <span id="result-badge"></span>
+                                    <span class="result-meta">
+                                        <span id="result-agent"></span>
+                                        <span class="result-meta-sep" aria-hidden="true"></span>
+                                        <span id="result-elapsed"></span>
+                                    </span>
+                                </div>
+                                <div class="result-header-actions">
+                                    <button id="result-copy" title="Copy to clipboard">Copy</button>
+                                    <button id="result-close" title="Dismiss">×</button>
+                                </div>
                             </div>
                             <div id="result-body-wrap">
                                 <div id="result-body"></div>
