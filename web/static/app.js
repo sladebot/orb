@@ -17,6 +17,59 @@ function describeHttpError(status, body) {
     return status ? `HTTP ${status}: non-JSON response` : 'non-JSON response';
 }
 
+/**
+ * Turn a list of LCS-style diff ops into paired rows for a side-by-side
+ * split view. Consecutive `remove` + `add` blocks get zipped together so
+ * the "before" and "after" lines for the same logical edit line up on the
+ * same row; excess removes/adds get empty gutters on the opposite side.
+ *
+ * Each input op: `{type: 'equal' | 'add' | 'remove', line: string}`.
+ * Each output row: `{left, right}` where each side is either
+ * `{kind: 'empty'}` or `{kind: 'ctx' | 'del' | 'add', ln: number, text: string}`.
+ */
+function buildSplitDiffRows(ops) {
+    const rows = [];
+    let oldLn = 0;
+    let newLn = 0;
+    let pendingRemoves = [];
+    let pendingAdds = [];
+
+    const empty = () => ({ kind: 'empty' });
+    const flush = () => {
+        const len = Math.max(pendingRemoves.length, pendingAdds.length);
+        for (let i = 0; i < len; i++) {
+            const rem = pendingRemoves[i];
+            const add = pendingAdds[i];
+            rows.push({
+                left: rem ? { kind: 'del', ln: rem.ln, text: rem.text } : empty(),
+                right: add ? { kind: 'add', ln: add.ln, text: add.text } : empty(),
+            });
+        }
+        pendingRemoves = [];
+        pendingAdds = [];
+    };
+
+    for (const op of ops || []) {
+        if (op.type === 'equal') {
+            flush();
+            oldLn++;
+            newLn++;
+            rows.push({
+                left: { kind: 'ctx', ln: oldLn, text: op.line },
+                right: { kind: 'ctx', ln: newLn, text: op.line },
+            });
+        } else if (op.type === 'add') {
+            newLn++;
+            pendingAdds.push({ ln: newLn, text: op.line });
+        } else {
+            oldLn++;
+            pendingRemoves.push({ ln: oldLn, text: op.line });
+        }
+    }
+    flush();
+    return rows;
+}
+
 const AGENT_CSS_CLASS = {
     coordinator: 'agent-coordinator',
     coder:       'agent-coder',
@@ -3431,7 +3484,28 @@ class Dashboard {
             diffHost.innerHTML = `<pre class="repo-raw" style="padding:12px 16px; margin:0; color:var(--text-secondary);">${this._escapeHtml(selected.content || '')}</pre>`;
             return;
         }
+        if (this._repoView === 'split') {
+            diffHost.innerHTML = this._renderV2SplitDiff(selected);
+            return;
+        }
         diffHost.innerHTML = this._renderV2Diff(selected);
+    }
+
+    _renderV2SplitDiff(file) {
+        const oldLines = (file.oldContent || '').split('\n');
+        const newLines = (file.content || '').split('\n');
+        const ops = this._diffLineOps(oldLines, newLines);
+        const rows = buildSplitDiffRows(ops);
+        const header = `<div class="diff-hunk-hdr"><span class="at">@@ ${file.status === 'A' ? 'new file' : 'modified'} @@</span><span>${this._escapeHtml(file.path)}</span></div>`;
+        const renderSide = (cell) => {
+            if (cell.kind === 'empty') {
+                return `<div class="diff-side empty"><span class="ln"></span><span class="code"></span></div>`;
+            }
+            const lnClass = cell.kind === 'add' ? 'add' : cell.kind === 'del' ? 'del' : 'ctx';
+            return `<div class="diff-side ${lnClass}"><span class="ln">${cell.ln}</span><span class="code">${this._escapeHtml(cell.text)}</span></div>`;
+        };
+        const body = rows.map((r) => `<div class="diff-split-row">${renderSide(r.left)}${renderSide(r.right)}</div>`).join('');
+        return header + body;
     }
 
     async _renderUnchangedFile(file, host) {
@@ -4172,7 +4246,7 @@ class Dashboard {
 
 // Expose helpers for unit tests (Node/Vitest). No-op in the browser.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { safeParseWsMessage, describeHttpError };
+    module.exports = { safeParseWsMessage, describeHttpError, buildSplitDiffRows };
 }
 
 // Initialize on load

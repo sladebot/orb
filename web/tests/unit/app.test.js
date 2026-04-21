@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect } from 'vitest';
-import { safeParseWsMessage, describeHttpError } from '../../static/app.js';
+import { safeParseWsMessage, describeHttpError, buildSplitDiffRows } from '../../static/app.js';
 
 describe('describeHttpError', () => {
     it('does not echo raw response body into the user-facing message', () => {
@@ -19,6 +19,82 @@ describe('describeHttpError', () => {
 
     it('falls back to a generic label when status is missing', () => {
         expect(describeHttpError(0, 'anything')).toMatch(/non-JSON/i);
+    });
+});
+
+describe('buildSplitDiffRows', () => {
+    it('emits one paired ctx row per equal op with matching line numbers', () => {
+        const rows = buildSplitDiffRows([
+            { type: 'equal', line: 'a' },
+            { type: 'equal', line: 'b' },
+        ]);
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toEqual({
+            left: { kind: 'ctx', ln: 1, text: 'a' },
+            right: { kind: 'ctx', ln: 1, text: 'a' },
+        });
+        expect(rows[1].left.ln).toBe(2);
+        expect(rows[1].right.ln).toBe(2);
+    });
+
+    it('pairs consecutive removes and adds on the same row', () => {
+        // Modifying two lines: old A,B -> new X,Y
+        const rows = buildSplitDiffRows([
+            { type: 'remove', line: 'A' },
+            { type: 'remove', line: 'B' },
+            { type: 'add', line: 'X' },
+            { type: 'add', line: 'Y' },
+        ]);
+        expect(rows).toHaveLength(2);
+        expect(rows[0].left).toMatchObject({ kind: 'del', text: 'A', ln: 1 });
+        expect(rows[0].right).toMatchObject({ kind: 'add', text: 'X', ln: 1 });
+        expect(rows[1].left).toMatchObject({ kind: 'del', text: 'B', ln: 2 });
+        expect(rows[1].right).toMatchObject({ kind: 'add', text: 'Y', ln: 2 });
+    });
+
+    it('fills the opposite side with empty when removes outnumber adds', () => {
+        // Two deletes, one add → second row has an empty right.
+        const rows = buildSplitDiffRows([
+            { type: 'remove', line: 'A' },
+            { type: 'remove', line: 'B' },
+            { type: 'add', line: 'X' },
+        ]);
+        expect(rows).toHaveLength(2);
+        expect(rows[0].right.kind).toBe('add');
+        expect(rows[1].right).toEqual({ kind: 'empty' });
+    });
+
+    it('fills the opposite side with empty when adds outnumber removes', () => {
+        const rows = buildSplitDiffRows([
+            { type: 'remove', line: 'A' },
+            { type: 'add', line: 'X' },
+            { type: 'add', line: 'Y' },
+        ]);
+        expect(rows).toHaveLength(2);
+        expect(rows[0].left.kind).toBe('del');
+        expect(rows[1].left).toEqual({ kind: 'empty' });
+        expect(rows[1].right.text).toBe('Y');
+    });
+
+    it('flushes pending edits when an equal op arrives between them', () => {
+        // remove, equal, add → must not pair the remove with the add across the ctx line.
+        const rows = buildSplitDiffRows([
+            { type: 'remove', line: 'A' },
+            { type: 'equal', line: 'ctx' },
+            { type: 'add', line: 'X' },
+        ]);
+        expect(rows).toHaveLength(3);
+        expect(rows[0].left.kind).toBe('del');
+        expect(rows[0].right.kind).toBe('empty');
+        expect(rows[1].left.kind).toBe('ctx');
+        expect(rows[1].right.kind).toBe('ctx');
+        expect(rows[2].left.kind).toBe('empty');
+        expect(rows[2].right.kind).toBe('add');
+    });
+
+    it('returns [] for empty or missing ops', () => {
+        expect(buildSplitDiffRows([])).toEqual([]);
+        expect(buildSplitDiffRows(undefined)).toEqual([]);
     });
 });
 

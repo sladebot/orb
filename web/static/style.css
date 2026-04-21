@@ -4468,6 +4468,50 @@ body.v2 .diff-line.del .code::before { content: "−"; color: var(--error); marg
 body.v2 .diff-line.ctx .code::before { content: " "; margin-right: 6px; }
 body.v2 .diff-line .code { color: inherit; }
 
+/* ── Split diff view ────────────────────────────────────────────────────
+   Two columns, each with its own gutter + code cell. The .diff-side
+   markers (add / del / ctx / empty) drive the row tint so edits are
+   readable side-by-side. */
+body.v2 .diff-split-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    /* Subtle center rule so the two sides don't visually merge. */
+    border-left: 0;
+    border-right: 0;
+}
+body.v2 .diff-split-row + .diff-split-row {
+    border-top: 1px solid rgba(172, 190, 212, 0.03);
+}
+body.v2 .diff-side {
+    display: grid;
+    grid-template-columns: 42px 1fr;
+    padding: 0 12px;
+    white-space: pre;
+    min-width: 0;
+}
+body.v2 .diff-side + .diff-side {
+    border-left: 1px solid rgba(172, 190, 212, 0.08);
+}
+body.v2 .diff-side .ln {
+    color: var(--text-muted);
+    opacity: 0.55;
+    text-align: right;
+    padding-right: 10px;
+    user-select: none;
+    font-size: 11px;
+}
+body.v2 .diff-side .code {
+    color: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+body.v2 .diff-side.add { background: rgba(134, 216, 171, 0.10); color: #d4ecd4; }
+body.v2 .diff-side.del { background: rgba(243, 175, 167, 0.10); color: #f3cbc3; }
+body.v2 .diff-side.empty {
+    background: rgba(172, 190, 212, 0.03);
+}
+body.v2 .diff-side.empty .code { opacity: 0.35; }
+
 /* Hide the legacy mount we keep for app.js compatibility */
 body.v2 #changes-log {
     display: none;
