@@ -2378,30 +2378,21 @@ pre {
 
 #result-body-wrap {
     position: relative;
-    max-height: 280px;
+    max-height: 360px;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 #result-body {
-    max-height: 280px;
-    overflow: auto;
-    padding-right: 6px;
+    max-height: 360px;
+    overflow-y: auto;
+    padding-right: 8px;
 }
 
-#result-body-wrap::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 52px;
-    background: linear-gradient(180deg, rgba(15, 20, 25, 0), rgba(15, 20, 25, 0.92));
-    pointer-events: none;
-}
-
-#result-body-wrap.no-overflow::after {
-    display: none;
-}
+/* No fade gradient — the prior 52px mask obscured legitimate trailing
+   text even when everything fit. Flat UI scrolls natively when the body
+   overflows. */
 
 .followup-hint,
 .final-result-elapsed,
@@ -3626,9 +3617,8 @@ pre {
     background: rgba(228, 232, 244, 0.8);
 }
 
-[data-theme="light"] #result-body-wrap::after {
-    background: linear-gradient(180deg, rgba(248, 250, 253, 0), rgba(248, 250, 253, 0.95));
-}
+/* (Light-theme fade removed — matching the dark-mode change that drops
+   the ::after gradient overlay.) */
 
 /* Prediction cards */
 [data-theme="light"] .pred-bar-wrap {
