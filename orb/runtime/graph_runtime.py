@@ -2227,14 +2227,30 @@ class GraphRuntime:
         if topo is None:
             return heuristic_map, {}
 
+        choices = self._available_model_choices()
+        choice_lookup = {(c["provider"], c["model"]) for c in choices}
+        # model_id → provider, when the caller supplied only the model id
+        # (Session Config modal does this — the user picks a model, not a
+        # provider). If the id exists for exactly one provider in the
+        # catalog we can resolve it unambiguously; if ambiguous we bail.
+        model_to_providers: dict[str, set[str]] = {}
+        for c in choices:
+            model_to_providers.setdefault(c["model"], set()).add(c["provider"])
+
         validated: dict = {}
         reasons: dict[str, str] = {}
-        choice_lookup = {(c["provider"], c["model"]) for c in self._available_model_choices()}
         for agent_id, agent in topo.agents.items():
             item = (raw_assignments or {}).get(agent_id)
             provider = item.get("provider") if isinstance(item, dict) else None
             model_id = item.get("model") if isinstance(item, dict) else None
             reason = item.get("reason", "") if isinstance(item, dict) else ""
+            # Fill in the provider from the catalog when only a model id
+            # was supplied — preserves the caller's pick instead of silently
+            # dropping it into the heuristic allocator.
+            if model_id and not provider:
+                resolved = model_to_providers.get(model_id)
+                if resolved and len(resolved) == 1:
+                    provider = next(iter(resolved))
             if provider and model_id and (provider, model_id) in choice_lookup:
                 from orb.llm.types import ModelConfig, ModelTier
                 tier = heuristic_map.get(agent_id).tier if agent_id in heuristic_map else (
