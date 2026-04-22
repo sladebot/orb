@@ -54,14 +54,6 @@ with per-hunk author chips.
 | (single agent) | ![Triad topology](docs/topology-triad.png) | ![Dual Review topology](docs/topology-dual-review.png) | ![Hierarchy topology](docs/topology-hierarchy.png) |
 | One agent end-to-end — pick for trivial / one-off tasks | Coordinator → Coder → Reviewer & Tester | Coordinator → Coder fans out to Reviewer A, Reviewer B, and Tester | Coordinator → Researcher → Coder → Reviewer & Tester |
 
-### Mobile
-
-![Orb dashboard on mobile](docs/orb-dashboard-mobile.png)
-
-The dashboard stacks into a single column under 720 CSS px — topology first,
-agents list, repository changes, then conversation — with the composer pinned
-to the bottom of the viewport so it's always reachable on a phone.
-
 ### TUI
 
 ![Orb TUI](docs/orb-tui.png)

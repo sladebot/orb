@@ -104,37 +104,4 @@ await page.waitForTimeout(250);
 await page.screenshot({ path: path.join(OUT, 'orb-session-modal.png'), fullPage: false });
 console.log('wrote orb-session-modal.png');
 
-// ---- 4. Mobile view ----
-await context.close();
-const mobileCtx = await browser.newContext({
-    viewport: { width: 400, height: 900 },
-    deviceScaleFactor: DPI,
-});
-const mobilePage = await mobileCtx.newPage();
-await mobilePage.goto('http://127.0.0.1:1337/');
-await mobilePage.waitForSelector('#v2-chrome-actions', { state: 'visible' });
-await mobilePage.waitForFunction(
-    () => document.getElementById('connection-indicator')?.classList.contains('connected'),
-    { timeout: 8000 },
-).catch(() => {});
-await mobilePage.evaluate(() => document.fonts?.ready);
-await mobilePage.waitForTimeout(400);
-await mobilePage.evaluate(() => {
-    const m = document.getElementById('session-config-modal');
-    if (m) { m.classList.add('hidden'); m.setAttribute('aria-hidden', 'true'); }
-});
-await mobilePage.evaluate((init) => {
-    window.dashboard?._handleInit(init);
-}, DEMO_INIT);
-await mobilePage.waitForTimeout(400);
-await mobilePage.evaluate(() => {
-    const ind = document.getElementById('connection-indicator');
-    if (ind) { ind.className = 'connected'; ind.title = 'Connected'; }
-    const lbl = document.getElementById('connection-label');
-    if (lbl) lbl.textContent = 'Daemon Connected';
-});
-await mobilePage.waitForTimeout(200);
-await mobilePage.screenshot({ path: path.join(OUT, 'orb-dashboard-mobile.png'), fullPage: false });
-console.log('wrote orb-dashboard-mobile.png');
-
 await browser.close();
