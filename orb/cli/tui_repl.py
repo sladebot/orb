@@ -707,8 +707,14 @@ class OrbReplTUI(App[None]):
         if self.run_state in terminal_states:
             start_url = self._session_url("/runs")
             payload: dict = {"query": text}
-            if self._topology and self._topology != "auto":
-                payload["topology"] = self._topology
+            # Prefer the topology the session is already locked to (set from
+            # the init payload's plan.topology.id once the session has been
+            # classified once). Falling back to the CLI-time topology means
+            # a session started with --topology=auto used to keep sending
+            # "auto" forever, so every follow-up run could re-classify.
+            effective_topology = self.topology or self._topology
+            if effective_topology and effective_topology != "auto":
+                payload["topology"] = effective_topology
             try:
                 async with self._http_session.post(start_url, json=payload) as resp:
                     body_text = await resp.text()
