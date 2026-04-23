@@ -17,3 +17,7 @@ node_modules/
 
 # Claude Code per-machine state (permission allowlist + worktree scratch)
 .claude/
+
+# Stray node / npm scratch that crept into working tree
+.npm/
+tmp/
