@@ -119,7 +119,10 @@ class TestGraphRuntimeSession:
         event = runtime.current_init_event()
 
         assert event["session_turn"] == 2
-        assert event["workdir"] == str(Path.cwd())
+        # A session without an explicit workdir must NOT leak Path.cwd()
+        # into the dashboard payload — that used to surface the daemon's
+        # launch dir in the breadcrumb for every unscoped session.
+        assert event["workdir"] == ""
         assert event["plan"]["routing"]["task_type"] == "review"
 
     def test_runtime_resolves_mentions_server_side(self, tmp_path: Path):

@@ -1,0 +1,17 @@
+0 verbose cli /Users/souranil/.nvm/versions/node/v24.14.0/bin/node /Users/souranil/.nvm/versions/node/v24.14.0/lib/node_modules/npm/bin/npm-cli.js
+1 info using npm@11.9.0
+2 info using node@v24.14.0
+3 silly config load:file:/Users/souranil/.nvm/versions/node/v24.14.0/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/souranil/projects/orb/.npmrc
+5 silly config load:file:/Users/souranil/.nvm/versions/node/v24.14.0/etc/npmrc
+6 verbose title npm exec vitest run web/tests/unit/app.test.js web/tests/unit/graph.test.js web/tests/unit/listeners.test.js
+7 verbose argv "exec" "--" "vitest" "run" "web/tests/unit/app.test.js" "web/tests/unit/graph.test.js" "web/tests/unit/listeners.test.js"
+8 verbose logfile logs-max:10 dir:/Users/souranil/projects/orb/.npm/_logs/2026-04-23T00_40_30_243Z-
+9 verbose logfile /Users/souranil/projects/orb/.npm/_logs/2026-04-23T00_40_30_243Z-debug-0.log
+10 silly logfile done cleaning log files
+11 verbose cwd /Users/souranil/projects/orb
+12 verbose os Darwin 25.2.0
+13 verbose node v24.14.0
+14 verbose npm  v11.9.0
+15 verbose exit 0
+16 info ok

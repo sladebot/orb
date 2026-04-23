@@ -1234,9 +1234,13 @@ class GraphRuntime:
 
     def _sync_session_state(self) -> None:
         # Dashboard's workdir reflects the *session's* scoped folder, not
-        # the daemon's process CWD — crucial once a daemon can host
-        # multiple concurrent sessions in different workdirs.
-        self.state.workdir = self._conversation_session.workdir or str(Path.cwd())
+        # the daemon's process CWD. Never fall back to ``Path.cwd()`` here —
+        # the daemon's launch dir is an implementation detail and leaking
+        # it confused users into thinking every session was scoped to
+        # ``~/projects/orb`` (wherever the daemon happened to be started).
+        # Empty string is the honest signal "no workdir yet"; the UI can
+        # render a placeholder.
+        self.state.workdir = self._conversation_session.workdir or ""
         self.state.session_turn = self._conversation_session.user_turn_count()
         self.state.session_id = self._conversation_session.session_id
         self.state.session_generation = self._conversation_session.generation
