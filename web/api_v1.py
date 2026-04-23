@@ -429,17 +429,24 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             return err("FS_ERROR", f"Failed to list path: {exc}", status=500)
 
     async def fs_files(request: web.Request) -> web.Response:
-        import subprocess
+        """Flat workdir listing.
+
+        Legacy callers used this for the initial repo tree; new code uses
+        ``/api/v1/fs/dir`` for lazy per-folder expansion. Kept around
+        because some callers (and tests) still hit this endpoint.
+
+        Filesystem-only (no git). Respects the workdir's ``.gitignore``
+        via pathspec and a built-in deny list for VCS metadata / caches.
+        """
         raw = (request.rel_url.query.get("path") or "").strip()
         if not raw:
             return err("INVALID_PATH", "path is required", status=400)
         path = Path(raw).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             return err("INVALID_PATH", f"Not a directory: {path}", status=400)
-        # Scope: the dashboard's repo-changes panel should only enumerate
-        # folders under the user's home OR a path already registered as a
-        # session workdir. This prevents callers from walking /etc, ~/.ssh
-        # (unless the user explicitly put a session there), and similar.
+        # Scope: only folders under the user's home OR a path already
+        # registered as a session workdir. Prevents callers from walking
+        # /etc, ~/.ssh (unless explicitly opted in as a session workdir).
         allowed_roots: list[Path] = [Path.home().resolve()]
         for rt in manager.list_sessions():
             wd = getattr(rt._conversation_session, "workdir", None)  # noqa: SLF001
@@ -464,40 +471,138 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
                 "path must be under $HOME or an existing session workdir",
                 status=400,
             )
+        import os as _os
         limit = 800
         files: list[str] = []
-        used_git = False
-        try:
-            result = subprocess.run(["git", "ls-files", "-z"], cwd=str(path), capture_output=True, text=True, timeout=15)
-            if result.returncode == 0:
-                used_git = True
-                files = [n for n in result.stdout.split("\0") if n and not n.startswith(".git/")][:limit]
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        if not used_git:
-            import os as _os
-            ignore_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build", ".next", ".turbo"}
-            for root, dirs, entries in _os.walk(str(path)):
-                dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
-                root_path = Path(root)
-                for entry in entries:
-                    if entry.startswith("."):
-                        continue
-                    try:
-                        rel = (root_path / entry).relative_to(path)
-                    except ValueError:
-                        continue
-                    files.append(str(rel))
-                    if len(files) >= limit:
-                        break
+        spec = _load_gitignore_spec(path)
+        ignore_dirs = set(_FS_DIR_DENY_NAMES)
+        for root, dirs, entries in _os.walk(str(path)):
+            # Prune deny-listed dirs in-place so os.walk doesn't descend.
+            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            # Also respect .gitignore for dirs (trailing slash for spec).
+            if spec is not None:
+                pruned: list[str] = []
+                for d in dirs:
+                    rel_dir = (Path(root) / d).relative_to(path).as_posix() + "/"
+                    if not spec.match_file(rel_dir):
+                        pruned.append(d)
+                dirs[:] = pruned
+            root_path = Path(root)
+            for entry in entries:
+                try:
+                    rel = (root_path / entry).relative_to(path).as_posix()
+                except ValueError:
+                    continue
+                if spec is not None and spec.match_file(rel):
+                    continue
+                files.append(rel)
                 if len(files) >= limit:
                     break
-            files.sort()
+            if len(files) >= limit:
+                break
+        files.sort()
         return ok("FS_FILES_FETCHED", {
             "path": str(path),
-            "source": "git" if used_git else "walk",
+            "source": "walk",
             "files": files,
             "truncated": len(files) >= limit,
+        })
+
+    # Built-in deny list — VCS metadata and common cache/build dirs that
+    # are never interesting to surface in the repo tree. Matched against
+    # entry *name*, not a full pattern. .gitignore adds to this.
+    _FS_DIR_DENY_NAMES = frozenset({
+        ".git", ".hg", ".svn",
+        "node_modules", ".venv", "venv", ".tox",
+        "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+        "dist", "build", ".next", ".turbo", ".DS_Store",
+    })
+
+    def _load_gitignore_spec(workdir: Path):
+        """Load ``{workdir}/.gitignore`` into a pathspec PathSpec, or None.
+
+        pathspec's GitWildMatchPattern handles the full .gitignore syntax
+        (globs, ``!negation``, trailing slash = directory-only, etc.)
+        without invoking the ``git`` CLI.
+        """
+        try:
+            import pathspec  # type: ignore
+        except ImportError:
+            return None
+        gitignore = workdir / ".gitignore"
+        if not gitignore.exists() or not gitignore.is_file():
+            return None
+        try:
+            lines = gitignore.read_text().splitlines()
+        except OSError:
+            return None
+        # pathspec 1.x ships a modern `gitignore` factory; fall back to
+        # the older GitWildMatchPattern for 0.x installations.
+        try:
+            return pathspec.PathSpec.from_lines("gitignore", lines)
+        except (LookupError, ValueError):
+            return pathspec.PathSpec.from_lines(
+                pathspec.patterns.GitWildMatchPattern,
+                lines,
+            )
+
+    async def fs_dir(request: web.Request) -> web.Response:
+        """Return one level of a session workdir — lazy-tree backend.
+
+        Query: ``workdir`` (absolute path of the session root, required)
+        and optional ``path`` (relative folder inside workdir; empty =
+        list the workdir root itself).
+
+        Response data: ``{path, dirs: [{name,path}], files: [{name,path}]}``
+        sorted alphabetically. Entries matching the workdir's .gitignore
+        or the built-in deny list are filtered out.
+        """
+        workdir_raw = (request.rel_url.query.get("workdir") or "").strip()
+        rel_raw = (request.rel_url.query.get("path") or "").strip()
+        if not workdir_raw:
+            return err("INVALID_WORKDIR", "workdir is required", status=400)
+        workdir = Path(workdir_raw).expanduser().resolve()
+        if not workdir.exists() or not workdir.is_dir():
+            return err("INVALID_WORKDIR", f"Not a directory: {workdir}", status=400)
+        # Resolve the target folder under workdir and guard against escapes.
+        try:
+            target = (workdir / rel_raw).resolve(strict=True) if rel_raw else workdir
+            target.relative_to(workdir)
+        except (OSError, ValueError, FileNotFoundError):
+            return err("INVALID_PATH", "path escapes workdir", status=400)
+        if not target.is_dir():
+            return err("INVALID_PATH", "path must be a directory", status=400)
+
+        spec = _load_gitignore_spec(workdir)
+        dirs: list[dict] = []
+        files: list[dict] = []
+        try:
+            for entry in target.iterdir():
+                name = entry.name
+                if name in _FS_DIR_DENY_NAMES:
+                    continue
+                try:
+                    rel = entry.relative_to(workdir).as_posix()
+                except ValueError:
+                    continue
+                # pathspec: directories must be matched with a trailing
+                # slash for patterns like "build/" to hit the directory
+                # (and not a file named "build").
+                is_dir = entry.is_dir()
+                check_path = rel + "/" if is_dir else rel
+                if spec is not None and spec.match_file(check_path):
+                    continue
+                (dirs if is_dir else files).append({"name": name, "path": rel})
+        except OSError as exc:
+            return err("FS_READ_FAILED", f"Could not list directory: {exc}", status=500)
+
+        dirs.sort(key=lambda d: d["name"].casefold())
+        files.sort(key=lambda f: f["name"].casefold())
+        rel_path = target.relative_to(workdir).as_posix()
+        return ok("FS_DIR_FETCHED", {
+            "path": "" if rel_path == "." else rel_path,
+            "dirs": dirs,
+            "files": files,
         })
 
     async def fs_read(request: web.Request) -> web.Response:
@@ -630,6 +735,7 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
     # Filesystem picker
     app.router.add_get("/api/v1/fs/list", fs_list)
     app.router.add_get("/api/v1/fs/files", fs_files)
+    app.router.add_get("/api/v1/fs/dir", fs_dir)
     app.router.add_get("/api/v1/fs/read", fs_read)
 
     # Git helpers

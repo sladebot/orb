@@ -850,28 +850,40 @@ class Dashboard {
     }
 
     async _loadWorkspaceFiles(workdir) {
-        if (!workdir) { this._workspaceFiles = []; this._renderLiveCodeChanges(); return; }
-        try {
-            const res = await fetch(`/api/v1/fs/files?path=${encodeURIComponent(workdir)}`);
-            const data = await unwrapEnvelope(res);
-            if (data.ok) {
-                this._workspaceFiles = (data.files || []).map((p) => ({
-                    path: p,
-                    agent: '',
-                    content: '',
-                    oldContent: '',
-                    status: 'U',  // "unchanged" — existing file from disk
-                    added: 0,
-                    removed: 0,
-                    _tracked: true,
-                }));
-            } else {
-                this._workspaceFiles = [];
-            }
-        } catch {
-            this._workspaceFiles = [];
-        }
+        // Entry point when the session's workdir changes. We no longer
+        // walk the whole tree up-front — just fetch the root level, and
+        // let `_renderRepoTree` lazy-expand folders on click.
+        this._workspaceWorkdir = workdir || '';
+        this._workspaceDirs = new Map();  // folder-path → {dirs, files}
+        this._workspaceExpanded = new Set(['']);  // root always expanded
+        if (!workdir) { this._renderLiveCodeChanges(); return; }
+        await this._loadWorkspaceDir('');
         this._renderLiveCodeChanges();
+    }
+
+    async _loadWorkspaceDir(folderPath) {
+        // Fetch one level. `folderPath` is relative to the workdir; ''
+        // means the workdir root. Caches results per folder so repeat
+        // expands don't re-hit the API.
+        const workdir = this._workspaceWorkdir;
+        if (!workdir) return;
+        if (this._workspaceDirs?.has(folderPath)) return;
+        try {
+            const q = new URLSearchParams({ workdir });
+            if (folderPath) q.set('path', folderPath);
+            const res = await fetch(`/api/v1/fs/dir?${q.toString()}`);
+            const data = await unwrapEnvelope(res);
+            if (!data.ok) {
+                this._workspaceDirs.set(folderPath, { dirs: [], files: [] });
+                return;
+            }
+            this._workspaceDirs.set(folderPath, {
+                dirs: Array.isArray(data.dirs) ? data.dirs : [],
+                files: Array.isArray(data.files) ? data.files : [],
+            });
+        } catch {
+            this._workspaceDirs.set(folderPath, { dirs: [], files: [] });
+        }
     }
 
     _closeSessionConfig() {
@@ -3373,74 +3385,176 @@ class Dashboard {
             return { ...f, diff, added: stats.added, removed: stats.removed, status };
         });
 
-        // Overlay workspace (unchanged) files — agent writes win if both exist.
+        // Tree rendering pulls from the lazy-loaded workspace map +
+        // overlays agent-written changes. Keep `files` as a flat list
+        // for the downstream diff / toolbar / stats renderers so they
+        // don't need to know about the tree shape.
         const changedByPath = new Map(changedFiles.map((f) => [f.path, f]));
-        const workspace = (this._workspaceFiles || []).filter((f) => !changedByPath.has(f.path));
-        const files = [...changedFiles, ...workspace];
+        const workspaceFlat = [];
+        for (const { files } of (this._workspaceDirs || new Map()).values()) {
+            for (const f of files) {
+                if (changedByPath.has(f.path)) continue;
+                workspaceFlat.push({
+                    path: f.path,
+                    agent: '',
+                    content: '',
+                    oldContent: '',
+                    status: 'U',
+                    added: 0,
+                    removed: 0,
+                    _tracked: true,
+                });
+            }
+        }
+        const files = [...changedFiles, ...workspaceFlat];
 
-        this._renderRepoTree(files);
+        this._renderRepoTree(changedFiles);
         this._renderRepoDiff(files);
         this._renderRepoToolbar(files);
-        // Stats strip only counts agent-authored changes.
         this._updateFilesStat(changedFiles);
     }
 
-    _renderRepoTree(files) {
+    _renderRepoTree(changedFiles) {
         const host = document.getElementById('repo-tree');
         if (!host) return;
-        if (files.length === 0) {
-            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">No file writes yet. Start a task to see diffs here.</div>`;
+        const workdir = this._workspaceWorkdir || '';
+        const dirs = this._workspaceDirs || new Map();
+        const expanded = this._workspaceExpanded || new Set(['']);
+
+        // Build path → changed-file metadata map for the overlay.
+        const changedByPath = new Map((changedFiles || []).map((f) => [f.path, f]));
+
+        if (!workdir && changedByPath.size === 0) {
+            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">No workdir set for this session.</div>`;
             return;
         }
-        // Group by top-level folder (or "(root)")
-        const groups = new Map();
-        for (const f of files) {
-            const slash = f.path.indexOf('/');
-            const folder = slash >= 0 ? f.path.slice(0, slash + 1) : '';
-            if (!groups.has(folder)) groups.set(folder, []);
-            groups.get(folder).push(f);
+
+        const rootLoaded = dirs.has('');
+        if (!rootLoaded && changedByPath.size === 0) {
+            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">Loading…</div>`;
+            return;
         }
-        const sortedFolders = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
-        const selected = this._repoSelectedPath || files[0].path;
+
+        // Walk the lazy tree depth-first, emitting one row per visible entry.
+        // Agent-written files get overlaid at the path they were written to
+        // even if their containing folder isn't expanded in the workspace map.
+        const rows = [];
+        const writtenByFolder = new Map();  // folder → Set<file path>
+        for (const [p] of changedByPath) {
+            const lastSlash = p.lastIndexOf('/');
+            const folder = lastSlash >= 0 ? p.slice(0, lastSlash) : '';
+            if (!writtenByFolder.has(folder)) writtenByFolder.set(folder, new Set());
+            writtenByFolder.get(folder).add(p);
+        }
+
+        const walk = (folderPath, depth) => {
+            const entry = dirs.get(folderPath);
+            if (!entry) return;
+            // Folders first, then files — both alphabetized by server.
+            for (const d of entry.dirs) {
+                const isOpen = expanded.has(d.path);
+                rows.push({ kind: 'folder', path: d.path, name: d.name, depth, open: isOpen });
+                if (isOpen) walk(d.path, depth + 1);
+            }
+            for (const f of entry.files) {
+                const changed = changedByPath.get(f.path);
+                rows.push({
+                    kind: 'file',
+                    path: f.path,
+                    name: f.name,
+                    depth,
+                    changed: changed || null,
+                });
+            }
+        };
+
+        if (rootLoaded) walk('', 0);
+
+        // Overlay agent-written files in folders we haven't loaded (yet).
+        // If a write lands in /src/foo.py and `src/` hasn't been expanded,
+        // we still surface the file so the user can click into the diff.
+        for (const [folder, paths] of writtenByFolder) {
+            const folderLoaded = dirs.has(folder);
+            const rowsInFolder = rows.filter((r) => r.kind === 'file' && r.path in Object.fromEntries([...paths].map((p) => [p, true])));
+            if (folderLoaded && rowsInFolder.length === paths.size) continue;
+            // Add any missing ones — surface the write even if the folder isn't expanded.
+            for (const p of paths) {
+                if (rows.some((r) => r.kind === 'file' && r.path === p)) continue;
+                rows.push({
+                    kind: 'file',
+                    path: p,
+                    name: p.split('/').pop(),
+                    depth: 0,
+                    changed: changedByPath.get(p),
+                });
+            }
+        }
+
+        if (rows.length === 0) {
+            host.innerHTML = `<div id="repo-tree-empty" class="repo-empty">Empty workdir. Agent writes will appear here.</div>`;
+            return;
+        }
+
+        const selected = this._repoSelectedPath
+            || rows.find((r) => r.kind === 'file')?.path
+            || '';
         this._repoSelectedPath = selected;
 
-        host.innerHTML = sortedFolders.map((folder) => {
-            const items = groups.get(folder) || [];
-            items.sort((a, b) => a.path.localeCompare(b.path));
-            const label = folder || '(root)';
+        host.innerHTML = rows.map((row) => {
+            const indent = 'padding-left:' + (8 + row.depth * 14) + 'px';
+            if (row.kind === 'folder') {
+                const caret = row.open ? '▾' : '▸';
+                return `
+                    <div class="repo-folder-row" data-folder="${this._escapeAttr(row.path)}" style="${indent}">
+                        <span class="caret">${caret}</span>
+                        <span class="pth">${this._escapeHtml(row.name)}/</span>
+                    </div>
+                `;
+            }
+            const f = row.changed;
+            const isSel = row.path === selected ? ' sel' : '';
+            const status = f ? ((f.oldContent || '').length === 0 ? 'A' : 'M') : 'U';
+            let byline;
+            if (!f) {
+                byline = `<span class="byline"><span class="track-label">file</span></span>`;
+            } else {
+                const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                byline = `<span class="byline">
+                        <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
+                        <span class="sep">·</span>
+                        <span class="stat-add">+${f.added || 0}</span>
+                        ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
+                    </span>`;
+            }
             return `
-                <div class="repo-folder">${this._escapeHtml(label)}</div>
-                ${items.map((f) => {
-                    const shortName = folder ? f.path.slice(folder.length) || f.path : f.path;
-                    const sel = f.path === selected ? ' sel' : '';
-                    let byline;
-                    if (f.status === 'U') {
-                        byline = `<span class="byline"><span class="track-label">tracked</span></span>`;
-                    } else {
-                        const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
-                        byline = `<span class="byline">
-                                <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
-                                <span class="sep">·</span>
-                                <span class="stat-add">+${f.added || 0}</span>
-                                ${(f.removed || 0) > 0 ? `<span class="stat-del">−${f.removed}</span>` : ''}
-                            </span>`;
-                    }
-                    return `
-                        <div class="repo-file${sel}" data-path="${this._escapeAttr(f.path)}" title="${this._escapeAttr(f.path)}">
-                            <span class="badge ${f.status}">${f.status}</span>
-                            <div class="main">
-                                <span class="pth">${this._escapeHtml(shortName)}</span>
-                                ${byline}
-                            </div>
-                        </div>
-                    `;
-                }).join('')}
+                <div class="repo-file${isSel}" data-path="${this._escapeAttr(row.path)}" title="${this._escapeAttr(row.path)}" style="${indent}">
+                    <span class="badge ${status}">${status}</span>
+                    <div class="main">
+                        <span class="pth">${this._escapeHtml(row.name)}</span>
+                        ${byline}
+                    </div>
+                </div>
             `;
         }).join('');
 
         host.querySelectorAll('.repo-file').forEach((row) => {
             row.addEventListener('click', () => {
                 this._repoSelectedPath = row.dataset.path;
+                this._renderLiveCodeChanges();
+            });
+        });
+        host.querySelectorAll('.repo-folder-row').forEach((row) => {
+            row.addEventListener('click', async () => {
+                const folder = row.dataset.folder || '';
+                const exp = this._workspaceExpanded;
+                if (exp.has(folder)) {
+                    exp.delete(folder);
+                } else {
+                    exp.add(folder);
+                    if (!this._workspaceDirs.has(folder)) {
+                        await this._loadWorkspaceDir(folder);
+                    }
+                }
                 this._renderLiveCodeChanges();
             });
         });

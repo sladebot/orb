@@ -22,6 +22,7 @@ dependencies = [
     "torch>=2.1.0",
     "torchvision>=0.16.0",
     "lightning>=2.2.0",
+    "pathspec>=0.11.0",
 ]
 
 [project.optional-dependencies]

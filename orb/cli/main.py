@@ -934,6 +934,10 @@ def _start_managed_daemon(
         stderr=log_handle,
         start_new_session=True,
         close_fds=True,
+        # Pin the daemon's process CWD to its fixed anchor so code paths
+        # that hit ``Path.cwd()`` (sandbox fallback, test harness, etc.)
+        # never leak the user's launch shell into runtime state.
+        cwd=str(resolved_workdir),
     )
     log_handle.close()
     time.sleep(0.5)
