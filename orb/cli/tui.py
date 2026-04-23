@@ -2550,6 +2550,9 @@ async def attach_tui(
     show_logs: bool = False,
     initial_query: str | None = None,
     exit_after_run: bool = False,
+    session_id: str | None = None,
+    workdir: str | None = None,
+    agent_models: dict[str, str] | None = None,
 ) -> None:
     # On the `new-tui` branch we default to the REPL-stream TUI. The old
     # OrbTUI class is still defined above — it is intentionally bypassed here
@@ -2563,4 +2566,7 @@ async def attach_tui(
         show_logs=show_logs,
         initial_query=initial_query,
         exit_after_run=exit_after_run,
+        session_id=session_id,
+        workdir=workdir,
+        agent_models=agent_models,
     )

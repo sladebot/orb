@@ -1241,7 +1241,6 @@ async def async_main() -> None:
 
     if args.subcommand == "tui":
         from .tui import attach_tui
-        import aiohttp
 
         connect_url = _resolve_connect_url(args.connect, getattr(args, "port", None))
 
@@ -1260,21 +1259,12 @@ async def async_main() -> None:
         if topology is None:
             topology = "auto"
 
-        # Create a workdir-scoped session before attaching the TUI so every
-        # run we launch lands in the right folder. Soft-fail if the daemon
-        # isn't reachable — attach_tui will surface the real error.
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(f"{connect_url}/api/session/new", json={"workdir": workdir}) as resp:
-                    payload = await resp.json()
-                    if payload.get("ok"):
-                        print(f"  Session scoped to: {workdir}")
-                        print(f"  Topology: {topology}")
-                    else:
-                        print(f"  Warning: couldn't scope session to {workdir}: {payload.get('error', 'unknown')}")
-        except aiohttp.ClientError:
-            # Daemon unreachable at this point — leave it to attach_tui to fail loudly.
-            pass
+        # attach_tui handles session creation itself via POST /api/v1/sessions
+        # so each `orb tui` invocation gets its own runtime (like the
+        # dashboard's New Session modal). Print the intent here so the
+        # user sees the scoping before the TUI mounts.
+        print(f"  Session scoped to: {workdir}")
+        print(f"  Topology: {topology}")
 
         await attach_tui(
             connect_url=connect_url,
@@ -1283,6 +1273,7 @@ async def async_main() -> None:
             show_logs=args.logs,
             initial_query=args.query,
             exit_after_run=args.exit_after_run,
+            workdir=workdir,
         )
         return
 

@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
 from textual.widgets import Footer, Static, TextArea
 
 logger = logging.getLogger(__name__)
@@ -276,12 +277,91 @@ class ToolBlock(Static):
         if meta:
             head += f"  [#6b7685]{meta}[/]"
         if pill:
-            head += f"  [[{pill_color}]{pill}[/]]"
+            # Wrap the pill in U+2595 ▕ / U+258F ▏ so it reads like a bracketed
+            # capsule without confusing Textual's markup parser with literal
+            # square-brackets inside a tag.
+            head += f"  [{pill_color}]▕ {pill} ▏[/]"
         text = head
         if body:
             text += f"\n{body}"
         self.update(text)
         self.add_class("block")
+
+
+class ResumeSessionScreen(Screen):
+    """Modal showing prior sessions; press a number to switch to one.
+
+    Ported from the old ``orb/cli/tui.py`` picker. Capped at 9 entries
+    so the user can press ``1``–``9`` to pick without a cursor; for
+    longer histories the dashboard's Resume modal is the right tool.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Back"),
+        Binding("q", "dismiss_screen", "Back"),
+    ]
+
+    DEFAULT_CSS = """
+    ResumeSessionScreen {
+        align: center middle;
+        background: rgba(5, 8, 12, 0.72);
+    }
+    #resume-box {
+        width: 88;
+        height: auto;
+        background: #11161d;
+        border: round #2f3b4a;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, sessions: list[dict]) -> None:
+        super().__init__()
+        self._sessions = sessions[:9]
+        for i in range(1, len(self._sessions) + 1):
+            self._bindings.bind(str(i), f"pick({i})", show=False)
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="resume-box")
+
+    def on_mount(self) -> None:
+        box = self.query_one("#resume-box", Static)
+        if not self._sessions:
+            box.update(
+                "[bold white]Resume session[/bold white]\n\n"
+                "[dim]No prior sessions found.[/dim]\n\n"
+                "[dim]Esc[/dim] Close"
+            )
+            return
+        lines = ["[bold white]Resume session[/bold white]"]
+        lines.append("[dim]Press a number to switch; Esc to close.[/dim]\n")
+        for i, s in enumerate(self._sessions, start=1):
+            active = " [green]active[/green]" if s.get("active") else ""
+            workdir = s.get("workdir") or "(no workdir)"
+            sid = s.get("session_id", "")[:12]
+            turns = s.get("user_turns", 0)
+            topo = s.get("locked_topology") or ""
+            meta = []
+            if topo:
+                meta.append(topo)
+            if turns:
+                meta.append(f"{turns} turn" + ("" if turns == 1 else "s"))
+            meta_str = f"  [dim]({', '.join(meta)})[/dim]" if meta else ""
+            lines.append(f"[dim]{i}[/dim]  {workdir}  [dim]{sid}…[/dim]{active}{meta_str}")
+        box.update("\n".join(lines))
+
+    async def action_pick(self, index: int) -> None:
+        idx = int(index) - 1
+        if not (0 <= idx < len(self._sessions)):
+            return
+        target = self._sessions[idx]
+        app = self.app
+        self.app.pop_screen()
+        if hasattr(app, "_attach_to_session"):
+            await app._attach_to_session(target.get("session_id", ""))  # noqa: SLF001
+
+    def action_dismiss_screen(self) -> None:
+        self.app.pop_screen()
 
 
 class OrbReplTUI(App[None]):
@@ -309,6 +389,7 @@ class OrbReplTUI(App[None]):
         show_logs: bool = False,
         initial_query: str | None = None,
         exit_after_run: bool = False,
+        session_id: str = "",
     ) -> None:
         super().__init__()
         self._server_scheme = server_scheme
@@ -319,8 +400,12 @@ class OrbReplTUI(App[None]):
         self._initial_query = initial_query
         self._exit_after_run = exit_after_run
 
-        # Event state (mirrors what the server broadcasts).
-        self.session_id: str = ""
+        # Event state (mirrors what the server broadcasts). Seeding
+        # ``session_id`` here means the TUI can start routing inject /
+        # run requests immediately to the freshly created session the
+        # CLI wrapper minted — without waiting for the WS ``init``
+        # broadcast.
+        self.session_id: str = session_id or ""
         self.workdir: str = ""
         self.topology: str = topology
         self.live_text: str = ""
@@ -598,7 +683,57 @@ class OrbReplTUI(App[None]):
             pass
 
     async def action_resume_session(self) -> None:
-        self._emit_turn("system", "resume: open the dashboard's Resume modal for now (TUI picker coming back in a follow-up)")
+        """Open the session picker — lists known sessions from the daemon."""
+        sessions: list[dict] = []
+        try:
+            url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions?include=known"
+            async with self._http_session.get(url) as resp:
+                body = await resp.json()
+            if isinstance(body, dict) and body.get("ok"):
+                data = body.get("data") or {}
+                candidates = data.get("sessions") or []
+                current = self.session_id or ""
+                sessions = [s for s in candidates if s.get("session_id") != current]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to list known sessions: %s", exc)
+        self.push_screen(ResumeSessionScreen(sessions))
+
+    async def _attach_to_session(self, session_id: str) -> None:
+        """Switch the TUI's attached session.
+
+        Fetches ``/api/v1/sessions/{sid}/state`` and dispatches the
+        payload through ``_handle_init`` so every widget rebuilds
+        against the new session. The WS client keeps running and
+        picks up subsequent broadcasts via the per-session fanout.
+
+        Refuses error envelopes (non-200 or ``ok: false``) without
+        mutating ``session_id`` — otherwise a stale id from the
+        picker would silently route every subsequent inject/run
+        to a session that no longer exists.
+        """
+        if not session_id or session_id == self.session_id:
+            return
+        try:
+            url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions/{session_id}/state"
+            async with self._http_session.get(url) as resp:
+                status = resp.status
+                body = await resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to fetch session state for %s: %s", session_id, exc)
+            return
+        if status != 200 or not isinstance(body, dict) or body.get("ok") is False:
+            logger.warning(
+                "Refusing to attach to session %s: status=%s body=%s",
+                session_id, status, body,
+            )
+            return
+        payload = body.get("data") if "data" in body else body
+        if not isinstance(payload, dict):
+            return
+        payload.setdefault("type", "init")
+        payload.setdefault("session_id", session_id)
+        self.session_id = session_id
+        self._handle_init(payload)
 
     def action_show_help(self) -> None:
         self._emit_turn(
@@ -632,11 +767,52 @@ async def attach_tui_repl(
     show_logs: bool = False,
     initial_query: str | None = None,
     exit_after_run: bool = False,
+    session_id: str | None = None,
+    workdir: str | None = None,
+    agent_models: dict[str, str] | None = None,
 ) -> None:
+    """Attach the REPL TUI to a running Orb daemon.
+
+    Unless an existing ``session_id`` is supplied, a fresh session is
+    minted via ``POST /api/v1/sessions`` before the TUI mounts — each
+    ``orb tui`` invocation gets its own runtime, like the dashboard's
+    "New Session" modal. The id is threaded straight into
+    :class:`OrbReplTUI` so inject/run requests can start routing
+    immediately (no waiting for the WS ``init`` event).
+    """
+    import aiohttp
+
     parsed = urlparse(connect_url if "://" in connect_url else f"http://{connect_url}")
     scheme = parsed.scheme or "http"
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if scheme == "https" else DEFAULT_DASHBOARD_PORT)
+    base = f"{scheme}://{host}:{port}"
+
+    resolved_sid = session_id or ""
+    if not resolved_sid:
+        # Build the v1 POST body. Omit empty fields so the server picks
+        # up its defaults (topology=auto, no workdir, etc.).
+        post_body: dict[str, Any] = {}
+        if workdir:
+            post_body["workdir"] = workdir
+        if topology and topology != "auto":
+            post_body["topology"] = topology
+        if agent_models:
+            post_body["agent_models"] = agent_models
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(f"{base}/api/v1/sessions", json=post_body) as resp:
+                    body = await resp.json()
+            if isinstance(body, dict) and body.get("ok"):
+                data = body.get("data") or {}
+                resolved_sid = str(data.get("session_id") or "")
+            else:
+                logger.warning("Could not create session via /api/v1/sessions: %s", body)
+        except Exception as exc:  # noqa: BLE001
+            # Daemon unreachable — soft-fail so the TUI can mount and
+            # surface the real connection error through the WS client.
+            logger.warning("Failed to create session on startup: %s", exc)
+
     await OrbReplTUI(
         server_host=host,
         server_port=port,
@@ -646,4 +822,5 @@ async def attach_tui_repl(
         show_logs=show_logs,
         initial_query=initial_query,
         exit_after_run=exit_after_run,
+        session_id=resolved_sid,
     ).run_async()
