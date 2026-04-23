@@ -508,8 +508,23 @@ class OrbReplTUI(App[None]):
             self._refresh_chrome()
         elif t == "run_state_changed":
             to_state = str(data.get("to") or data.get("state") or "").strip()
+            from_state = str(data.get("from") or "").strip()
             if to_state:
                 self.run_state = to_state
+                # Surface transitions in the stream so users can see the
+                # run's lifecycle (especially errors that would otherwise
+                # just hang the UI). Similar to Claude Code's visible
+                # agent progress.
+                if to_state == "planning" and from_state in {"idle", "completed", "errored"}:
+                    self._emit_turn("system", "[#94bfff]● run started[/]")
+                elif to_state == "errored":
+                    reason = str(data.get("reason") or data.get("error") or "")
+                    msg = "[#f3afa7]✗ run errored[/]"
+                    if reason:
+                        msg += f"\n[#c4ced9]{reason[:400]}[/]"
+                    self._emit_turn("system", msg)
+                elif to_state == "stopping":
+                    self._emit_turn("system", "[#f0c982]… stopping[/]")
                 self._refresh_chrome()
 
     def _handle_init(self, data: dict) -> None:
@@ -557,10 +572,17 @@ class OrbReplTUI(App[None]):
     def _handle_agent_status(self, data: dict) -> None:
         aid = data.get("agent") or ""
         status = data.get("status") or "idle"
+        prev = self.agents.get(aid, {}).get("status")
         if aid in self.agents:
             self.agents[aid]["status"] = status
             if data.get("model"):
                 self.agents[aid]["model"] = data.get("model")
+        # Only emit a turn on meaningful transitions so we don't flood the
+        # stream when status gets re-broadcast with the same value.
+        if prev and prev != status and status in {"running", "completed", "error", "errored"}:
+            glyph = "●" if status == "running" else "✓" if status == "completed" else "✗"
+            tone = "#94bfff" if status == "running" else "#86d8ab" if status == "completed" else "#f3afa7"
+            self._emit_turn(aid, f"[{tone}]{glyph} {status}[/]")
         self._refresh_chrome()
 
     def _handle_agent_activity(self, data: dict) -> None:
@@ -573,7 +595,11 @@ class OrbReplTUI(App[None]):
             self.live_text = f"{AGENT_LABELS.get(aid, aid)} is waiting"
             self._emit_turn(aid, f"[#f0c982]? {prompt}[/]")
         elif activity:
+            # Show the activity inline so users see intermediate progress
+            # (classifier calls, reads, retries) — not just the final run
+            # complete. Keep live_text updated too for the status strip.
             self.live_text = f"{AGENT_LABELS.get(aid, aid)}: {activity}"
+            self._emit_turn(aid, f"[#8796a7]{activity}[/]")
         self._refresh_chrome()
 
     def _handle_complete(self, data: dict) -> None:
@@ -663,6 +689,11 @@ class OrbReplTUI(App[None]):
         if not text:
             return
         ta.text = ""
+        # Slash commands — Claude-Code-style local shortcuts that don't
+        # round-trip to the daemon.
+        if text.startswith("/"):
+            await self._run_slash_command(text)
+            return
         if not self.session_id:
             self._emit_turn("system", "[#f3afa7]no session — reconnect to the daemon first[/]")
             return
@@ -704,6 +735,44 @@ class OrbReplTUI(App[None]):
                     self._emit_turn("system", f"[#f3afa7]inject failed ({resp.status}): {body_text[:200]}[/]")
         except Exception as exc:  # noqa: BLE001
             self._emit_turn("system", f"[#f3afa7]send failed: {exc}[/]")
+
+    async def _run_slash_command(self, text: str) -> None:
+        """Handle inline slash commands. Parity with Claude-Code ergonomics."""
+        parts = text.strip().split(maxsplit=1)
+        cmd = parts[0].lstrip("/").lower()
+        arg = parts[1] if len(parts) > 1 else ""
+        if cmd in {"help", "?"}:
+            self._emit_turn(
+                "system",
+                "[#c4ced9]commands:[/]\n"
+                "  [#94bfff]/help[/]     show this\n"
+                "  [#94bfff]/clear[/]    clear stream\n"
+                "  [#94bfff]/stop[/]     stop current run\n"
+                "  [#94bfff]/resume[/]   pick a prior session (same as ^r)\n"
+                "  [#94bfff]/topology[/] <id>   change topology for new runs\n"
+                "  [#94bfff]/quit[/]     exit",
+            )
+        elif cmd == "clear":
+            self.query_one(ReplStream).remove_children()
+            self._emit_turn("system", "[#8796a7]stream cleared[/]")
+        elif cmd in {"stop", "cancel"}:
+            await self.action_cancel_run()
+        elif cmd == "resume":
+            await self.action_resume_session()
+        elif cmd == "topology":
+            new = arg.strip().lower()
+            if new in TOPOLOGY_LABELS:
+                self._topology = new
+                self._emit_turn("system", f"[#8796a7]topology set to[/] [#c4ced9]{new}[/] [#6b7685](applies to the next run)[/]")
+            else:
+                self._emit_turn(
+                    "system",
+                    f"[#f3afa7]unknown topology: {new!r}[/]\n[#8796a7]valid:[/] {', '.join(TOPOLOGY_LABELS)}",
+                )
+        elif cmd in {"quit", "exit"}:
+            self.call_after_refresh(self.action_quit)
+        else:
+            self._emit_turn("system", f"[#f3afa7]unknown command:[/] /{cmd}")
 
     def action_cancel_input(self) -> None:
         ta = self.query_one("#query-input", TextArea)

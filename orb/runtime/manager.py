@@ -129,15 +129,15 @@ class RuntimeManager:
         same file.
         """
         if session_path is None:
-            # Seed a throwaway runtime just to get a fresh uuid, then
-            # discard it — we'll construct the real runtime with the
-            # pre-allocated path so _load_session reads from disk exactly
-            # once against the right file.
+            # Allocate the snapshot path under the daemon's fixed anchor
+            # (~/.orb/daemon/sessions/{sid}/snapshot.json) so it matches
+            # what GraphRuntime._default_session_path returns. Any other
+            # location (especially under the user's workdir) means the
+            # registry points at a file the runtime will never touch.
             from .transcript import ConversationSession as _CS
+            from orb.cli.paths import session_state_dir
             fresh_id = _CS().session_id
-            from pathlib import Path as _P
-            base = _P(workdir) if workdir else _P.cwd()
-            session_path = base / ".orb" / "sessions" / f"{fresh_id}.json"
+            session_path = session_state_dir(fresh_id) / "snapshot.json"
             session_path.parent.mkdir(parents=True, exist_ok=True)
         runtime = GraphRuntime(session_path=session_path, compactor=self._compactor)
         if self._providers:

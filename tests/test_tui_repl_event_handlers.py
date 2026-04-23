@@ -167,11 +167,18 @@ def test_on_agent_activity_waiting_strips_prefix_when_no_full_content():
     assert "Waiting for user" not in args[1]
 
 
-def test_on_agent_activity_non_waiting_sets_live_text_only():
+def test_on_agent_activity_non_waiting_emits_turn_and_sets_live_text():
+    """Intermediate agent activities (classifier calls, reads, retries)
+    must surface in the REPL stream so users see progress — not just the
+    final run_complete. Matches the dashboard's visible progress.
+    """
     tui = _make_tui()
     tui._handle_agent_activity({"agent": "coder", "activity": "editing file.py"})
     assert "editing file.py" in tui.live_text
-    tui._emit_turn.assert_not_called()
+    tui._emit_turn.assert_called_once()
+    args, _ = tui._emit_turn.call_args
+    assert args[0] == "coder"
+    assert "editing file.py" in args[1]
 
 
 # ── _on_file_write ────────────────────────────────────────────────────
