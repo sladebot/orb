@@ -2551,17 +2551,16 @@ async def attach_tui(
     initial_query: str | None = None,
     exit_after_run: bool = False,
 ) -> None:
-    parsed = urlparse(connect_url if "://" in connect_url else f"http://{connect_url}")
-    scheme = parsed.scheme or "http"
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (443 if scheme == "https" else DEFAULT_DASHBOARD_PORT)
-    await OrbTUI(
-        server_port=port,
-        server_host=host,
-        server_scheme=scheme,
+    # On the `new-tui` branch we default to the REPL-stream TUI. The old
+    # OrbTUI class is still defined above — it is intentionally bypassed here
+    # and will be removed (or gated behind a flag) in a follow-up.
+    from orb.cli.tui_repl import attach_tui_repl
+
+    await attach_tui_repl(
+        connect_url,
         topology=topology,
         budget=budget,
         show_logs=show_logs,
         initial_query=initial_query,
         exit_after_run=exit_after_run,
-    ).run_async()
+    )
