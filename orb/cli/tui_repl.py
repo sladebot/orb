@@ -416,6 +416,11 @@ class OrbReplTUI(App[None]):
         self.agent_order: list[str] = []
         self.file_changes: dict[str, dict] = {}
         self.plan_items: list[tuple[str, str]] = []
+        # Lifecycle state machine — mirrors the server's RunState enum.
+        # When `idle | completed | errored`, the next submit starts a
+        # fresh run via POST /runs. While in-flight, submits inject into
+        # the active run via POST /runs/inject.
+        self.run_state: str = "idle"
         self._t0 = time()
         self._rendered_turns: deque[str] = deque(maxlen=2048)
         self._http_session: Any = None
@@ -501,10 +506,16 @@ class OrbReplTUI(App[None]):
             self.elapsed = float(data.get("elapsed") or self.elapsed)
             self.budget_remaining = max(0, self._budget - self.message_count)
             self._refresh_chrome()
+        elif t == "run_state_changed":
+            to_state = str(data.get("to") or data.get("state") or "").strip()
+            if to_state:
+                self.run_state = to_state
+                self._refresh_chrome()
 
     def _handle_init(self, data: dict) -> None:
         self.session_id = data.get("session_id") or self.session_id
         self.workdir = data.get("workdir") or self.workdir
+        self.run_state = str(data.get("run_state") or "idle")
         topo = ((data.get("plan") or {}).get("topology") or {}).get("id")
         if topo:
             self.topology = TOPOLOGY_LABELS.get(topo, topo)
@@ -655,14 +666,42 @@ class OrbReplTUI(App[None]):
         if not self.session_id:
             self._emit_turn("system", "[#f3afa7]no session — reconnect to the daemon first[/]")
             return
-        url = self._session_url(f"/runs/inject")
         self._emit_turn("user", text)
+        # If no run is in flight, start one. Inject only works while the
+        # orchestrator is running — firing inject on an idle session is
+        # the bug that made the TUI silently "freeze" after the first
+        # Enter: the daemon just 409'd the inject and nothing else ever
+        # happened.
+        terminal_states = {"idle", "completed", "errored"}
+        if self.run_state in terminal_states:
+            start_url = self._session_url("/runs")
+            payload: dict = {"query": text}
+            if self._topology and self._topology != "auto":
+                payload["topology"] = self._topology
+            try:
+                async with self._http_session.post(start_url, json=payload) as resp:
+                    body_text = await resp.text()
+                    if resp.status >= 400:
+                        self._emit_turn("system", f"[#f3afa7]start_run failed ({resp.status}): {body_text[:200]}[/]")
+                        return
+                # Optimistic: flip to 'planning' so subsequent submits inject
+                # instead of double-starting. The server will broadcast the
+                # real state shortly.
+                self.run_state = "planning"
+                self._refresh_chrome()
+            except Exception as exc:  # noqa: BLE001
+                self._emit_turn("system", f"[#f3afa7]start_run send failed: {exc}[/]")
+            return
+        # Run is in-flight — inject into the active run.
+        inject_url = self._session_url("/runs/inject")
         try:
             async with self._http_session.post(
-                url,
+                inject_url,
                 json={"to": "coordinator", "message": text},
             ) as resp:
-                await resp.read()
+                body_text = await resp.text()
+                if resp.status >= 400:
+                    self._emit_turn("system", f"[#f3afa7]inject failed ({resp.status}): {body_text[:200]}[/]")
         except Exception as exc:  # noqa: BLE001
             self._emit_turn("system", f"[#f3afa7]send failed: {exc}[/]")
 

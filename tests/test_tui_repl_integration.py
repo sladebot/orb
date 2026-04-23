@@ -25,11 +25,16 @@ from orb.cli.tui_repl import ContextRail, OrbReplTUI, ReplStream, StatusStrip
 
 
 class _FakeResp:
-    def __init__(self) -> None:
-        self._data = b""
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status = status
+        self._text = text
+        self._data = text.encode() if text else b""
 
     async def read(self) -> bytes:
         return self._data
+
+    async def text(self) -> str:
+        return self._text
 
     async def __aenter__(self) -> "_FakeResp":
         return self
@@ -189,11 +194,10 @@ async def test_full_event_flow_no_render_errors():
 
 
 @pytest.mark.asyncio
-async def test_composer_send_posts_to_inject_endpoint():
-    """Ctrl+Enter in the composer must POST to ``/runs/inject``."""
+async def test_composer_send_injects_when_run_is_in_flight():
+    """Ctrl+Enter while a run is running must POST to ``/runs/inject``."""
     app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
     async with app.run_test(size=(140, 44)) as pilot:
-        # Swap out the real aiohttp session for a recorder.
         real = app._http_session
         fake = _FakeSession()
         app._http_session = fake
@@ -201,6 +205,8 @@ async def test_composer_send_posts_to_inject_endpoint():
             await real.close()
 
         app.session_id = "sid-1"
+        # Active run — submit should inject, not start.
+        app.run_state = "running"
         await pilot.pause()
 
         ta = app.query_one("#query-input")
@@ -210,7 +216,6 @@ async def test_composer_send_posts_to_inject_endpoint():
         await pilot.press("ctrl+enter")
         await pilot.pause()
 
-        # Exactly one POST to the inject endpoint with the expected body.
         inject_posts = [
             p for p in fake.posts if p["url"].endswith("/sessions/sid-1/runs/inject")
         ]
@@ -218,9 +223,44 @@ async def test_composer_send_posts_to_inject_endpoint():
         post = inject_posts[0]
         assert post["url"] == "http://127.0.0.1:1337/api/v1/sessions/sid-1/runs/inject"
         assert post["json"] == {"to": "coordinator", "message": "please implement foo"}
-
-        # Composer should have been cleared.
         assert (ta.text or "").strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_composer_send_starts_run_when_session_is_idle():
+    """Ctrl+Enter on an idle session must POST to ``/runs`` to start one.
+
+    Inject only works while a run is in flight. Firing inject on an
+    idle session 409s and the TUI freezes with nothing happening — which
+    is exactly the bug the user caught after typing their first query.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="solo")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-2"
+        app.run_state = "idle"
+        await pilot.pause()
+
+        ta = app.query_one("#query-input")
+        ta.text = "Explain this repo"
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        # Exactly one POST to /runs, none to /runs/inject.
+        start_posts = [p for p in fake.posts if p["url"].endswith("/sessions/sid-2/runs")]
+        inject_posts = [p for p in fake.posts if p["url"].endswith("/sessions/sid-2/runs/inject")]
+        assert len(start_posts) == 1, f"expected 1 start POST, got: {fake.posts}"
+        assert inject_posts == [], f"inject must not fire on idle, got: {inject_posts}"
+        post = start_posts[0]
+        assert post["json"]["query"] == "Explain this repo"
+        assert post["json"].get("topology") == "solo"
+        # Optimistic local state flip so a rapid second Enter injects.
+        assert app.run_state in {"planning", "running"}
 
 
 # ── Test: malformed / empty payloads must not crash ──────────────────
