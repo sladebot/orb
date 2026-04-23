@@ -18,7 +18,17 @@ from typing import Any
 
 import pytest
 
-from orb.cli.tui_repl import ContextRail, OrbReplTUI, ReplStream, StatusStrip
+from orb.cli.tui_repl import (
+    ContextRail,
+    LiveStatusBar,
+    Milestone,
+    OrbReplTUI,
+    ReplStream,
+    SlashPalette,
+    StatusStrip,
+    ToolBlock,
+    Turn,
+)
 
 
 # ── Fake aiohttp session for composer-send tests ──────────────────────
@@ -383,3 +393,192 @@ async def test_context_rail_renders_agent_labels():
         strip_text = _render_plain(app.query_one(StatusStrip))
         assert "ORB" in strip_text
         assert "triad" in strip_text
+
+
+# ── v2 Turn widget: two-column lane layout ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_turn_widget_renders_vertical_lane_with_separator():
+    """v2 Turn: speaker/ts/model stacked in a left lane, body to the right
+    with an agent-colored ``│`` separator on every line."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        turn = Turn("coder", elapsed=845.0, body="Reading /shorten handler…\nplan: land patch", model="haiku-4-5")
+        app.query_one(ReplStream).mount(turn)
+        await pilot.pause()
+
+        plain = _render_plain(turn)
+        # Lane cells appear on their own row prefixed with the label.
+        assert "Coder" in plain
+        assert "0:14:05" in plain  # 845s == 0:14:05
+        assert "haiku-4-5" in plain
+        # Separator character is present on multiple rows.
+        assert plain.count("│") >= 2
+        # Body text appears.
+        assert "Reading /shorten handler" in plain
+
+
+# ── v2 Slash palette: show/hide as user types ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_slash_palette_shows_when_user_types_slash():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        palette = app.query_one(SlashPalette)
+        # Hidden by default.
+        assert "hidden" in palette.classes
+
+        ta = app.query_one("#query-input")
+        ta.text = "/"
+        await pilot.pause()
+        assert "hidden" not in palette.classes
+        rendered = _render_plain(palette)
+        # All catalog commands are visible when just "/" is typed.
+        assert "/help" in rendered
+        assert "/clear" in rendered
+        assert "/stop" in rendered
+
+        # Typing a concrete command filters to just that row.
+        ta.text = "/help"
+        await pilot.pause()
+        assert "hidden" not in palette.classes
+        rendered2 = _render_plain(palette)
+        assert "/help" in rendered2
+        # Other commands should NOT be visible under exact-match filter.
+        assert "/clear" not in rendered2
+        assert "/topology" not in rendered2
+
+        # Clearing the composer hides the palette again.
+        ta.text = ""
+        await pilot.pause()
+        assert "hidden" in palette.classes
+
+
+# ── v2 File-write → ToolBlock with agent border + accept bar ─────────
+
+
+@pytest.mark.asyncio
+async def test_file_write_emits_block_with_border_and_accept_bar():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        app._handle_server_event({
+            "type": "file_write",
+            "agent": "coder",
+            "path": "src/app.py",
+            "old_content": "a\n",
+            "content": "a\nb\nc\n",
+        })
+        await pilot.pause()
+
+        blocks = list(app.query(ToolBlock))
+        assert blocks, "expected at least one ToolBlock mounted"
+        block = blocks[-1]
+        rendered = _render_plain(block)
+
+        # Agent-colored thick vertical bar prefixes each rendered line.
+        assert "┃" in rendered
+        # Accept bar footer — all four options must be present.
+        assert "accept" in rendered
+        assert "accept all" in rendered
+        assert "edit" in rendered
+        assert "reject" in rendered
+        # Block header is preserved.
+        assert "edit_file" in rendered
+        assert "src/app.py" in rendered
+
+
+# ── v2 Milestone before plan step ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_plan_step_emits_milestone_before_turn():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        stream = app.query_one(ReplStream)
+        # Snapshot children before firing plan_step.
+        before = list(stream.children)
+
+        app._handle_server_event({
+            "type": "plan_step",
+            "title": "apply rate-limit",
+            "detail": "wrap /shorten with slowapi limiter",
+        })
+        await pilot.pause()
+
+        # A Milestone widget was appended as part of this plan_step.
+        milestones = list(app.query(Milestone))
+        assert milestones, "expected a Milestone widget from plan_step"
+        latest = milestones[-1]
+        text = _render_plain(latest)
+        assert "step 1" in text
+        # Label from detail preferred over title.
+        assert "wrap /shorten" in text
+
+        # Milestone appeared in the stream (ordering sanity — it shows
+        # up after the pre-existing widgets).
+        after = list(stream.children)
+        assert len(after) > len(before)
+
+
+# ── v2 Live status bar ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_live_status_bar_updates_on_agent_activity():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        app._handle_server_event({
+            "type": "agent_activity",
+            "agent": "coder",
+            "activity": "editing src/app.py",
+        })
+        await pilot.pause()
+
+        bar = app.query_one(LiveStatusBar)
+        text = _render_plain(bar)
+        # Pill shows agent label and activity.
+        assert "Coder" in text
+        assert "editing src/app.py" in text
+        # Elapsed ``Ns`` pill is present.
+        assert "s" in text
