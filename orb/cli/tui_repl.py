@@ -225,6 +225,11 @@ Screen { background: #0b1016; }
 }
 .turn-head { color: #8796a7; }
 .turn-body { color: #c4ced9; }
+.whisper {
+    color: #6b7685;
+    margin: 0;
+    padding: 0 2;
+}
 .block {
     background: #0f141c;
     border-left: thick #3a4552;
@@ -444,6 +449,28 @@ class Turn(Static):
 
         self.update("\n".join(out))
         self.add_class("turn")
+
+
+class Whisper(Static):
+    """Compact single-line entry for internal events.
+
+    Distinct from ``Turn``: no full lane, no speaker bar — just a dim
+    agent-colored dot + text. Used for agent_activity pings, status
+    transitions, and other progress signals the user wants to *see* but
+    doesn't need to read word-for-word the way they read messages.
+    """
+
+    def __init__(self, speaker: str, elapsed: float, body: str) -> None:
+        super().__init__()
+        color = AGENT_STYLE.get(speaker, "#8796a7")
+        label = AGENT_LABELS.get(speaker, speaker or "?")
+        ts = _fmt_timestamp(elapsed)
+        # Indent slightly so the whisper sits visually under the
+        # preceding turn. Compact, one line, muted body.
+        self.update(
+            f"  [{color}]·[/] [#6b7685]{ts}[/] [#6b7685]{label}[/]  [#8796a7]{body}[/]"
+        )
+        self.add_class("whisper")
 
 
 class ToolBlock(Static):
@@ -877,7 +904,15 @@ class OrbReplTUI(App[None]):
                 self._refresh_chrome()
 
     def _handle_init(self, data: dict) -> None:
-        self.session_id = data.get("session_id") or self.session_id
+        incoming_sid = data.get("session_id") or ""
+        # Only wipe the stream when we're genuinely switching sessions.
+        # The server re-broadcasts ``init`` at every run's planning stage
+        # so the dashboard gets fresh agent/model info — but wiping the
+        # stream there erases the user's just-sent message, and every
+        # intermediate event that fired before the init landed. That was
+        # the "chat disappears" bug.
+        session_changed = bool(incoming_sid) and incoming_sid != self.session_id
+        self.session_id = incoming_sid or self.session_id
         self.workdir = data.get("workdir") or self.workdir
         self.run_state = str(data.get("run_state") or "idle")
         topo = ((data.get("plan") or {}).get("topology") or {}).get("id")
@@ -917,12 +952,19 @@ class OrbReplTUI(App[None]):
         self.message_count = int(stats.get("message_count") or 0)
         self.elapsed = float(stats.get("elapsed") or 0.0)
         self.budget_remaining = max(0, self._budget - self.message_count)
-        # Reset stream — server already includes history in init if resumed.
+        # Only clear when the user actually switched sessions. During a
+        # run the server re-broadcasts init with fresh agent/model state;
+        # wiping on every re-broadcast erases the user's in-flight
+        # message + every intermediate event emitted so far.
         stream = self.query_one(ReplStream)
-        stream.remove_children()
-        self._emit_turn("system", f"session started · workdir [#c4ced9]{self.workdir or '—'}[/] · topology [#c4ced9]{self.topology}[/]")
-        for m in (data.get("messages") or [])[-12:]:
-            self._render_message(m)
+        if session_changed or not stream.children:
+            stream.remove_children()
+            self._emit_turn(
+                "system",
+                f"session started · workdir [#c4ced9]{self.workdir or '—'}[/] · topology [#c4ced9]{self.topology}[/]",
+            )
+            for m in (data.get("messages") or [])[-12:]:
+                self._render_message(m)
         self._refresh_chrome()
 
     def _handle_message(self, data: dict) -> None:
@@ -944,12 +986,13 @@ class OrbReplTUI(App[None]):
             self.agents[aid]["status"] = status
             if data.get("model"):
                 self.agents[aid]["model"] = data.get("model")
-        # Only emit a turn on meaningful transitions so we don't flood the
-        # stream when status gets re-broadcast with the same value.
+        # Only emit on meaningful transitions so we don't flood the stream
+        # when status gets re-broadcast with the same value. Status changes
+        # are internal events — render as compact whispers, not full turns.
         if prev and prev != status and status in {"running", "completed", "error", "errored"}:
             glyph = "●" if status == "running" else "✓" if status == "completed" else "✗"
             tone = "#94bfff" if status == "running" else "#86d8ab" if status == "completed" else "#f3afa7"
-            self._emit_turn(aid, f"[{tone}]{glyph} {status}[/]")
+            self._emit_whisper(aid, f"[{tone}]{glyph}[/] {status}")
         # Keep the LiveStatusBar pill fresh so a newly-running agent
         # surfaces before the next activity event.
         if status == "running":
@@ -970,10 +1013,11 @@ class OrbReplTUI(App[None]):
         elif activity:
             # Show the activity inline so users see intermediate progress
             # (classifier calls, reads, retries) — not just the final run
-            # complete. Keep live_text updated too for the status strip.
+            # complete. Render as a compact whisper so it reads as
+            # secondary to the user/agent conversation turns.
             self.live_text = f"{AGENT_LABELS.get(aid, aid)}: {activity}"
             self._live_started = time()
-            self._emit_turn(aid, f"[#8796a7]{activity}[/]")
+            self._emit_whisper(aid, activity)
         self._refresh_chrome()
 
     def _handle_complete(self, data: dict) -> None:
@@ -1049,6 +1093,15 @@ class OrbReplTUI(App[None]):
             self._emit_turn("system", f"[#94bfff]plan[/] · {title} — {detail}")
 
     # ── Turn / block emission ────────────────────────────────────────────
+
+    def _emit_whisper(self, speaker: str, body: str) -> None:
+        """Mount a compact internal-event entry. See ``Whisper``."""
+        try:
+            stream = self.query_one(ReplStream)
+        except Exception:  # noqa: BLE001
+            return
+        stream.mount(Whisper(speaker, self.elapsed, body))
+        stream.scroll_end(animate=False)
 
     def _emit_turn(self, speaker: str, body: str, *, model: str = "") -> None:
         stream = self.query_one(ReplStream)

@@ -170,16 +170,18 @@ def test_on_agent_activity_waiting_strips_prefix_when_no_full_content():
     assert "Waiting for user" not in args[1]
 
 
-def test_on_agent_activity_non_waiting_emits_turn_and_sets_live_text():
-    """Intermediate agent activities (classifier calls, reads, retries)
-    must surface in the REPL stream so users see progress — not just the
-    final run_complete. Matches the dashboard's visible progress.
+def test_on_agent_activity_non_waiting_emits_whisper_and_sets_live_text():
+    """Intermediate agent activities surface as compact whispers (not
+    full conversation turns) so the stream distinguishes internal
+    progress from the user/agent conversation. live_text still feeds
+    the status strip.
     """
     tui = _make_tui()
+    tui._emit_whisper = MagicMock()
     tui._handle_agent_activity({"agent": "coder", "activity": "editing file.py"})
     assert "editing file.py" in tui.live_text
-    tui._emit_turn.assert_called_once()
-    args, _ = tui._emit_turn.call_args
+    tui._emit_whisper.assert_called_once()
+    args, _ = tui._emit_whisper.call_args
     assert args[0] == "coder"
     assert "editing file.py" in args[1]
 
