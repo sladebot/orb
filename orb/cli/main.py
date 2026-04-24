@@ -433,6 +433,12 @@ def parse_args() -> argparse.Namespace:
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     tui_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (default: current working directory)")
     tui_parser.add_argument("--no-prompt", action="store_true", help="Skip the startup topology prompt; default to 'triad' (non-interactive CI default)")
+    tui_parser.add_argument(
+        "--review",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require y/n approval before each agent file write (default: on). Use --no-review to let agents write directly.",
+    )
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
@@ -1278,8 +1284,10 @@ async def async_main() -> None:
         # so each `orb tui` invocation gets its own runtime (like the
         # dashboard's New Session modal). Print the intent here so the
         # user sees the scoping before the TUI mounts.
+        review = bool(getattr(args, "review", True))
         print(f"  Session scoped to: {workdir}")
         print(f"  Topology: {topology}")
+        print(f"  Review mode: {'on (y/n before each file write)' if review else 'off (agents write directly)'}")
 
         await attach_tui(
             connect_url=connect_url,
@@ -1289,6 +1297,7 @@ async def async_main() -> None:
             initial_query=args.query,
             exit_after_run=args.exit_after_run,
             workdir=workdir,
+            approval_required=review,
         )
         return
 

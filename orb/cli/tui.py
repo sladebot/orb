@@ -24,6 +24,7 @@ async def attach_tui(
     session_id: str | None = None,
     workdir: str | None = None,
     agent_models: dict[str, str] | None = None,
+    approval_required: bool = True,
 ) -> None:
     """Attach to a running daemon and hand control to the REPL-stream TUI.
 
@@ -43,6 +44,7 @@ async def attach_tui(
         session_id=session_id,
         workdir=workdir,
         agent_models=agent_models,
+        approval_required=approval_required,
     )
 
 

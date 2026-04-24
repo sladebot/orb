@@ -1852,6 +1852,7 @@ async def attach_tui_repl(
     session_id: str | None = None,
     workdir: str | None = None,
     agent_models: dict[str, str] | None = None,
+    approval_required: bool = True,
 ) -> None:
     """Attach the REPL TUI to a running Orb daemon.
 
@@ -1881,6 +1882,11 @@ async def attach_tui_repl(
             post_body["topology"] = topology
         if agent_models:
             post_body["agent_models"] = agent_models
+        if approval_required:
+            # Opt the new session into pre-write staging. The daemon's
+            # create_session handler does a strict ``is True`` check so
+            # we must send a real bool, not a truthy string.
+            post_body["approval_required"] = True
         try:
             async with aiohttp.ClientSession() as sess:
                 async with sess.post(f"{base}/api/v1/sessions", json=post_body) as resp:
