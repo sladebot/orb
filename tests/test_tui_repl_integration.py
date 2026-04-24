@@ -237,6 +237,42 @@ async def test_composer_send_injects_when_run_is_in_flight():
 
 
 @pytest.mark.asyncio
+async def test_plain_enter_submits_like_ctrl_enter():
+    """Enter on the composer must submit (same as Ctrl+Enter). Shift+Enter
+    still inserts a literal newline so users can compose multi-line prompts.
+    Regression: originally only Ctrl+Enter submitted; Enter was a newline.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="solo")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-enter"
+        app.run_state = "idle"
+        await pilot.pause()
+
+        ta = app.query_one("#query-input")
+        ta.text = "hello"
+        # Focus the composer + press plain Enter.
+        ta.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        start_posts = [p for p in fake.posts if p["url"].endswith("/sessions/sid-enter/runs")]
+        assert len(start_posts) == 1, (
+            f"plain Enter should POST /runs once, got: {fake.posts}"
+        )
+        assert start_posts[0]["json"]["query"] == "hello"
+        # The TextArea must be cleared — proves the submit path ran and
+        # didn't just dump a "\n" into the buffer.
+        assert ta.text == "", f"composer should be cleared after submit, got: {ta.text!r}"
+
+
+@pytest.mark.asyncio
 async def test_composer_send_starts_run_when_session_is_idle():
     """Ctrl+Enter on an idle session must POST to ``/runs`` to start one.
 

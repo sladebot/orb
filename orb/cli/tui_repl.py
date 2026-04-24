@@ -776,6 +776,31 @@ class ResumeSessionScreen(Screen):
         self.app.pop_screen()
 
 
+class ComposerTextArea(TextArea):
+    """TextArea that submits on Enter.
+
+    Textual's default TextArea binds Enter to insert-newline. Our composer
+    follows chat-UI convention: Enter sends the message. Most terminals
+    can't reliably signal Shift+Enter (or Alt+Enter), so we don't rely on
+    modifier-Enter for newlines — pasted text that already contains
+    newlines still renders correctly because paste goes through a
+    different path than key events. Ctrl+Enter is still handled by the
+    app-level Binding for muscle memory, which routes to the same action.
+
+    Submit is delegated back to the App via ``action_submit_input``,
+    which already owns the "is this a slash command? is a run in flight?"
+    routing — we don't duplicate that logic here.
+    """
+
+    async def _on_key(self, event) -> None:  # type: ignore[override]
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            await self.app.action_submit_input()
+            return
+        await super()._on_key(event)
+
+
 class OrbReplTUI(App[None]):
     """Daemon-backed REPL TUI matching the orb-design-system/orb-tui design."""
 
@@ -893,11 +918,11 @@ class OrbReplTUI(App[None]):
                 with Vertical(id="composer"):
                     yield LiveStatusBar(self)
                     yield SlashPalette()
-                    ta = TextArea(id="query-input")
+                    ta = ComposerTextArea(id="query-input")
                     ta.show_line_numbers = False
                     yield ta
                     yield Static(
-                        "[#6b7685]^↵ send · ↵ newline · /plan · /rewind · /model · /help[/]",
+                        "[#6b7685]↵ send · /help[/]",
                         classes="composer-hint",
                     )
         yield Footer()
