@@ -174,7 +174,11 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
 
     async def delete_session(request: web.Request) -> web.Response:
         session_id = request.match_info["session_id"]
-        deleted = manager.delete_session(session_id)
+        # Await the async variant so the response is only sent after the
+        # cancelled run task has finished its persistence cleanup. Using
+        # the sync `delete_session` here races with trace/snapshot writes
+        # and can let a follow-up GET see a half-cleaned session.
+        deleted = await manager.adelete_session(session_id)
         if not deleted:
             return err("SESSION_NOT_FOUND", f"No session with id {session_id!r}", status=404)
         return ok("SESSION_DELETED", {"session_id": session_id})
@@ -225,7 +229,22 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             workdir=workdir,
         )
         if not payload.get("ok"):
-            return err("RUN_START_FAILED", payload.get("error") or "Failed to start run", status=status_code or 500)
+            err_msg = str(payload.get("error") or "")
+            # If the runtime already supplied an envelope ``code`` (e.g.
+            # CLASSIFIER_DISABLED), honor it — don't rewrap as a generic
+            # RUN_START_FAILED which would hide the specific reason.
+            inner_code = str(payload.get("code") or "").strip()
+            if inner_code:
+                return err(inner_code, err_msg or inner_code, status=status_code or 400)
+            # Normalize "run already in progress" to 409 RUN_IN_PROGRESS so
+            # callers get a real conflict status instead of 200 {ok:false}.
+            # This mirrors the stop_run → NO_RUN_IN_FLIGHT mapping below
+            # and aligns with how InvalidTransitionError already surfaces
+            # through the rest of the API. The runtime's internal tuple
+            # contract is unchanged; we translate only at the HTTP layer.
+            if "already in progress" in err_msg.lower():
+                return err("RUN_IN_PROGRESS", err_msg or "Run already in progress", status=409)
+            return err("RUN_START_FAILED", err_msg or "Failed to start run", status=status_code or 500)
         return ok("RUN_STARTED", {
             "session_id": session_id,
             "run_state": runtime.run_state.value,
@@ -398,14 +417,17 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
 
     # ---- Filesystem picker (daemon-scoped) ------------------------
 
-    async def fs_list(request: web.Request) -> web.Response:
-        raw = (request.rel_url.query.get("path") or "").strip()
-        show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")
+    def _fs_list_sync(raw: str, show_hidden: bool) -> tuple[str, Any]:
+        """Synchronous body of fs_list. Returns (code, payload) where
+        payload is either the success data dict or a (message, status)
+        tuple for errors. Run via ``asyncio.to_thread`` so the directory
+        scan doesn't stall the event loop.
+        """
         try:
             root = Path(raw).expanduser() if raw else Path.home()
             root = root.resolve(strict=False)
             if not root.exists() or not root.is_dir():
-                return err("INVALID_PATH", f"Not a directory: {root}", status=400)
+                return ("INVALID_PATH", (f"Not a directory: {root}", 400))
             entries: list[dict] = []
             for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
                 try:
@@ -417,44 +439,35 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
                     continue
                 entries.append({"name": child.name, "path": str(child), "is_dir": True})
             parent = str(root.parent) if root.parent != root else ""
-            return ok("FS_LISTED", {
+            return ("FS_LISTED", {
                 "path": str(root),
                 "parent": parent,
                 "home": str(Path.home()),
                 "entries": entries,
             })
         except PermissionError as exc:
-            return err("FS_PERMISSION_DENIED", f"Permission denied: {exc}", status=403)
+            return ("FS_PERMISSION_DENIED", (f"Permission denied: {exc}", 403))
         except Exception as exc:  # noqa: BLE001
-            return err("FS_ERROR", f"Failed to list path: {exc}", status=500)
+            return ("FS_ERROR", (f"Failed to list path: {exc}", 500))
 
-    async def fs_files(request: web.Request) -> web.Response:
-        """Flat workdir listing.
-
-        Legacy callers used this for the initial repo tree; new code uses
-        ``/api/v1/fs/dir`` for lazy per-folder expansion. Kept around
-        because some callers (and tests) still hit this endpoint.
-
-        Filesystem-only (no git). Respects the workdir's ``.gitignore``
-        via pathspec and a built-in deny list for VCS metadata / caches.
-        """
+    async def fs_list(request: web.Request) -> web.Response:
         raw = (request.rel_url.query.get("path") or "").strip()
+        show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")
+        code, payload = await asyncio.to_thread(_fs_list_sync, raw, show_hidden)
+        if isinstance(payload, tuple):
+            message, status = payload
+            return err(code, message, status=status)
+        return ok(code, payload)
+
+    def _fs_files_sync(raw: str, allowed_roots: list[Path]) -> tuple[str, Any]:
+        """Synchronous body of fs_files. The os.walk + gitignore work
+        lives here so the event loop doesn't stall on deep trees.
+        """
         if not raw:
-            return err("INVALID_PATH", "path is required", status=400)
+            return ("INVALID_PATH", ("path is required", 400))
         path = Path(raw).expanduser().resolve()
         if not path.exists() or not path.is_dir():
-            return err("INVALID_PATH", f"Not a directory: {path}", status=400)
-        # Scope: only folders under the user's home OR a path already
-        # registered as a session workdir. Prevents callers from walking
-        # /etc, ~/.ssh (unless explicitly opted in as a session workdir).
-        allowed_roots: list[Path] = [Path.home().resolve()]
-        for rt in manager.list_sessions():
-            wd = getattr(rt._conversation_session, "workdir", None)  # noqa: SLF001
-            if wd:
-                try:
-                    allowed_roots.append(Path(wd).expanduser().resolve())
-                except (OSError, ValueError):
-                    continue
+            return ("INVALID_PATH", (f"Not a directory: {path}", 400))
 
         def _within(p: Path, roots: list[Path]) -> bool:
             for root in roots:
@@ -466,10 +479,9 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             return False
 
         if not _within(path, allowed_roots):
-            return err(
+            return (
                 "PATH_OUT_OF_SCOPE",
-                "path must be under $HOME or an existing session workdir",
-                status=400,
+                ("path must be under $HOME or an existing session workdir", 400),
             )
         import os as _os
         limit = 800
@@ -501,12 +513,42 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             if len(files) >= limit:
                 break
         files.sort()
-        return ok("FS_FILES_FETCHED", {
+        return ("FS_FILES_FETCHED", {
             "path": str(path),
             "source": "walk",
             "files": files,
             "truncated": len(files) >= limit,
         })
+
+    async def fs_files(request: web.Request) -> web.Response:
+        """Flat workdir listing.
+
+        Legacy callers used this for the initial repo tree; new code uses
+        ``/api/v1/fs/dir`` for lazy per-folder expansion. Kept around
+        because some callers (and tests) still hit this endpoint.
+
+        Filesystem-only (no git). Respects the workdir's ``.gitignore``
+        via pathspec and a built-in deny list for VCS metadata / caches.
+        """
+        raw = (request.rel_url.query.get("path") or "").strip()
+        # Scope: only folders under the user's home OR a path already
+        # registered as a session workdir. Prevents callers from walking
+        # /etc, ~/.ssh (unless explicitly opted in as a session workdir).
+        # We enumerate session workdirs on the loop (the manager call is
+        # cheap) and hand the resolved list to the sync worker.
+        allowed_roots: list[Path] = [Path.home().resolve()]
+        for rt in manager.list_sessions():
+            wd = getattr(rt._conversation_session, "workdir", None)  # noqa: SLF001
+            if wd:
+                try:
+                    allowed_roots.append(Path(wd).expanduser().resolve())
+                except (OSError, ValueError):
+                    continue
+        code, payload = await asyncio.to_thread(_fs_files_sync, raw, allowed_roots)
+        if isinstance(payload, tuple):
+            message, status = payload
+            return err(code, message, status=status)
+        return ok(code, payload)
 
     # Built-in deny list — VCS metadata and common cache/build dirs that
     # are never interesting to surface in the repo tree. Matched against
@@ -546,32 +588,21 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
                 lines,
             )
 
-    async def fs_dir(request: web.Request) -> web.Response:
-        """Return one level of a session workdir — lazy-tree backend.
-
-        Query: ``workdir`` (absolute path of the session root, required)
-        and optional ``path`` (relative folder inside workdir; empty =
-        list the workdir root itself).
-
-        Response data: ``{path, dirs: [{name,path}], files: [{name,path}]}``
-        sorted alphabetically. Entries matching the workdir's .gitignore
-        or the built-in deny list are filtered out.
-        """
-        workdir_raw = (request.rel_url.query.get("workdir") or "").strip()
-        rel_raw = (request.rel_url.query.get("path") or "").strip()
+    def _fs_dir_sync(workdir_raw: str, rel_raw: str) -> tuple[str, Any]:
+        """Synchronous body of fs_dir — iterdir + gitignore reads."""
         if not workdir_raw:
-            return err("INVALID_WORKDIR", "workdir is required", status=400)
+            return ("INVALID_WORKDIR", ("workdir is required", 400))
         workdir = Path(workdir_raw).expanduser().resolve()
         if not workdir.exists() or not workdir.is_dir():
-            return err("INVALID_WORKDIR", f"Not a directory: {workdir}", status=400)
+            return ("INVALID_WORKDIR", (f"Not a directory: {workdir}", 400))
         # Resolve the target folder under workdir and guard against escapes.
         try:
             target = (workdir / rel_raw).resolve(strict=True) if rel_raw else workdir
             target.relative_to(workdir)
         except (OSError, ValueError, FileNotFoundError):
-            return err("INVALID_PATH", "path escapes workdir", status=400)
+            return ("INVALID_PATH", ("path escapes workdir", 400))
         if not target.is_dir():
-            return err("INVALID_PATH", "path must be a directory", status=400)
+            return ("INVALID_PATH", ("path must be a directory", 400))
 
         spec = _load_gitignore_spec(workdir)
         dirs: list[dict] = []
@@ -594,25 +625,43 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
                     continue
                 (dirs if is_dir else files).append({"name": name, "path": rel})
         except OSError as exc:
-            return err("FS_READ_FAILED", f"Could not list directory: {exc}", status=500)
+            return ("FS_READ_FAILED", (f"Could not list directory: {exc}", 500))
 
         dirs.sort(key=lambda d: d["name"].casefold())
         files.sort(key=lambda f: f["name"].casefold())
         rel_path = target.relative_to(workdir).as_posix()
-        return ok("FS_DIR_FETCHED", {
+        return ("FS_DIR_FETCHED", {
             "path": "" if rel_path == "." else rel_path,
             "dirs": dirs,
             "files": files,
         })
 
-    async def fs_read(request: web.Request) -> web.Response:
+    async def fs_dir(request: web.Request) -> web.Response:
+        """Return one level of a session workdir — lazy-tree backend.
+
+        Query: ``workdir`` (absolute path of the session root, required)
+        and optional ``path`` (relative folder inside workdir; empty =
+        list the workdir root itself).
+
+        Response data: ``{path, dirs: [{name,path}], files: [{name,path}]}``
+        sorted alphabetically. Entries matching the workdir's .gitignore
+        or the built-in deny list are filtered out.
+        """
         workdir_raw = (request.rel_url.query.get("workdir") or "").strip()
         rel_raw = (request.rel_url.query.get("path") or "").strip()
+        code, payload = await asyncio.to_thread(_fs_dir_sync, workdir_raw, rel_raw)
+        if isinstance(payload, tuple):
+            message, status = payload
+            return err(code, message, status=status)
+        return ok(code, payload)
+
+    def _fs_read_sync(workdir_raw: str, rel_raw: str) -> tuple[str, Any]:
+        """Synchronous body of fs_read — resolve, stat, read_text."""
         if not rel_raw or not workdir_raw:
-            return err("INVALID_PATH", "workdir and path are required", status=400)
+            return ("INVALID_PATH", ("workdir and path are required", 400))
         workdir = Path(workdir_raw).expanduser().resolve()
         if not workdir.exists() or not workdir.is_dir():
-            return err("INVALID_WORKDIR", f"Not a directory: {workdir}", status=400)
+            return ("INVALID_WORKDIR", (f"Not a directory: {workdir}", 400))
         try:
             # strict=True forces .resolve() to error on missing components,
             # which means broken or escaping symlinks are caught here rather
@@ -621,7 +670,7 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             target = (workdir / rel_raw).resolve(strict=True)
             target.relative_to(workdir)
         except (OSError, ValueError, FileNotFoundError):
-            return err("INVALID_PATH", "path escapes workdir", status=400)
+            return ("INVALID_PATH", ("path escapes workdir", 400))
         # Re-check against os.path.realpath so any late symlink resolution
         # (TOCTOU or path-component games) still gets rejected.
         import os as _os
@@ -629,17 +678,26 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         try:
             real.relative_to(workdir)
         except ValueError:
-            return err("INVALID_PATH", "path escapes workdir", status=400)
+            return ("INVALID_PATH", ("path escapes workdir", 400))
         if not target.exists() or not target.is_file():
-            return err("FILE_NOT_FOUND", "not a file", status=404)
+            return ("FILE_NOT_FOUND", ("not a file", 404))
         size = target.stat().st_size
         if size > 512 * 1024:
-            return err("FILE_TOO_LARGE", f"file is too large ({size} bytes) to preview", status=413)
+            return ("FILE_TOO_LARGE", (f"file is too large ({size} bytes) to preview", 413))
         try:
             content = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return err("FILE_BINARY", "binary file", status=415)
-        return ok("FS_FILE_READ", {"path": str(target), "relative": rel_raw, "content": content, "size": size})
+            return ("FILE_BINARY", ("binary file", 415))
+        return ("FS_FILE_READ", {"path": str(target), "relative": rel_raw, "content": content, "size": size})
+
+    async def fs_read(request: web.Request) -> web.Response:
+        workdir_raw = (request.rel_url.query.get("workdir") or "").strip()
+        rel_raw = (request.rel_url.query.get("path") or "").strip()
+        code, payload = await asyncio.to_thread(_fs_read_sync, workdir_raw, rel_raw)
+        if isinstance(payload, tuple):
+            message, status = payload
+            return err(code, message, status=status)
+        return ok(code, payload)
 
     # ---- Git helpers (daemon-scoped read/write against a path) -----
 
@@ -694,7 +752,14 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         branch = info.get("branch") or "HEAD"
         default_branch = "main"
         try:
-            rev = subprocess.run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=str(path), capture_output=True, text=True, timeout=15)
+            # subprocess.run is synchronous — offload so a slow git call
+            # (big repo, cold disk, network-mounted fs) doesn't stall the
+            # event loop and every connected WebSocket client with it.
+            rev = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                cwd=str(path), capture_output=True, text=True, timeout=15,
+            )
             if rev.returncode == 0 and rev.stdout.strip():
                 default_branch = rev.stdout.strip().split("/")[-1]
         except (FileNotFoundError, subprocess.TimeoutExpired):

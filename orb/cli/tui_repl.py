@@ -79,6 +79,12 @@ TOPOLOGY_LABELS: dict[str, str] = {
 SCOPE_RE = re.compile(r"@([\w./\-]+)")
 SCOPE_MAX = 8
 
+# Parity with ``web.state.MAX_FILE_CHANGES``. The dict is path-keyed so
+# rewrites collide in-place; distinct paths past this cap evict the oldest
+# entry (LRU by insertion order). ``file_changes_truncated_count`` surfaces
+# the total number evicted so the rail can show "… N more hidden".
+MAX_FILE_CHANGES = 200
+
 
 def _plan_progress(items: list[tuple[str, str]]) -> tuple[int, int, str]:
     """Return ``(done, total, meter)`` derived from plan_items.
@@ -367,6 +373,9 @@ class ContextRail(Static):
                     stat += f" [#f3afa7]−{rem}[/]"
                 short = path if len(path) <= 22 else "…" + path[-21:]
                 lines.append(f"[#c4ced9]{short}[/]  {stat}")
+            truncated = getattr(s, "file_changes_truncated_count", 0) or 0
+            if truncated:
+                lines.append(f"[#6b7685]… {truncated} older hidden[/]")
         else:
             lines.append("[#6b7685](no writes yet)[/]")
         lines.append("")
@@ -576,10 +585,29 @@ class LiveStatusBar(Static):
         super().__init__(id="live-bar")
         self.state = state
 
+    # Braille spinner frames — de-facto standard. Cycled at ~8fps by
+    # the 0.5s ``_tick_live_bar`` refresh (each tick picks the frame
+    # for ``time() * 8``).
+    _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _glyph_for(self, text: str, started: float | None) -> str:
+        """Animated braille glyph while active, filled dot when idle.
+
+        Idle = no ``_live_started`` timestamp OR live_text is literally
+        ``"idle"`` / ``"done"`` (terminal states). The animation lets the
+        user see the TUI is alive during long LLM waits (the classifier
+        and coordinator's first call can each take 5–15s).
+        """
+        if started is None or text in ("idle", "done"):
+            return "●"
+        idx = int(time() * 8) % len(self._SPIN_FRAMES)
+        return self._SPIN_FRAMES[idx]
+
     def refresh_content(self) -> None:
         s = self.state
         text = (s.live_text or "idle").strip()
         started = getattr(s, "_live_started", None)
+        glyph = self._glyph_for(text, started)
         dur = ""
         if started is not None:
             delta = max(0.0, time() - float(started))
@@ -591,11 +619,11 @@ class LiveStatusBar(Static):
             who = who.strip()
             color = AGENT_STYLE.get(who.lower(), "#94bfff")
             self.update(
-                f"[{color}]●[/] [bold {color}]{who}[/] [#8796a7]· {rest.strip()}[/]"
+                f"[{color}]{glyph}[/] [bold {color}]{who}[/] [#8796a7]· {rest.strip()}[/]"
                 f"[#6b7685]{dur}[/]"
             )
         else:
-            self.update(f"[#6b7685]●[/] [#8796a7]{text}[/][#6b7685]{dur}[/]")
+            self.update(f"[#6b7685]{glyph}[/] [#8796a7]{text}[/][#6b7685]{dur}[/]")
 
 
 class SlashPalette(Static):
@@ -756,6 +784,14 @@ class OrbReplTUI(App[None]):
         self.session_id: str = session_id or ""
         self.workdir: str = ""
         self.topology: str = topology
+        # Session-level lock surfaced via the init event's ``session`` block.
+        # Populated once the server has pinned the topology + per-agent models
+        # for this session (after the first run's planning stage). While this
+        # is set, the ``/topology`` slash command refuses non-matching args so
+        # the user doesn't think they're switching topology when in fact the
+        # server would silently reuse the lock.
+        self.locked_topology: str = ""
+        self.locked_agent_models: dict[str, str] = {}
         self.live_text: str = ""
         self.elapsed: float = 0.0
         self.message_count: int = 0
@@ -765,6 +801,11 @@ class OrbReplTUI(App[None]):
         self.edges: list[tuple[str, str]] = []
         self.graph_rows: list[str] = []
         self.file_changes: dict[str, dict] = {}
+        # Mirrors ``DashboardState.file_changes_truncated_count``. Populated
+        # from the server's ``init`` event + incremented locally when we evict
+        # oldest entries past ``MAX_FILE_CHANGES``. Surfaced in the CHANGES
+        # rail so the user knows writes were dropped from view.
+        self.file_changes_truncated_count: int = 0
         self.plan_items: list[tuple[str, str]] = []
         # @-mentions the user has typed into the composer (most-recent,
         # deduplicated). Capped at ``SCOPE_MAX`` so the rail stays compact.
@@ -918,6 +959,16 @@ class OrbReplTUI(App[None]):
         topo = ((data.get("plan") or {}).get("topology") or {}).get("id")
         if topo:
             self.topology = TOPOLOGY_LABELS.get(topo, topo)
+        # Hydrate session-level lock from the init event's ``session`` block.
+        # Emitted by ``DashboardState.to_init_event`` + extended in
+        # ``GraphRuntime._dashboard_snapshot_payload`` — see the dashboard
+        # side's ``_applySessionLock`` in ``web/static/app.js`` for parity.
+        session_block = data.get("session") or {}
+        self.locked_topology = str(session_block.get("locked_topology") or "")
+        models = session_block.get("locked_agent_models") or {}
+        self.locked_agent_models = (
+            dict(models) if isinstance(models, dict) else {}
+        )
         self.agents = {}
         self.agent_order = []
         # Pull edges + optional graph-view rows from the plan payload so
@@ -952,6 +1003,31 @@ class OrbReplTUI(App[None]):
         self.message_count = int(stats.get("message_count") or 0)
         self.elapsed = float(stats.get("elapsed") or 0.0)
         self.budget_remaining = max(0, self._budget - self.message_count)
+        # Hydrate file_changes from the server snapshot — path-keyed so the
+        # dict collapses on rewrites. Respect the cap here too in case a
+        # server running an older build ships more than ``MAX_FILE_CHANGES``.
+        init_changes = data.get("file_changes") or []
+        if init_changes:
+            hydrated: dict[str, dict] = {}
+            for fc in init_changes[-MAX_FILE_CHANGES:]:
+                path = (fc or {}).get("path") or ""
+                if not path:
+                    continue
+                old = (fc or {}).get("old_content") or ""
+                new = (fc or {}).get("content") or ""
+                old_lines = old.splitlines()
+                new_lines = new.splitlines()
+                added = max(0, len(new_lines) - len(old_lines))
+                removed = max(0, len(old_lines) - len(new_lines))
+                hydrated[path] = {
+                    "agent": (fc or {}).get("agent") or "",
+                    "added": added,
+                    "removed": removed,
+                }
+            self.file_changes = hydrated
+        self.file_changes_truncated_count = int(
+            data.get("file_changes_truncated_count") or 0
+        )
         # Only clear when the user actually switched sessions. During a
         # run the server re-broadcasts init with fresh agent/model state;
         # wiping on every re-broadcast erases the user's in-flight
@@ -1030,6 +1106,13 @@ class OrbReplTUI(App[None]):
         agent = data.get("agent") or "system"
         elapsed = float(data.get("elapsed") or self.elapsed)
         result = data.get("result") or ""
+        # ``run_complete`` carries the session's locked topology once the
+        # runtime has pinned it. Refresh our view so ``/topology`` becomes
+        # lock-aware even if the user never receives a fresh ``init`` after
+        # the first run (e.g. they only reconnect mid-session much later).
+        locked = str(data.get("locked_topology") or "").strip()
+        if locked:
+            self.locked_topology = locked
         self._emit_turn(agent, f"[#86d8ab]✓ run complete · {elapsed:.1f}s[/]\n{result[:800]}")
         self.live_text = "done"
         self._live_started = None
@@ -1049,7 +1132,18 @@ class OrbReplTUI(App[None]):
         added = max(0, len(new_lines) - len(old_lines))
         removed = max(0, len(old_lines) - len(new_lines))
         # Over-count for non-length-diff cases — close enough for the rail display.
+        # Path-keyed dedup: rewrites replace in-place. When a brand-new path
+        # pushes us past ``MAX_FILE_CHANGES``, evict the oldest entry (dicts
+        # preserve insertion order in Python 3.7+) and bump the truncated
+        # counter so the rail can surface the drop.
+        if path in self.file_changes:
+            # Refresh LRU position by re-inserting at the tail.
+            del self.file_changes[path]
         self.file_changes[path] = {"agent": agent, "added": added, "removed": removed}
+        while len(self.file_changes) > MAX_FILE_CHANGES:
+            oldest_path = next(iter(self.file_changes))
+            del self.file_changes[oldest_path]
+            self.file_changes_truncated_count += 1
         self._refresh_chrome()
         # Render a tool block inline so the stream shows what was written.
         block_body = f"[#6b7685]wrote {len(new_lines)} lines · {len(new)} bytes[/]"
@@ -1088,6 +1182,11 @@ class OrbReplTUI(App[None]):
             else:
                 promoted.append((kind, text))
         self.plan_items = list(reversed(promoted))
+        # Drive the LiveStatusBar so the user sees "Planning: <title>"
+        # ticking during the classifier / allocator wait instead of the
+        # bar resting on "idle" and looking frozen.
+        self.live_text = f"planning: {title}"
+        self._live_started = time()
         self._refresh_chrome()
         if detail:
             self._emit_turn("system", f"[#94bfff]plan[/] · {title} — {detail}")
@@ -1261,13 +1360,36 @@ class OrbReplTUI(App[None]):
             await self.action_resume_session()
         elif cmd == "topology":
             new = arg.strip().lower()
-            if new in TOPOLOGY_LABELS:
-                self._topology = new
-                self._emit_turn("system", f"[#8796a7]topology set to[/] [#c4ced9]{new}[/] [#6b7685](applies to the next run)[/]")
-            else:
+            if new not in TOPOLOGY_LABELS:
                 self._emit_turn(
                     "system",
                     f"[#f3afa7]unknown topology: {new!r}[/]\n[#8796a7]valid:[/] {', '.join(TOPOLOGY_LABELS)}",
+                )
+            elif self.locked_topology and new != self.locked_topology:
+                # Session is pinned — the daemon would reuse ``locked_topology``
+                # regardless of what we send. Refuse loudly so the user isn't
+                # fooled into thinking the switch took effect. Parity with the
+                # dashboard, which disables its topology picker via
+                # ``_applySessionLock`` in ``web/static/app.js``.
+                self._emit_turn(
+                    "system",
+                    f"[#f3afa7]topology is pinned to[/] [#c4ced9]{self.locked_topology}[/] "
+                    f"[#f3afa7]for this session — start[/] [#94bfff]/new[/] "
+                    f"[#f3afa7]to change it[/]",
+                )
+            elif self.locked_topology and new == self.locked_topology:
+                # No-op — matches the lock. Confirm so the user has feedback.
+                self._topology = new
+                self._emit_turn(
+                    "system",
+                    f"[#8796a7]topology already pinned to[/] [#c4ced9]{new}[/] "
+                    f"[#6b7685](session lock matches)[/]",
+                )
+            else:
+                self._topology = new
+                self._emit_turn(
+                    "system",
+                    f"[#8796a7]topology set to[/] [#c4ced9]{new}[/] [#6b7685](applies to the next run)[/]",
                 )
         elif cmd in {"quit", "exit"}:
             self.call_after_refresh(self.action_quit)

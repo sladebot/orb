@@ -141,6 +141,32 @@ class TestRunControl:
         assert data["ok"] is True
         assert data["code"] == "RUN_STARTED"
 
+    async def test_start_run_while_one_is_in_flight_returns_409(self, client):
+        """Starting a second run while one is in flight must map to HTTP 409
+        with envelope code RUN_IN_PROGRESS — not the previous 200 {ok:false}.
+
+        Mirrors the stop_run → NO_RUN_IN_FLIGHT treatment at api_v1.py.
+        """
+        test_client, server = client
+        create = await (await test_client.post("/api/v1/sessions", json={})).json()
+        session_id = create["data"]["session_id"]
+        runtime = server.manager.get_session(session_id)
+
+        async def fake_start_run(*args, **kwargs):
+            # Mirror the runtime's internal contract when a run is in flight:
+            # it returns (200, {"ok": False, "error": "Run already in progress"}).
+            return 200, {"ok": False, "error": "Run already in progress"}
+
+        with patch.object(runtime, "start_run", side_effect=fake_start_run):
+            resp = await test_client.post(
+                f"/api/v1/sessions/{session_id}/runs",
+                json={"query": "hello", "topology": "auto"},
+            )
+        assert resp.status == 409
+        data = await resp.json()
+        assert data["ok"] is False
+        assert data["code"] == "RUN_IN_PROGRESS"
+
     async def test_stop_run_when_no_run_in_flight_is_409(self, client):
         test_client, _ = client
         create = await (await test_client.post("/api/v1/sessions", json={})).json()

@@ -562,15 +562,17 @@ async def test_async_main_daemon_restart_restarts_background_process():
          patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon, \
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 5678,
-             "host": "127.0.0.1",
+             "host": "0.0.0.0",
              "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-y",
          }) as start_daemon:
         await async_main()
 
     stop_daemon.assert_awaited_once()
+    # Default host is 0.0.0.0 per CLAUDE.md — binds all interfaces so the
+    # LAN-reachable dashboard works without an extra flag.
     start_daemon.assert_called_once_with(
-        "127.0.0.1",
+        "0.0.0.0",
         DEFAULT_DAEMON_PORT,
         None,
         local_only=False,
@@ -745,3 +747,23 @@ async def test_async_main_direct_run_uses_default_triad_topology():
         await async_main()
 
     assert create_orchestrator.call_args.args[0] == "triad"
+
+
+def test_daemon_host_default_is_unspecified_binds_all_interfaces():
+    """CLAUDE.md's ``"Always run or restart the Orb daemon with host
+    0.0.0.0"`` rule requires ``daemon run/start/restart`` to default to
+    ``0.0.0.0`` — not ``127.0.0.1`` — so the dashboard and TUI are
+    reachable from other hosts on the LAN without a hidden extra flag.
+    Regression guard for the default drift we caught in the review.
+    """
+    import sys
+    from unittest.mock import patch
+
+    from orb.cli.main import parse_args
+
+    for subcmd in ("run", "start", "restart"):
+        with patch.object(sys, "argv", ["orb", "daemon", subcmd]):
+            args = parse_args()
+        assert args.host == "0.0.0.0", (
+            f"`orb daemon {subcmd}` should default --host to 0.0.0.0, got {args.host!r}"
+        )

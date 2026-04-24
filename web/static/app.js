@@ -2,6 +2,12 @@
  * Dashboard app — WebSocket client, message log, agent cards, chat panel.
  */
 
+// Parity with web/state.py::MAX_FILE_CHANGES and orb/cli/tui_repl.py. The
+// `_fileChanges` Map is path-keyed (rewrites collide); distinct paths past
+// this cap evict the oldest entry (LRU by insertion order). `_fileChangesTruncatedCount`
+// tracks the total evicted so the changes panel can show "N older changes hidden".
+const MAX_FILE_CHANGES = 200;
+
 function safeParseWsMessage(data) {
     if (typeof data !== 'string' || !data) return null;
     try {
@@ -140,6 +146,10 @@ class Dashboard {
         this._agentActivityLines = {};  // agentId -> recent structured activity events
         this._plan = null;
         this._fileChanges = new Map();
+        // Lifetime count of file_changes entries evicted by the MAX_FILE_CHANGES
+        // cap (mirrors DashboardState.file_changes_truncated_count). Populated
+        // from the server's init event + bumped locally on overflow.
+        this._fileChangesTruncatedCount = 0;
         this._panelWidthKeys = ['changes-panel', 'communications-panel'];
         this._activePanelDrag = null;
         this._mentionTargets = [];
@@ -1021,6 +1031,7 @@ class Dashboard {
             // this as a brand-new session (re-probes workdir files, etc.).
             this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
             this._fileChanges = new Map();
+            this._fileChangesTruncatedCount = 0;
             this._workspaceFiles = [];
 
             // v1 multi-tenant route: POST /api/v1/sessions. Sends the
@@ -1294,6 +1305,7 @@ class Dashboard {
         this._plan = data.plan || null;
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         this._feedSequence = 0;
         this._clearThinking();
         this._updateSessionUrl(data.session_id || '');
@@ -1609,12 +1621,22 @@ class Dashboard {
     _handleFileWrite(data) {
         const path = data.path || '';
         if (!path) return;
+        // Refresh LRU position on rewrite: delete then re-insert so the path
+        // moves to the tail of the Map's insertion order.
+        if (this._fileChanges.has(path)) this._fileChanges.delete(path);
         this._fileChanges.set(path, {
             path,
             agent: data.agent || '',
             content: data.content || '',
             oldContent: data.old_content || '',
         });
+        // Evict oldest (head of insertion order) past the cap, bumping the
+        // truncated counter so the UI can surface "N older changes hidden".
+        while (this._fileChanges.size > MAX_FILE_CHANGES) {
+            const oldestPath = this._fileChanges.keys().next().value;
+            this._fileChanges.delete(oldestPath);
+            this._fileChangesTruncatedCount += 1;
+        }
         this._renderLiveCodeChanges();
     }
 
@@ -3016,6 +3038,7 @@ class Dashboard {
         this._showLoader('Starting runtime…');
         this._lastQuery = query;
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         input.value = '';
         input.style.height = 'auto';
         this._hideMentionSuggestions();
@@ -3213,6 +3236,20 @@ class Dashboard {
         this.graph.setRunState('completed');
         this._updateSessionUrl(data.session_id || '');
 
+        // Refresh the session lock if run_complete carries ``locked_topology``
+        // (parity with the TUI's handler in ``orb/cli/tui_repl.py``). This is
+        // belt-and-braces — the next init broadcast will re-emit the full
+        // session block, but a client that reconnects and sees only
+        // run_complete first should still render the "pinned" affordance.
+        if (typeof data.locked_topology === 'string' && data.locked_topology) {
+            this._applySessionLock({
+                locked_topology: data.locked_topology,
+                locked_agent_models: data.locked_agent_models || this._sessionLock?.agentModels || {},
+                locked_model_pin: data.locked_model_pin || this._sessionLock?.modelPin || '',
+                workdir: this._sessionLock?.workdir || '',
+            });
+        }
+
         // Force status to Done
         const statusEl = document.getElementById('stat-status');
         statusEl.textContent = 'Done';
@@ -3325,9 +3362,17 @@ class Dashboard {
 
     _hydrateLiveCodeChangesFromInit(data) {
         const fileChanges = Array.isArray(data.file_changes) ? data.file_changes : [];
+        // Always refresh the truncated counter from the server — it's the
+        // source of truth across reconnects. Defensive: a server running an
+        // older build won't send this field, leaving the count as-is.
+        if (typeof data.file_changes_truncated_count === 'number') {
+            this._fileChangesTruncatedCount = data.file_changes_truncated_count;
+        }
         if (!fileChanges.length) return;
+        // Respect the cap on hydrate too — keep the most-recent N.
+        const capped = fileChanges.slice(-MAX_FILE_CHANGES);
         this._fileChanges = new Map(
-            fileChanges.map((file) => [file.path, {
+            capped.map((file) => [file.path, {
                 path: file.path,
                 agent: file.agent || '',
                 content: file.content || '',
@@ -3346,6 +3391,7 @@ class Dashboard {
         this._plan = null;
         this._planSteps = [];
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         this.agents = {};
         this.selectedAgent = null;
         this._isRunActive = false;
@@ -3679,7 +3725,11 @@ class Dashboard {
         const totalAdd = files.reduce((s, f) => s + (f.added || 0), 0);
         const totalDel = files.reduce((s, f) => s + (f.removed || 0), 0);
         const authors = new Set(files.map((f) => f.agent).filter(Boolean));
-        if (countEl) countEl.textContent = `${files.length} file${files.length === 1 ? '' : 's'}`;
+        if (countEl) {
+            const truncated = this._fileChangesTruncatedCount || 0;
+            const base = `${files.length} file${files.length === 1 ? '' : 's'}`;
+            countEl.textContent = truncated ? `${base} · ${truncated} older hidden` : base;
+        }
         if (addEl) addEl.textContent = `+${totalAdd}`;
         if (delEl) delEl.textContent = `−${totalDel}`;
         if (contribEl) contribEl.textContent = `${authors.size} agent${authors.size === 1 ? '' : 's'} contributed`;

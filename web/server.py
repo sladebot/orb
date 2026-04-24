@@ -279,24 +279,17 @@ class DashboardServer:
     async def _settings_get_handler(self, request: web.Request) -> web.Response:
         return web.json_response(self.runtime.settings_payload())
 
-    async def _fs_list_handler(self, request: web.Request) -> web.Response:
-        """Directory listing endpoint for the dashboard's workspace picker.
-
-        Returns subdirectories of the given `?path=` (defaulting to the user's
-        home directory). Files are filtered out because only folders can be a
-        workdir. Paths are always resolved, so the client receives absolute
-        canonical paths it can send back to /api/session/new verbatim.
+    @staticmethod
+    def _fs_list_sync(raw: str, show_hidden: bool) -> tuple[dict, int]:
+        """Synchronous body of _fs_list_handler. Returns (json_body, status).
+        Called via ``asyncio.to_thread`` so the directory scan doesn't
+        stall the event loop.
         """
-        raw = (request.rel_url.query.get("path") or "").strip()
-        show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")
         try:
             root = Path(raw).expanduser() if raw else Path.home()
             root = root.resolve(strict=False)
             if not root.exists() or not root.is_dir():
-                return web.json_response(
-                    {"ok": False, "error": f"Not a directory: {root}"},
-                    status=400,
-                )
+                return ({"ok": False, "error": f"Not a directory: {root}"}, 400)
             entries: list[dict] = []
             for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
                 try:
@@ -312,23 +305,30 @@ class DashboardServer:
                     "is_dir": True,
                 })
             parent = str(root.parent) if root.parent != root else ""
-            return web.json_response({
+            return ({
                 "ok": True,
                 "path": str(root),
                 "parent": parent,
                 "home": str(Path.home()),
                 "entries": entries,
-            })
+            }, 200)
         except PermissionError as exc:
-            return web.json_response(
-                {"ok": False, "error": f"Permission denied: {exc}"},
-                status=403,
-            )
+            return ({"ok": False, "error": f"Permission denied: {exc}"}, 403)
         except Exception as exc:  # noqa: BLE001
-            return web.json_response(
-                {"ok": False, "error": f"Failed to list path: {exc}"},
-                status=500,
-            )
+            return ({"ok": False, "error": f"Failed to list path: {exc}"}, 500)
+
+    async def _fs_list_handler(self, request: web.Request) -> web.Response:
+        """Directory listing endpoint for the dashboard's workspace picker.
+
+        Returns subdirectories of the given `?path=` (defaulting to the user's
+        home directory). Files are filtered out because only folders can be a
+        workdir. Paths are always resolved, so the client receives absolute
+        canonical paths it can send back to /api/session/new verbatim.
+        """
+        raw = (request.rel_url.query.get("path") or "").strip()
+        show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")
+        body, status = await asyncio.to_thread(self._fs_list_sync, raw, show_hidden)
+        return web.json_response(body, status=status)
 
     @staticmethod
     def _resolve_workdir(raw: str | None) -> Path | None:
@@ -433,24 +433,10 @@ class DashboardServer:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
         if not used_git:
-            ignore_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build", ".next", ".turbo", ".DS_Store"}
-            for root, dirs, entries in __import__("os").walk(str(path)):
-                dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
-                root_path = Path(root)
-                for entry in entries:
-                    if entry.startswith("."):
-                        continue
-                    full = root_path / entry
-                    try:
-                        rel = full.relative_to(path)
-                    except ValueError:
-                        continue
-                    files.append(str(rel))
-                    if len(files) >= limit:
-                        break
-                if len(files) >= limit:
-                    break
-            files.sort()
+            # os.walk is synchronous and can take seconds on deep trees.
+            # Offload so it doesn't stall the loop and every connected
+            # WebSocket subscriber.
+            files = await asyncio.to_thread(self._fs_files_walk, path, limit)
         return web.json_response({
             "ok": True,
             "path": str(path),
@@ -459,6 +445,72 @@ class DashboardServer:
             "truncated": len(files) >= limit,
         })
 
+    @staticmethod
+    def _fs_files_walk(path: Path, limit: int) -> list[str]:
+        """Synchronous os.walk body extracted from _fs_files_handler.
+        Must be runnable in a worker thread — no event-loop state used.
+        """
+        import os as _os
+        ignore_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build", ".next", ".turbo", ".DS_Store"}
+        files: list[str] = []
+        for root, dirs, entries in _os.walk(str(path)):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+            root_path = Path(root)
+            for entry in entries:
+                if entry.startswith("."):
+                    continue
+                full = root_path / entry
+                try:
+                    rel = full.relative_to(path)
+                except ValueError:
+                    continue
+                files.append(str(rel))
+                if len(files) >= limit:
+                    break
+            if len(files) >= limit:
+                break
+        files.sort()
+        return files
+
+    @staticmethod
+    def _fs_read_sync(workdir_raw: str, rel_raw: str) -> tuple[dict, int]:
+        """Synchronous body of _fs_read_handler — resolve, stat, read_text."""
+        if not rel_raw:
+            return ({"ok": False, "error": "path is required"}, 400)
+        workdir = DashboardServer._resolve_workdir(workdir_raw)
+        if workdir is None:
+            return ({"ok": False, "error": "workdir must point to an existing directory"}, 400)
+        try:
+            # strict=True follows symlinks AND requires every component to
+            # exist, so a link pointing outside the workdir resolves to its
+            # real target and the relative_to() check below catches the escape.
+            target = (workdir / rel_raw).resolve(strict=True)
+        except (OSError, ValueError, FileNotFoundError):
+            return ({"ok": False, "error": "invalid path"}, 400)
+        try:
+            target.relative_to(workdir)
+        except ValueError:
+            return ({"ok": False, "error": "path escapes workdir"}, 400)
+        if not target.exists() or not target.is_file():
+            return ({"ok": False, "error": "not a file"}, 404)
+        size = target.stat().st_size
+        if size > 512 * 1024:
+            return ({
+                "ok": False,
+                "error": f"file is too large ({size} bytes) to preview",
+            }, 413)
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ({"ok": False, "error": "binary file"}, 415)
+        return ({
+            "ok": True,
+            "path": str(target),
+            "relative": rel_raw,
+            "content": content,
+            "size": size,
+        }, 200)
+
     async def _fs_read_handler(self, request: web.Request) -> web.Response:
         """Return the text content of a file inside the session's workdir so
         the diff pane can show unchanged files. Refuses binary content and
@@ -466,41 +518,8 @@ class DashboardServer:
         """
         workdir_raw = request.rel_url.query.get("workdir") or ""
         rel_raw = request.rel_url.query.get("path") or ""
-        if not rel_raw:
-            return web.json_response({"ok": False, "error": "path is required"}, status=400)
-        workdir = self._resolve_workdir(workdir_raw)
-        if workdir is None:
-            return web.json_response({"ok": False, "error": "workdir must point to an existing directory"}, status=400)
-        try:
-            # strict=True follows symlinks AND requires every component to
-            # exist, so a link pointing outside the workdir resolves to its
-            # real target and the relative_to() check below catches the escape.
-            target = (workdir / rel_raw).resolve(strict=True)
-        except (OSError, ValueError, FileNotFoundError):
-            return web.json_response({"ok": False, "error": "invalid path"}, status=400)
-        try:
-            target.relative_to(workdir)
-        except ValueError:
-            return web.json_response({"ok": False, "error": "path escapes workdir"}, status=400)
-        if not target.exists() or not target.is_file():
-            return web.json_response({"ok": False, "error": "not a file"}, status=404)
-        size = target.stat().st_size
-        if size > 512 * 1024:
-            return web.json_response({
-                "ok": False,
-                "error": f"file is too large ({size} bytes) to preview",
-            }, status=413)
-        try:
-            content = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return web.json_response({"ok": False, "error": "binary file"}, status=415)
-        return web.json_response({
-            "ok": True,
-            "path": str(target),
-            "relative": rel_raw,
-            "content": content,
-            "size": size,
-        })
+        body, status = await asyncio.to_thread(self._fs_read_sync, workdir_raw, rel_raw)
+        return web.json_response(body, status=status)
 
     async def _git_status_handler(self, request: web.Request) -> web.Response:
         raw = request.rel_url.query.get("path") or ""

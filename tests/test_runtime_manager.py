@@ -255,3 +255,118 @@ class TestRegistryRestore:
 
         mgr2 = RuntimeManager()
         assert mgr2.try_restore(sid) is None
+
+
+@pytest.mark.asyncio
+class TestDeleteSessionAwaitsRunTask:
+    """Regression: DELETE /sessions/{sid} must not return until the
+    cancelled run task has actually drained.
+
+    Previously ``delete_session`` only called ``_run_task.cancel()`` and
+    returned synchronously, so the HTTP caller could see the session
+    removed from the registry while the task was still mid-cleanup
+    (persisting trace + dashboard snapshot, clearing state). A subsequent
+    ``GET /sessions`` could race with those disk writes and, in the worst
+    case, the trace would land on disk *after* the registry entry was
+    already gone.
+
+    The fix is an async ``adelete_session`` that awaits the cancelled
+    task with a bounded timeout. These tests pin that contract.
+    """
+
+    async def test_adelete_session_awaits_task_cleanup(self, tmp_path: Path):
+        mgr = RuntimeManager()
+        session = mgr.create_session(session_path=tmp_path / "a.json")
+        sid = session._conversation_session.session_id  # noqa: SLF001
+
+        cleanup_finished = asyncio.Event()
+
+        async def fake_run() -> None:
+            # Mimics `_run_orchestrator`: a long-running body that, when
+            # cancelled, still has bookkeeping to do before the task
+            # really terminates.
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                # Simulate synchronous persistence work that must finish
+                # before the task is truly "done". A yield so the
+                # scheduler can see us but we still block on real work.
+                await asyncio.sleep(0.05)
+                cleanup_finished.set()
+                raise
+
+        # Drive the FSM into RUNNING so delete has the in-flight path to
+        # exercise (matches the shape of a real DELETE during a run).
+        session._fsm.fire("start_run_begin")             # noqa: SLF001
+        session._fsm.fire("orchestrator_task_created")   # noqa: SLF001
+        task = asyncio.create_task(fake_run())
+        session._run_task = task                         # noqa: SLF001
+        # Give the scheduler a tick so the task is actually pending.
+        await asyncio.sleep(0)
+
+        # The DELETE handler is async; adelete_session must await the
+        # run task so cleanup is observably done on return.
+        deleted = await mgr.adelete_session(sid)
+        assert deleted is True
+
+        # The race would show as "task still pending" + "cleanup event
+        # not set yet" right after adelete_session returns.
+        assert task.done(), "run task must be fully drained before delete returns"
+        assert cleanup_finished.is_set(), (
+            "task cleanup block did not finish before delete returned"
+        )
+        # Registry entry is gone.
+        assert mgr.get_session(sid) is None
+
+    async def test_adelete_session_does_not_hang_when_task_ignores_cancel(
+        self, tmp_path: Path, caplog
+    ):
+        """Bounded timeout: if a misbehaving task swallows CancelledError
+        we must not block the HTTP worker forever.
+        """
+        mgr = RuntimeManager()
+        session = mgr.create_session(session_path=tmp_path / "a.json")
+        sid = session._conversation_session.session_id  # noqa: SLF001
+
+        # Flag the task checks so the test can release it after the
+        # assertions run — otherwise the event loop teardown tries to
+        # collect a task that swallows every cancel and pytest hangs.
+        release = asyncio.Event()
+
+        async def _uncancellable() -> None:
+            while not release.is_set():
+                try:
+                    await asyncio.sleep(10.0)
+                except asyncio.CancelledError:
+                    # Intentionally swallow — simulates a buggy task.
+                    continue
+
+        task = asyncio.create_task(_uncancellable())
+        session._run_task = task                         # noqa: SLF001
+        await asyncio.sleep(0)
+
+        # Should return within the bounded timeout (<<5s) even though
+        # the task never actually cancels. adelete_session must not hang.
+        try:
+            # Use asyncio.wait rather than wait_for for the same reason
+            # adelete_session does: wait_for on 3.11+ awaits cancellation
+            # completion, which hangs forever on a task that swallows
+            # CancelledError.
+            done, pending = await asyncio.wait({asyncio.create_task(mgr.adelete_session(sid))}, timeout=6.0)
+            assert done, "adelete_session must return within the bounded timeout"
+            deleted = next(iter(done)).result()
+        finally:
+            # Release the task so it exits on its next loop check; then
+            # cancel to wake it from its sleep. Without the release flag
+            # the task swallows cancel forever and pytest's event-loop
+            # teardown hangs trying to collect it.
+            release.set()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        assert deleted is True
+        assert mgr.get_session(sid) is None

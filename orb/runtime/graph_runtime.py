@@ -1244,6 +1244,16 @@ class GraphRuntime:
         self.state.session_turn = self._conversation_session.user_turn_count()
         self.state.session_id = self._conversation_session.session_id
         self.state.session_generation = self._conversation_session.generation
+        # Mirror the session's topology/model lock onto ``DashboardState`` so
+        # ``state.to_init_event()`` can emit it in the ``session`` block. The
+        # runtime-level ``_dashboard_snapshot_payload`` still extends that
+        # block with ``id``/``workdir``/``locked_model_pin``, but the
+        # single-source-of-truth for the lock fields lives on the session
+        # object — this just keeps the DashboardState view in sync.
+        self.state.locked_topology = self._conversation_session.locked_topology or ""
+        self.state.locked_agent_models = dict(
+            self._conversation_session.locked_agent_models or {}
+        )
 
     @staticmethod
     def _sanitize_carryover(messages: list[dict]) -> list[dict]:
@@ -1380,10 +1390,14 @@ class GraphRuntime:
         if agent is None:
             return 404, {"ok": False, "error": f"Unknown agent: {resolved_target}"}
 
+        # A user-injected message is a TASK directed at an agent — not a
+        # RESPONSE. The broadcast payload below must agree (`msg_type:
+        # "task"`) so the dashboard/TUI render it consistently with the
+        # MessageBus events. See CLAUDE.md parity rule.
         msg = Message(
             from_="user",
             to=resolved_target,
-            type=MessageType.RESPONSE,
+            type=MessageType.TASK,
             payload=resolved_text,
         )
         try:
@@ -1409,10 +1423,13 @@ class GraphRuntime:
             "to": resolved_target,
             "content": resolved_text,
             "model": "",
-            "depth": 0,
+            # Top-level user injection: depth=0 matches the synthetic
+            # Message above and how the MessageBus tags fresh tasks.
+            "depth": msg.depth,
             "elapsed": 0,
             "chain_id": msg.chain_id,
-            "msg_type": "response",
+            # Must agree with ``msg.type`` — parity rule in CLAUDE.md.
+            "msg_type": msg.type.value,
             "context_slice": [],
         }))
         return 200, {"ok": True}
@@ -1532,15 +1549,34 @@ class GraphRuntime:
         self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
 
-        if manual_models and explicit_topology:
-            # Manual mode — skip the classifier entirely. Synthesize a
-            # predicted payload from the caller-supplied topology + models.
+        if explicit_topology:
+            # Explicit-topology fast path — skip the classifier LLM entirely.
+            # The user already picked the topology (via ``--topology X`` or
+            # the TUI's interactive picker); re-deciding via an LLM buys
+            # nothing and costs a 3–15s blank window per submit.
+            #
+            # Safety on trivial queries ("say hi" on triad): ``_manual_prediction``
+            # now inspects the query itself and sets ``stop_early_allowed=True``
+            # when the query matches the same triviality heuristic the
+            # classifier uses (``_is_trivial_query``). That avoids the
+            # earlier regression where triad looped forever because
+            # ``stop_early_allowed=False`` was hardcoded.
             predicted = self._manual_prediction(
                 topology=normalize_topology_id(topology),
                 agent_models=agent_models,
                 model_pin=model_pin,
+                query=query,
             )
         else:
+            # Broadcast BEFORE awaiting the classifier's LLM call. Without
+            # this, the TUI shows a blank window for the 5–15s the classifier
+            # spends over the network with no event traffic between the
+            # "planning" step and the post-classifier "routing" step.
+            await self._record_plan_step(
+                "classifier",
+                "Classifying task",
+                "Calling router model to pick a topology for this query.",
+            )
             predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
         routing_payload = {
@@ -1803,15 +1839,33 @@ class GraphRuntime:
         topology: str,
         agent_models: dict[str, str],
         model_pin: str,
+        query: str = "",
     ) -> dict:
-        """Synthesize a topology-prediction payload for manual mode.
+        """Synthesize a topology-prediction payload without calling the LLM.
 
-        When the caller drives both the topology and the per-agent model
-        pins, we skip the classifier entirely. This returns the same shape
-        ``predict_topology`` would have produced so the rest of
-        ``start_run`` stays on one code path.
+        Two ways into this path:
+        1. The caller supplies both topology AND per-agent models
+           (``--agent-model role=X`` + ``--topology Y``). Legacy manual mode.
+        2. The caller supplies an explicit topology (via ``--topology`` or
+           the TUI picker) and trusts the runtime to fill in models. Added
+           so the user never eats the classifier LLM's 3–15s round-trip on
+           a topology they already picked.
+
+        ``stop_early_allowed`` is computed from the query's own signals:
+        trivial queries (short, no domain keywords, no ``@agent`` scope)
+        get ``True`` so multi-agent topologies like ``triad`` can short-
+        circuit on "say hi" instead of looping forever waiting for
+        consensus on a one-word answer. Anything meatier gets ``False``
+        so the full review cycle runs. The triviality criteria are the
+        same as the classifier's ``_is_trivial_query`` — kept in sync by
+        importing the helper rather than duplicating the thresholds.
         """
         from orb.topologies import normalize_topology_id
+        from orb.runtime.topology_classifier import (
+            ProviderBackedTopologyClassifier,
+            _is_trivial_query,
+        )
+
         topology_id = normalize_topology_id(topology)
         topo = self._available_topologies().get(topology_id)
         label = topo.label if topo else topology_id
@@ -1825,25 +1879,37 @@ class GraphRuntime:
                 "provider": "",  # resolved later in _validate_agent_model_assignments
                 "model": str(model_id).strip(),
             }
+        signals = ProviderBackedTopologyClassifier._query_signals(
+            query=query,
+            requested_topology=topology_id,
+            model_pin=model_pin,
+            topologies=self._available_topologies(),
+        )
+        stop_early = _is_trivial_query(query, signals)
+        task_type = "simple_direct" if stop_early else "manual"
+        stop_early_reason = (
+            "Trivial query — topology can terminate after first response."
+            if stop_early else "Manual run"
+        )
         return {
             "topology": topology_id,
             "label": label,
             "description": description,
             "options": self._topology_options(topology_id),
-            "task_type": "manual",
-            "reason": "Manual mode — caller supplied topology and per-agent models.",
-            "summary": "Manual topology + model selection",
-            "signals": {"manual": True},
+            "task_type": task_type,
+            "reason": "Explicit topology — classifier bypassed.",
+            "summary": "Explicit topology + heuristic stop-early",
+            "signals": dict(signals),
             "candidates": [],
             "escalation_allowed": False,
-            "stop_early_allowed": False,
+            "stop_early_allowed": stop_early,
             "escalation_reason": "",
-            "stop_early_reason": "Manual run",
+            "stop_early_reason": stop_early_reason,
             "requested_topology": topology_id,
             "routing_mode": "manual",
             "classifier_model": "",
             "classifier_provider": "",
-            "complexity": 50,
+            "complexity": 10 if stop_early else 50,
             "agent_complexity": {},
             "agent_assignments": agent_assignments,
             "agent_models": {role: data.get("model", "") for role, data in agent_assignments.items()},
@@ -2597,6 +2663,15 @@ class GraphRuntime:
                     "session_id": self._conversation_session.session_id,
                     "session_generation": self._conversation_session.generation,
                     "routed": self.state.message_count,
+                    # Surface the session's topology/model lock so TUI +
+                    # dashboard clients can refresh their "pinned"
+                    # affordances without waiting for the next ``init``
+                    # broadcast (which fires on the *next* run's planning
+                    # stage, not on completion).
+                    "locked_topology": self._conversation_session.locked_topology or "",
+                    "locked_agent_models": dict(
+                        self._conversation_session.locked_agent_models or {}
+                    ),
                 }))
 
         if self._last_trace is not None:

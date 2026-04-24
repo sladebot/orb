@@ -582,3 +582,169 @@ async def test_live_status_bar_updates_on_agent_activity():
         assert "editing src/app.py" in text
         # Elapsed ``Ns`` pill is present.
         assert "s" in text
+
+
+# ── v2 Topology lock: /topology aware of session pin ──────────────────
+#
+# After the first run the server pins the session's topology (see
+# ``GraphRuntime._start_run_planning``). Follow-up ``/topology`` requests
+# from the TUI against a locked session silently no-op on the server side
+# — the user has no idea. The TUI now surfaces the lock: the init event
+# carries ``session.locked_topology`` which the TUI tracks, and the
+# ``/topology <id>`` slash command refuses + whispers when the argument
+# doesn't match the lock.
+
+
+def _render_stream_plain(app: OrbReplTUI) -> str:
+    """Flatten every ``Turn`` body in the stream into a searchable string."""
+    stream = app.query_one(ReplStream)
+    parts: list[str] = []
+    for turn in stream.query(Turn):
+        parts.append(_render_plain(turn))
+    return "\n".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_init_hydrates_locked_topology_from_session_block():
+    """The TUI stores ``locked_topology`` from the init's session block."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        payload = _init_payload()
+        payload["session"] = {
+            "id": "sid-1",
+            "locked_topology": "triad",
+            "locked_agent_models": {"coordinator": "opus", "coder": "sonnet"},
+            "locked_model_pin": "auto",
+            "workdir": "/tmp/project",
+        }
+        app._handle_server_event(payload)
+        await pilot.pause()
+
+        assert app.locked_topology == "triad"
+        assert app.locked_agent_models == {"coordinator": "opus", "coder": "sonnet"}
+
+
+@pytest.mark.asyncio
+async def test_slash_topology_whispers_when_session_is_pinned():
+    """/topology <mismatch> must refuse + whisper when the session is locked."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        # Lock the session to triad via the init payload.
+        payload = _init_payload()
+        payload["session"] = {
+            "id": "sid-1",
+            "locked_topology": "triad",
+            "locked_agent_models": {},
+            "locked_model_pin": "auto",
+            "workdir": "/tmp/project",
+        }
+        app._handle_server_event(payload)
+        await pilot.pause()
+
+        # Try to switch — must refuse.
+        topology_before = app._topology
+        await app._run_slash_command("/topology solo")
+        await pilot.pause()
+
+        # Internal setting must not change.
+        assert app._topology == topology_before
+        # Whisper/error must surface the lock + suggest /new.
+        text = _render_stream_plain(app)
+        assert "pinned" in text.lower() or "locked" in text.lower()
+        assert "triad" in text
+
+
+@pytest.mark.asyncio
+async def test_slash_topology_matching_lock_is_accepted():
+    """/topology <same-as-lock> is a no-op on the server but must not error."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        payload = _init_payload()
+        payload["session"] = {
+            "id": "sid-1",
+            "locked_topology": "triad",
+            "locked_agent_models": {},
+            "locked_model_pin": "auto",
+            "workdir": "/tmp/project",
+        }
+        app._handle_server_event(payload)
+        await pilot.pause()
+
+        await app._run_slash_command("/topology triad")
+        await pilot.pause()
+
+        # Setting accepted (value unchanged since it matched the lock).
+        assert app._topology == "triad"
+        text = _render_stream_plain(app)
+        # No "pinned" refusal — but a confirmation is fine.
+        assert "pinned" not in text.lower() or "already" in text.lower() or "matches" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_complete_refreshes_locked_topology():
+    """run_complete carries ``locked_topology`` so late-joining clients can
+    refresh their lock view without waiting for the next run's init."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        # Start unlocked.
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+        assert app.locked_topology == ""
+
+        # run_complete carries the lock; TUI should pick it up.
+        app._handle_server_event({
+            "type": "run_complete",
+            "agent": "coordinator",
+            "elapsed": 2.0,
+            "result": "done",
+            "locked_topology": "triad",
+            "locked_agent_models": {"coordinator": "opus"},
+        })
+        await pilot.pause()
+        assert app.locked_topology == "triad"
+
+
+@pytest.mark.asyncio
+async def test_slash_topology_works_when_unlocked():
+    """Without a lock, /topology continues to mutate ``_topology`` as before."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        # Unlocked init — no ``session`` block with locked_topology.
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+        assert app.locked_topology == ""
+
+        await app._run_slash_command("/topology solo")
+        await pilot.pause()
+
+        assert app._topology == "solo"
