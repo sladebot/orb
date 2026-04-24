@@ -112,6 +112,12 @@ class DashboardState:
     # requests. Empty string / empty dict mean "not yet locked".
     locked_topology: str = ""
     locked_agent_models: dict[str, str] = field(default_factory=dict)
+    # Per-session "stage every file write for human approval" toggle.
+    # Mirrored from ``ConversationSession.approval_required`` via
+    # ``GraphRuntime._sync_session_state`` so both the init event and the
+    # live state stay in sync. See ``GraphRuntime.request_write_approval``
+    # for the runtime side of the staging pipeline.
+    approval_required: bool = False
 
     def reset(self) -> None:
         """Reset all state back to defaults (called before starting a new run)."""
@@ -144,6 +150,7 @@ class DashboardState:
         self.workdir = ""
         self.locked_topology = ""
         self.locked_agent_models = {}
+        self.approval_required = False
 
     def record_file_change(
         self,
@@ -279,4 +286,9 @@ class DashboardState:
                 "locked_topology": self.locked_topology,
                 "locked_agent_models": dict(self.locked_agent_models),
             },
+            # Top-level so clients (TUI keypress handler, dashboard) can
+            # check ``init.approval_required`` without diving into a
+            # nested block. The TUI flips its "(staged)" affordance off
+            # this single bool.
+            "approval_required": bool(self.approval_required),
         }

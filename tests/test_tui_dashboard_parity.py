@@ -84,6 +84,32 @@ def test_tui_handles_every_runtime_event_type():
     )
 
 
+def test_dashboard_handles_file_write_pending_and_rejected():
+    """Parity rule (CLAUDE.md): TUI + dashboard must react to the same
+    runtime events. Task #10 wires both sides up for the approval flow;
+    this test guards that the dashboard dispatcher learned the new types.
+    """
+    src = APP_JS_PATH.read_text()
+    assert "case 'file_write_pending'" in src, (
+        "web/static/app.js has no dispatcher branch for file_write_pending — "
+        "TUI/dashboard parity (CLAUDE.md) broken."
+    )
+    assert "case 'file_write_rejected'" in src, (
+        "web/static/app.js has no dispatcher branch for file_write_rejected."
+    )
+
+
+def test_tui_handles_approval_flow_events():
+    """TUI dispatcher must branch on both new approval event types."""
+    tui_src = TUI_PATH.read_text()
+    assert 't == "file_write_pending"' in tui_src, (
+        "orb/cli/tui_repl.py::_handle_server_event missing branch for file_write_pending."
+    )
+    assert 't == "file_write_rejected"' in tui_src, (
+        "orb/cli/tui_repl.py::_handle_server_event missing branch for file_write_rejected."
+    )
+
+
 def test_tui_reconnect_receives_fresh_init_via_ws_handler():
     """The v1 WS handler sends current_init_event on every new connection.
 

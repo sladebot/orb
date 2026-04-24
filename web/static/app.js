@@ -1294,6 +1294,8 @@ class Dashboard {
             case 'run_state_changed': this._handleRunStateChanged(data); break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
             case 'file_write':     this._handleFileWrite(data);      break;
+            case 'file_write_pending':  this._handleFileWritePending(data);  break;
+            case 'file_write_rejected': this._handleFileWriteRejected(data); break;
             case 'topologies_reloaded': this._loadTopologyOptions();   break;
         }
     }
@@ -1629,6 +1631,7 @@ class Dashboard {
             agent: data.agent || '',
             content: data.content || '',
             oldContent: data.old_content || '',
+            approvalStatus: 'applied',  // approval-flow parity: resolved writes land green
         });
         // Evict oldest (head of insertion order) past the cap, bumping the
         // truncated counter so the UI can surface "N older changes hidden".
@@ -1636,6 +1639,76 @@ class Dashboard {
             const oldestPath = this._fileChanges.keys().next().value;
             this._fileChanges.delete(oldestPath);
             this._fileChangesTruncatedCount += 1;
+        }
+        // Resolve any matching pending entry (approval flow).
+        if (this._pendingWrites) {
+            for (const [reqId, entry] of this._pendingWrites) {
+                if (entry.path === path) {
+                    this._pendingWrites.delete(reqId);
+                    break;
+                }
+            }
+        }
+        this._renderLiveCodeChanges();
+    }
+
+    // ── Approval flow (task #10) ─────────────────────────────────────────
+    //
+    // The daemon broadcasts ``file_write_pending`` when an agent stages a
+    // write that requires user approval, and ``file_write_rejected`` when
+    // the user (or teardown) rejects it. We mirror the TUI's state
+    // machine here: pending writes show with a yellow pill in the code-
+    // changes rail, then flip to green (applied) on the follow-up
+    // ``file_write`` or red (rejected) on ``file_write_rejected``.
+
+    _ensurePendingWriteStore() {
+        if (!this._pendingWrites) {
+            this._pendingWrites = new Map();
+        }
+        return this._pendingWrites;
+    }
+
+    _handleFileWritePending(data) {
+        const requestId = data.request_id || '';
+        const path = data.path || '';
+        if (!requestId || !path) return;
+        const store = this._ensurePendingWriteStore();
+        store.set(requestId, {
+            requestId,
+            path,
+            agent: data.agent || '',
+            content: data.content || '',
+            oldContent: data.old_content || '',
+        });
+        // Stage a pending entry in the changes map so the rail renders it
+        // with a warning pill. The resolving ``file_write`` or
+        // ``file_write_rejected`` event will upgrade/remove it.
+        if (this._fileChanges.has(path)) this._fileChanges.delete(path);
+        this._fileChanges.set(path, {
+            path,
+            agent: data.agent || '',
+            content: data.content || '',
+            oldContent: data.old_content || '',
+            approvalStatus: 'pending',
+            requestId,
+        });
+        this._renderLiveCodeChanges();
+    }
+
+    _handleFileWriteRejected(data) {
+        const requestId = data.request_id || '';
+        if (!requestId) return;
+        const store = this._ensurePendingWriteStore();
+        const entry = store.get(requestId);
+        store.delete(requestId);
+        const path = (entry && entry.path) || data.path || '';
+        if (path && this._fileChanges.has(path)) {
+            const existing = this._fileChanges.get(path);
+            this._fileChanges.set(path, {
+                ...existing,
+                approvalStatus: 'rejected',
+                reason: data.reason || '',
+            });
         }
         this._renderLiveCodeChanges();
     }
@@ -3565,7 +3638,22 @@ class Dashboard {
                 byline = `<span class="byline"><span class="track-label">file</span></span>`;
             } else {
                 const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                // Approval-flow pill: render a small yellow/red/green tag
+                // beside the byline when the write is tied to a pending
+                // approval. TUI parity — the TUI flips its ToolBlock
+                // pill through the same states.
+                const aStat = f.approvalStatus || '';
+                let approvalPill = '';
+                if (aStat === 'pending') {
+                    approvalPill = `<span class="approval-pill approval-pending" title="awaiting user approval">pending</span><span class="sep">·</span>`;
+                } else if (aStat === 'rejected') {
+                    const why = f.reason ? ` · ${f.reason}` : '';
+                    approvalPill = `<span class="approval-pill approval-rejected" title="rejected${this._escapeAttr(why)}">rejected</span><span class="sep">·</span>`;
+                } else if (aStat === 'applied') {
+                    approvalPill = `<span class="approval-pill approval-applied" title="approved & applied">applied</span><span class="sep">·</span>`;
+                }
                 byline = `<span class="byline">
+                        ${approvalPill}
                         <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
                         <span class="sep">·</span>
                         <span class="stat-add">+${f.added || 0}</span>

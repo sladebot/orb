@@ -488,7 +488,21 @@ class ToolBlock(Static):
     v2: every rendered line is prefixed with an agent-colored ``┃`` so
     the block visually "attaches" to its speaker. Optionally an
     ``accept`` bar is rendered as a footer row with kbd/label chips.
+
+    Approval flow (task #10): blocks for staged writes mount with
+    ``pill="pending"`` + ``pill_kind="warn"`` and an accept bar. Once
+    the user resolves the approval, ``set_status(pill, pill_kind)``
+    re-renders in place so the same on-screen block flips to ``applied``
+    (on approve) or ``rejected`` (on reject / teardown) without stream
+    churn. Accept bar is dropped once the status is terminal.
     """
+
+    _PILL_COLOR = {
+        "ok":   "#86d8ab",
+        "run":  "#94bfff",
+        "warn": "#f0c982",
+        "err":  "#f3afa7",
+    }
 
     def __init__(
         self,
@@ -503,26 +517,35 @@ class ToolBlock(Static):
         accept: list[str] | None = None,
     ) -> None:
         super().__init__()
-        pill_color = {
-            "ok":   "#86d8ab",
-            "run":  "#94bfff",
-            "warn": "#f0c982",
-            "err":  "#f3afa7",
-        }.get(pill_kind, "#8796a7")
-        bar_color = AGENT_STYLE.get(agent, "#3a4552")
+        # Persist constructor args so ``set_status`` can re-render with
+        # updated pill state without rebuilding the whole widget.
+        self._glyph = glyph
+        self._label = label
+        self._meta = meta
+        self._pill = pill
+        self._pill_kind = pill_kind
+        self._body = body
+        self._agent = agent
+        self._accept = list(accept) if accept else None
+        self._rebuild_markup()
+        self.add_class("block")
 
-        head = f"[#c4ced9]{glyph}[/] [bold #ecf1f6]{label}[/]"
-        if meta:
-            head += f"  [#6b7685]{meta}[/]"
-        if pill:
+    def _rebuild_markup(self) -> None:
+        pill_color = self._PILL_COLOR.get(self._pill_kind, "#8796a7")
+        bar_color = AGENT_STYLE.get(self._agent, "#3a4552")
+
+        head = f"[#c4ced9]{self._glyph}[/] [bold #ecf1f6]{self._label}[/]"
+        if self._meta:
+            head += f"  [#6b7685]{self._meta}[/]"
+        if self._pill:
             # Wrap the pill in U+2595 ▕ / U+258F ▏ so it reads like a bracketed
             # capsule without confusing Textual's markup parser with literal
             # square-brackets inside a tag.
-            head += f"  [{pill_color}]▕ {pill} ▏[/]"
+            head += f"  [{pill_color}]▕ {self._pill} ▏[/]"
 
         raw_lines = [head]
-        if body:
-            raw_lines.extend(body.split("\n"))
+        if self._body:
+            raw_lines.extend(self._body.split("\n"))
 
         # Prefix every line with an agent-colored thick vertical bar so
         # the block visually hangs off its speaker's color.
@@ -533,9 +556,9 @@ class ToolBlock(Static):
         # so it reads as "part of the block" visually. Keys are shown
         # as `y/accept` style bindings, colored by positive/negative
         # semantics where recognizable.
-        if accept:
+        if self._accept:
             chips: list[str] = []
-            for entry in accept:
+            for entry in self._accept:
                 key, _, lbl = entry.partition("/")
                 key = key.strip() or entry
                 lbl = (lbl or entry).strip()
@@ -551,7 +574,20 @@ class ToolBlock(Static):
             lines.append(accept_row)
 
         self.update("\n".join(lines))
-        self.add_class("block")
+
+    def set_status(self, pill: str, pill_kind: str = "ok") -> None:
+        """Flip the block's pill + kind and re-render in place.
+
+        Used by the approval flow when ``file_write`` / ``file_write_rejected``
+        arrives for a previously-pending write — the existing block mutates
+        rather than being replaced with a new mounted widget. The accept bar
+        is also dropped on the assumption that any terminal status doesn't
+        need input affordances anymore.
+        """
+        self._pill = pill
+        self._pill_kind = pill_kind
+        self._accept = None
+        self._rebuild_markup()
 
 
 class Milestone(Static):
@@ -752,6 +788,14 @@ class OrbReplTUI(App[None]):
         Binding("ctrl+k", "cancel_run", "Stop", show=True),
         Binding("tab", "focus_input", "Focus", show=False),
         Binding("question_mark", "show_help", "?"),
+        # Approval-flow bindings (task #10). These single letters would
+        # normally collide with typing in the composer — ``check_action``
+        # below disables them whenever ``pending_writes`` is empty so a
+        # user's literal "y"/"n"/"a"/"e" keystroke flows into the TextArea.
+        Binding("y", "approve_pending_write", "Accept", show=False, priority=True),
+        Binding("n", "reject_pending_write", "Reject", show=False, priority=True),
+        Binding("a", "approve_all", "Accept all", show=False, priority=True),
+        Binding("e", "edit_pending_write", "Edit", show=False, priority=True),
     ]
 
     def __init__(
@@ -822,6 +866,21 @@ class OrbReplTUI(App[None]):
         self._rendered_turns: deque[str] = deque(maxlen=2048)
         self._http_session: Any = None
         self._ws_task: asyncio.Task | None = None
+        # Approval flow (task #10). ``pending_writes`` is keyed by the
+        # server-minted ``request_id`` and carries the body we need at
+        # resolve-time (path, agent, content, old_content) plus the
+        # ``ToolBlock`` widget so we can flip its pill in place when the
+        # ``file_write`` / ``file_write_rejected`` follow-up arrives.
+        # ``approve_all`` is a session-scoped latch flipped by the ``a``
+        # key — once set, subsequent pending events auto-POST approve
+        # and skip rendering the warn block. ``approval_required`` is
+        # hydrated from the init event's top-level flag (see
+        # ``web/state.py::to_init_event``) — when false, the daemon
+        # never broadcasts pending events, but we keep the flag around
+        # for the keybinding guard.
+        self.pending_writes: dict[str, dict] = {}
+        self.approve_all: bool = False
+        self.approval_required: bool = False
 
     # ── Widget tree ───────────────────────────────────────────────────────
 
@@ -916,6 +975,10 @@ class OrbReplTUI(App[None]):
             self._handle_run_complete(data)
         elif t == "file_write":
             self._handle_file_write(data)
+        elif t == "file_write_pending":
+            self._handle_file_write_pending(data)
+        elif t == "file_write_rejected":
+            self._handle_file_write_rejected(data)
         elif t == "plan_step":
             self._handle_plan_step(data)
         elif t == "stats":
@@ -1028,10 +1091,24 @@ class OrbReplTUI(App[None]):
         self.file_changes_truncated_count = int(
             data.get("file_changes_truncated_count") or 0
         )
+        # Approval flow: init carries ``approval_required`` at the top
+        # level (see ``DashboardState.to_init_event``). The flag drives
+        # whether the daemon will broadcast ``file_write_pending`` events
+        # at all; we mirror it so the TUI can surface the mode + guard
+        # its y/a/e/n keybindings accordingly.
+        self.approval_required = bool(data.get("approval_required"))
         # Only clear when the user actually switched sessions. During a
         # run the server re-broadcasts init with fresh agent/model state;
         # wiping on every re-broadcast erases the user's in-flight
         # message + every intermediate event emitted so far.
+        if session_changed:
+            # Approval state is session-scoped: drop pending entries
+            # (their block widgets will also be unmounted with the old
+            # stream) and un-latch ``approve_all`` so the new session
+            # starts from a clean gate. A user who ran ``a`` in session
+            # A must not silently auto-approve writes in session B.
+            self.pending_writes.clear()
+            self.approve_all = False
         stream = self.query_one(ReplStream)
         if session_changed or not stream.children:
             stream.remove_children()
@@ -1145,11 +1222,26 @@ class OrbReplTUI(App[None]):
             del self.file_changes[oldest_path]
             self.file_changes_truncated_count += 1
         self._refresh_chrome()
-        # Render a tool block inline so the stream shows what was written.
+        # Approval flow: if we previously staged a warn block for this path,
+        # mutate it in place to ``applied`` instead of mounting a second
+        # block. The pending entry was keyed by ``request_id`` at pending-time
+        # so we match by path here.
+        match_req: str | None = None
+        for req_id, entry in self.pending_writes.items():
+            if entry.get("path") == path:
+                match_req = req_id
+                break
+        if match_req is not None:
+            entry = self.pending_writes.pop(match_req)
+            block = entry.get("block")
+            if block is not None:
+                try:
+                    block.set_status("applied", "ok")
+                except Exception:  # noqa: BLE001
+                    logger.debug("set_status on resolved block failed", exc_info=True)
+            return
+        # Non-approval path — render as before.
         block_body = f"[#6b7685]wrote {len(new_lines)} lines · {len(new)} bytes[/]"
-        # TODO: wire these keys to real accept/reject actions that hit
-        # the daemon. For now they exist only to surface the v2 design.
-        accept = ["y/accept", "a/accept all", "e/edit", "n/reject"]
         self._emit_block(
             agent,
             glyph="±",
@@ -1158,8 +1250,66 @@ class OrbReplTUI(App[None]):
             pill="applied",
             pill_kind="ok",
             body=block_body,
+        )
+
+    def _handle_file_write_pending(self, data: dict) -> None:
+        """A staged write is awaiting user approval.
+
+        Records the pending entry keyed by ``request_id`` + emits a warn
+        block with the accept bar. If ``self.approve_all`` is latched,
+        skip the block and auto-POST ``approve`` — the eventual ``file_write``
+        broadcast will resolve the pending entry and no user-visible
+        warn pill ever flashes.
+        """
+        request_id = str(data.get("request_id") or "")
+        if not request_id:
+            return
+        path = data.get("path") or ""
+        agent = data.get("agent") or ""
+        entry: dict = {
+            "path": path,
+            "agent": agent,
+            "content": data.get("content") or "",
+            "old_content": data.get("old_content") or "",
+            "block": None,
+        }
+        self.pending_writes[request_id] = entry
+        if self.approve_all:
+            self._schedule_approval_post(request_id, "approve")
+            return
+        body = f"[#6b7685]awaiting user · {len((data.get('content') or '').splitlines())} lines staged[/]"
+        accept = ["y/accept", "a/accept all", "e/edit", "n/reject"]
+        block = self._emit_block(
+            agent,
+            glyph="±",
+            label="edit_file",
+            meta=path,
+            pill="pending",
+            pill_kind="warn",
+            body=body,
             accept=accept,
         )
+        entry["block"] = block
+
+    def _handle_file_write_rejected(self, data: dict) -> None:
+        """User (or teardown) rejected a staged write.
+
+        Locates the corresponding pending block (if any) and flips its pill
+        to ``rejected`` + drops the entry from ``pending_writes``. A reject
+        for an unknown ``request_id`` is a silent no-op — harmless edge
+        case when the block was replaced or the run torn down early.
+        """
+        request_id = str(data.get("request_id") or "")
+        entry = self.pending_writes.pop(request_id, None)
+        if entry is None:
+            logger.debug("file_write_rejected for unknown request_id=%s", request_id)
+            return
+        block = entry.get("block")
+        if block is not None:
+            try:
+                block.set_status("rejected", "err")
+            except Exception:  # noqa: BLE001
+                logger.debug("set_status on rejected block failed", exc_info=True)
 
     def _handle_plan_step(self, data: dict) -> None:
         title = data.get("title") or "Planning update"
@@ -1218,24 +1368,30 @@ class OrbReplTUI(App[None]):
         pill_kind: str = "ok",
         body: str = "",
         accept: list[str] | None = None,
-    ) -> None:
+    ) -> ToolBlock:
+        """Mount a header + ToolBlock pair into the stream; return the block.
+
+        The returned ``ToolBlock`` is what the approval flow stores in
+        ``pending_writes[request_id]["block"]`` so it can later be
+        mutated via ``set_status`` when the write resolves.
+        """
         stream = self.query_one(ReplStream)
         color = AGENT_STYLE.get(agent, "#8796a7")
         head = Static(f"[{color}]◆[/] [bold {color}]{AGENT_LABELS.get(agent, agent)}[/]  [#6b7685]{_fmt_timestamp(self.elapsed)}[/]", classes="turn")
         stream.mount(head)
-        stream.mount(
-            ToolBlock(
-                glyph=glyph,
-                label=label,
-                meta=meta,
-                pill=pill,
-                pill_kind=pill_kind,
-                body=body,
-                agent=agent,
-                accept=accept,
-            )
+        block = ToolBlock(
+            glyph=glyph,
+            label=label,
+            meta=meta,
+            pill=pill,
+            pill_kind=pill_kind,
+            body=body,
+            agent=agent,
+            accept=accept,
         )
+        stream.mount(block)
         stream.scroll_end(animate=False)
+        return block
 
     def _emit_milestone(self, step: int, label: str) -> None:
         """Emit a silent step separator into the stream."""
@@ -1470,6 +1626,177 @@ class OrbReplTUI(App[None]):
             "system",
             "[#8796a7]keys:[/] ^↵ send · esc cancel input · ^k stop · ^r resume · ^c quit · ? help",
         )
+
+    # ── Approval actions (task #10) ──────────────────────────────────────
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Disable the y/n/a/e bindings when there's nothing to approve.
+
+        Returning ``False`` marks the action as unavailable, which — combined
+        with Textual's priority-binding semantics — means the keystroke
+        falls through to the focused widget (i.e. the composer TextArea
+        receives the literal character). Returning ``None`` / ``True`` keeps
+        the binding active.
+        """
+        if action in {
+            "approve_pending_write", "reject_pending_write",
+            "approve_all", "edit_pending_write",
+        }:
+            return bool(self.pending_writes)
+        return True
+
+    def _oldest_pending(self) -> tuple[str, dict] | None:
+        """Return the (request_id, entry) pair for the oldest pending write.
+
+        Uses dict insertion order (Python 3.7+) to pick "oldest" — the
+        first entry added by ``_handle_file_write_pending`` since the
+        current session / last resolution.
+        """
+        it = iter(self.pending_writes.items())
+        try:
+            return next(it)
+        except StopIteration:
+            return None
+
+    async def action_approve_pending_write(self) -> None:
+        pair = self._oldest_pending()
+        if pair is None:
+            return
+        req_id, _ = pair
+        await self._post_approval(req_id, "approve")
+
+    async def action_reject_pending_write(self) -> None:
+        pair = self._oldest_pending()
+        if pair is None:
+            return
+        req_id, _ = pair
+        await self._post_approval(req_id, "reject")
+
+    async def action_approve_all(self) -> None:
+        """Latch auto-approve for the session + approve the oldest pending."""
+        self.approve_all = True
+        self._emit_whisper(
+            "system",
+            "[#f0c982]auto-approving subsequent writes for this session[/]",
+        )
+        pair = self._oldest_pending()
+        if pair is not None:
+            req_id, _ = pair
+            await self._post_approval(req_id, "approve")
+
+    async def action_edit_pending_write(self) -> None:
+        """Open ``$EDITOR`` on the pending content, then approve with the edit.
+
+        Writes the current pending content to a tmp file, invokes the
+        user's configured editor (``$EDITOR`` → fallback ``vi``), reads
+        back whatever the user saved, and POSTs ``approve`` with
+        ``edited_content``. A non-zero editor exit leaves the pending
+        entry untouched so the user can retry (or hit y/n instead).
+        """
+        import os
+        import subprocess
+        import tempfile
+        pair = self._oldest_pending()
+        if pair is None:
+            return
+        req_id, entry = pair
+        path_hint = entry.get("path") or "staged"
+        # Suffix the tmp file with the original basename so the editor
+        # can pick the right syntax mode.
+        suffix = "_" + path_hint.replace("/", "_")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=suffix, delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write(entry.get("content") or "")
+            tmp_path = fh.name
+        editor = os.environ.get("EDITOR") or "vi"
+        try:
+            # Textual hijacks the terminal — use ``App.suspend`` to hand
+            # the TTY to ``$EDITOR`` cleanly. In test envs + headless
+            # drivers ``suspend`` raises ``SuspendNotSupported``; fall
+            # back to running the editor without suspending so unit
+            # tests that monkeypatch ``subprocess.run`` still work.
+            try:
+                with self.suspend():
+                    result = subprocess.run([editor, tmp_path])
+            except Exception as exc:  # noqa: BLE001
+                if exc.__class__.__name__ != "SuspendNotSupported":
+                    logger.debug("suspend() raised unexpectedly: %s", exc)
+                result = subprocess.run([editor, tmp_path])
+            if getattr(result, "returncode", 1) != 0:
+                self._emit_whisper(
+                    "system", "[#f3afa7]editor exited non-zero — keeping the write pending[/]",
+                )
+                return
+            try:
+                with open(tmp_path, "r", encoding="utf-8") as rfh:
+                    edited = rfh.read()
+            except OSError as exc:
+                self._emit_whisper("system", f"[#f3afa7]could not read edited file: {exc}[/]")
+                return
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        await self._post_approval(req_id, "approve", edited_content=edited)
+
+    async def _post_approval(
+        self,
+        request_id: str,
+        action: str,
+        *,
+        edited_content: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """POST ``/api/v1/sessions/{sid}/approvals/{request_id}`` and log result."""
+        if not request_id or not self.session_id:
+            return
+        url = self._session_url(f"/approvals/{request_id}")
+        body: dict[str, Any] = {"action": action}
+        if edited_content is not None:
+            body["edited_content"] = edited_content
+        if reason is not None:
+            body["reason"] = reason
+        try:
+            async with self._http_session.post(url, json=body) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    self._emit_whisper(
+                        "system",
+                        f"[#f3afa7]approval {action} failed ({resp.status}): {text[:200]}[/]",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_whisper("system", f"[#f3afa7]approval {action} send failed: {exc}[/]")
+
+    def _schedule_approval_post(
+        self,
+        request_id: str,
+        action: str,
+        *,
+        edited_content: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Fire-and-forget scheduler for ``_post_approval``.
+
+        Exists so ``_handle_file_write_pending`` (synchronous event
+        dispatch) can trigger an auto-approve POST when ``approve_all``
+        is latched without blocking the handler on the HTTP round trip.
+        """
+        try:
+            # ``asyncio.create_task`` uses the currently running loop
+            # (the Textual app's) and raises ``RuntimeError`` when no
+            # loop is running — which happens in unit tests that poke
+            # the handlers synchronously. Catch + log instead of
+            # letting the exception escape the sync event dispatcher.
+            asyncio.create_task(
+                self._post_approval(
+                    request_id, action,
+                    edited_content=edited_content, reason=reason,
+                )
+            )
+        except RuntimeError:
+            logger.debug("no running loop for approval POST; deferring", exc_info=True)
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

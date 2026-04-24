@@ -500,12 +500,11 @@ async def test_file_write_emits_block_with_border_and_accept_bar():
 
         # Agent-colored thick vertical bar prefixes each rendered line.
         assert "┃" in rendered
-        # Accept bar footer — all four options must be present.
-        assert "accept" in rendered
-        assert "accept all" in rendered
-        assert "edit" in rendered
-        assert "reject" in rendered
-        # Block header is preserved.
+        # ``file_write`` w/o a prior pending entry lands as an already-
+        # resolved edit: the accept bar is reserved for ``file_write_pending``
+        # blocks (task #10). We still render the block with its header,
+        # meta, and the ``applied`` pill.
+        assert "applied" in rendered
         assert "edit_file" in rendered
         assert "src/app.py" in rendered
 
@@ -748,3 +747,306 @@ async def test_slash_topology_works_when_unlocked():
         await pilot.pause()
 
         assert app._topology == "solo"
+
+
+# ── Approval flow: y / n / a / e key bindings ────────────────────────
+#
+# These tests drive the full Textual app and verify the action_*_pending_write
+# coroutines POST to the right /approvals endpoint, respect pending-write
+# ordering, and don't fire when there's nothing pending.
+
+
+def _seed_pending(app, request_id: str, path: str, agent: str = "coder", content: str = "body"):
+    """Inject a ``file_write_pending`` event through the dispatcher."""
+    app._handle_server_event({
+        "type": "file_write_pending",
+        "agent": agent,
+        "request_id": request_id,
+        "path": path,
+        "content": content,
+        "old_content": "",
+    })
+
+
+@pytest.mark.asyncio
+async def test_y_key_approves_oldest_pending_write():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        _seed_pending(app, "req-1", "src/a.py")
+        _seed_pending(app, "req-2", "src/b.py")
+        await pilot.pause()
+
+        # Take focus off the TextArea so 'y' can fire the action.
+        # (The action itself should also guard against this via check_action,
+        # but the simpler path for the positive test is to focus the root.)
+        app.screen.focus_next()  # move focus away from the TextArea
+        await pilot.pause()
+
+        await app.action_approve_pending_write()
+        await pilot.pause()
+
+        approve_posts = [p for p in fake.posts if "/approvals/req-1" in p["url"]]
+        assert len(approve_posts) == 1, f"expected POST to /approvals/req-1, got {fake.posts}"
+        post = approve_posts[0]
+        assert post["url"].endswith("/sessions/sid-1/approvals/req-1")
+        assert post["json"]["action"] == "approve"
+        # Oldest-first: req-2 untouched.
+        assert not any("/approvals/req-2" in p["url"] for p in fake.posts)
+
+
+@pytest.mark.asyncio
+async def test_n_key_rejects_oldest_pending_write():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        _seed_pending(app, "req-1", "src/a.py")
+        await pilot.pause()
+
+        await app.action_reject_pending_write()
+        await pilot.pause()
+
+        reject_posts = [p for p in fake.posts if "/approvals/req-1" in p["url"]]
+        assert len(reject_posts) == 1
+        assert reject_posts[0]["json"]["action"] == "reject"
+
+
+@pytest.mark.asyncio
+async def test_a_key_sets_approve_all_and_approves_oldest():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        _seed_pending(app, "req-1", "src/a.py")
+        await pilot.pause()
+
+        assert app.approve_all is False
+        await app.action_approve_all()
+        await pilot.pause()
+        assert app.approve_all is True
+
+        # The oldest pending was approved by that same call.
+        approve_posts = [
+            p for p in fake.posts
+            if "/approvals/req-1" in p["url"] and p["json"]["action"] == "approve"
+        ]
+        assert len(approve_posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_key_auto_approves_subsequent_pending_writes():
+    """After 'a', future ``file_write_pending`` events must auto-POST
+    approve without emitting a warn block."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        app.approve_all = True
+        # New pending comes in — should auto-approve without a warn block.
+        _seed_pending(app, "req-latched", "src/c.py")
+        await pilot.pause()
+        # Give the task loop a chance to run.
+        await asyncio.sleep(0.05)
+        await pilot.pause()
+
+        latched = [p for p in fake.posts if "/approvals/req-latched" in p["url"]]
+        assert len(latched) == 1, f"expected auto-approve POST, got {fake.posts}"
+        assert latched[0]["json"]["action"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_e_key_edits_then_approves_with_edited_content(monkeypatch, tmp_path):
+    """Pressing 'e' opens $EDITOR on the pending content, reads the edited
+    file back, and approves with ``edited_content`` in the POST body."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        _seed_pending(app, "req-edit", "src/a.py", content="original body\n")
+        await pilot.pause()
+
+        edited_body = "edited body\nnew line\n"
+
+        # Fake subprocess.run that overwrites the tmp file with edited_body
+        # (simulating the user saving & quitting in $EDITOR).
+        import subprocess as _sp
+
+        class _OK:
+            returncode = 0
+
+        def fake_run(cmd, *a, **kw):
+            # cmd is [editor, tmppath]
+            tmpfile = cmd[-1]
+            with open(tmpfile, "w", encoding="utf-8") as fh:
+                fh.write(edited_body)
+            return _OK()
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        monkeypatch.setenv("EDITOR", "vi")
+
+        await app.action_edit_pending_write()
+        await pilot.pause()
+
+        approve_posts = [p for p in fake.posts if "/approvals/req-edit" in p["url"]]
+        assert len(approve_posts) == 1
+        body = approve_posts[0]["json"]
+        assert body["action"] == "approve"
+        assert body["edited_content"] == edited_body
+
+
+@pytest.mark.asyncio
+async def test_e_key_does_not_post_when_editor_exits_nonzero(monkeypatch):
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        _seed_pending(app, "req-edit", "src/a.py", content="body\n")
+        await pilot.pause()
+
+        import subprocess as _sp
+
+        class _Err:
+            returncode = 1
+
+        monkeypatch.setattr(_sp, "run", lambda *a, **kw: _Err())
+        monkeypatch.setenv("EDITOR", "vi")
+
+        await app.action_edit_pending_write()
+        await pilot.pause()
+
+        approve_posts = [p for p in fake.posts if "/approvals/" in p["url"]]
+        assert approve_posts == [], (
+            f"editor exit!=0 must skip POST, got {fake.posts}"
+        )
+        # Pending entry is retained so the user can try again.
+        assert "req-edit" in app.pending_writes
+
+
+@pytest.mark.asyncio
+async def test_y_key_is_noop_when_no_pending_writes():
+    """The action is safe to fire when nothing is pending (no POST)."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = fake = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-1"
+        await pilot.pause()
+        await app.action_approve_pending_write()
+        await pilot.pause()
+        assert not any("/approvals/" in p["url"] for p in fake.posts)
+
+
+@pytest.mark.asyncio
+async def test_file_write_pending_emits_warn_pill_block():
+    """End-to-end: pending event → ToolBlock with pill=pending, pill_kind=warn,
+    rendered accept bar with all four options."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+        _seed_pending(app, "req-1", "src/a.py")
+        await pilot.pause()
+
+        blocks = list(app.query(ToolBlock))
+        assert blocks, "pending event must mount a ToolBlock"
+        rendered = _render_plain(blocks[-1])
+        # The pill text 'pending' appears somewhere in the rendered block.
+        assert "pending" in rendered
+        assert "src/a.py" in rendered
+        # Full accept bar.
+        for needle in ("accept", "accept all", "edit", "reject"):
+            assert needle in rendered
+
+
+@pytest.mark.asyncio
+async def test_file_write_approved_flips_pill_to_applied():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+        _seed_pending(app, "req-1", "src/a.py", content="c\n")
+        await pilot.pause()
+
+        app._handle_server_event({
+            "type": "file_write",
+            "agent": "coder",
+            "path": "src/a.py",
+            "old_content": "",
+            "content": "c\n",
+        })
+        await pilot.pause()
+
+        blocks = list(app.query(ToolBlock))
+        rendered = _render_plain(blocks[-1])
+        assert "applied" in rendered
+        assert "pending" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_file_write_rejected_flips_pill_to_rejected():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+        _seed_pending(app, "req-1", "src/a.py")
+        await pilot.pause()
+
+        app._handle_server_event({
+            "type": "file_write_rejected",
+            "agent": "coder",
+            "request_id": "req-1",
+            "path": "src/a.py",
+            "reason": "user rejected",
+        })
+        await pilot.pause()
+
+        blocks = list(app.query(ToolBlock))
+        rendered = _render_plain(blocks[-1])
+        assert "rejected" in rendered
+        # Pending entry cleared from state.
+        assert "req-1" not in app.pending_writes

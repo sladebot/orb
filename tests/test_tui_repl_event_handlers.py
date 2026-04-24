@@ -36,10 +36,21 @@ def _make_tui():
     t.workdir = ""
     t.topology = "auto"
     t.live_text = ""
+    # Approval-flow state (task #10). Seeded on every TUI instance whether
+    # approvals are enabled or not so the handlers can poke at these
+    # attributes unconditionally.
+    t.pending_writes = {}
+    t.approve_all = False
+    t.approval_required = False
     # Stub out widget-touching sinks with no-ops.
     t._emit_turn = MagicMock()
     t._emit_block = MagicMock()
+    t._emit_whisper = MagicMock()
     t._refresh_chrome = MagicMock()
+    # HTTP + async helpers stubbed for approval auto-approve paths.
+    t._http_session = MagicMock()
+    t._session_url = MagicMock(side_effect=lambda suffix: f"http://test/api/v1{suffix}")
+    t._post_approval = MagicMock()
     # ``_on_init`` calls ``self.query_one(ReplStream).remove_children()``
     # and then ``self._render_message`` which calls ``_emit_turn``.
     # Patch ``query_one`` to return a dummy stream-like object.
@@ -402,3 +413,226 @@ def test_context_rail_renders_topology_and_scope_sections_for_triad():
     assert "app.py" in text
     assert "tests/test_app.py" in text
     assert "add with @" in text
+
+
+# ── approval flow: init ──────────────────────────────────────────────
+
+
+def test_on_init_parses_approval_required_true():
+    """``approval_required`` on the init payload propagates to TUI state.
+
+    Emitted at the top level (see ``web/state.py::to_init_event``), not
+    inside the ``session`` block.
+    """
+    tui = _make_tui()
+    tui._handle_init({
+        "type": "init",
+        "session_id": "s1",
+        "workdir": "/w",
+        "agents": [],
+        "approval_required": True,
+    })
+    assert tui.approval_required is True
+
+
+def test_on_init_session_switch_clears_pending_writes_and_approve_all():
+    """Approval state is session-scoped; switching sessions drops it."""
+    tui = _make_tui()
+    tui.session_id = "old-sid"
+    tui.pending_writes["req-1"] = {"path": "a.py", "agent": "coder"}
+    tui.approve_all = True
+    tui._handle_init({
+        "type": "init",
+        "session_id": "new-sid",  # different → session_changed = True
+        "workdir": "/w",
+        "agents": [],
+    })
+    assert tui.pending_writes == {}
+    assert tui.approve_all is False
+
+
+def test_on_init_same_session_rebroadcast_preserves_pending_writes():
+    """Server re-broadcasts ``init`` on every run's planning phase. That
+    must NOT clobber in-flight approvals — they belong to the session."""
+    tui = _make_tui()
+    tui.session_id = "sid-1"
+    tui.pending_writes["req-1"] = {"path": "a.py", "agent": "coder"}
+    tui.approve_all = True
+    tui._handle_init({
+        "type": "init",
+        "session_id": "sid-1",  # same session
+        "workdir": "/w",
+        "agents": [],
+    })
+    assert "req-1" in tui.pending_writes
+    assert tui.approve_all is True
+
+
+def test_on_init_approval_required_defaults_false_when_missing():
+    tui = _make_tui()
+    tui._handle_init({
+        "type": "init",
+        "session_id": "s1",
+        "workdir": "/w",
+        "agents": [],
+    })
+    assert tui.approval_required is False
+
+
+# ── approval flow: file_write_pending ───────────────────────────────
+
+
+def test_on_file_write_pending_records_entry_and_emits_warn_block():
+    tui = _make_tui()
+    tui._handle_file_write_pending({
+        "type": "file_write_pending",
+        "agent": "coder",
+        "request_id": "req-1",
+        "path": "src/new.py",
+        "content": "print('x')\n",
+        "old_content": "",
+    })
+    # Entry recorded keyed by request_id carrying the payload bits we'll
+    # need at action-time (path, agent, content, old_content).
+    assert "req-1" in tui.pending_writes
+    entry = tui.pending_writes["req-1"]
+    assert entry["path"] == "src/new.py"
+    assert entry["agent"] == "coder"
+    assert entry["content"] == "print('x')\n"
+    # A warn-pill block with the accept bar was emitted.
+    tui._emit_block.assert_called_once()
+    _, kwargs = tui._emit_block.call_args
+    assert kwargs.get("pill") == "pending"
+    assert kwargs.get("pill_kind") == "warn"
+    accept = kwargs.get("accept") or []
+    assert any("accept" in a for a in accept)
+    assert any("reject" in a for a in accept)
+
+
+def test_on_file_write_pending_auto_approves_when_approve_all_set():
+    """With ``approve_all`` latched the handler must schedule an approve
+    POST and skip emitting a warn block (no pill-flash for the user)."""
+    tui = _make_tui()
+    tui.approve_all = True
+    tui.session_id = "sid-1"
+    scheduled: list = []
+    tui._schedule_approval_post = MagicMock(
+        side_effect=lambda request_id, action, **kw: scheduled.append((request_id, action, kw))
+    )
+
+    tui._handle_file_write_pending({
+        "agent": "coder",
+        "request_id": "req-auto",
+        "path": "src/a.py",
+        "content": "body",
+    })
+    # Pending entry still recorded so the eventual file_write (approved)
+    # can locate it for pill → applied.
+    assert "req-auto" in tui.pending_writes
+    tui._emit_block.assert_not_called()
+    assert scheduled == [("req-auto", "approve", {})]
+
+
+# ── approval flow: file_write_rejected ──────────────────────────────
+
+
+def test_on_file_write_rejected_updates_block_and_drops_pending():
+    tui = _make_tui()
+    fake_block = MagicMock()
+    tui.pending_writes["req-1"] = {
+        "path": "src/x.py", "agent": "coder",
+        "content": "c", "old_content": "",
+        "block": fake_block,
+    }
+    tui._handle_file_write_rejected({
+        "agent": "coder",
+        "request_id": "req-1",
+        "path": "src/x.py",
+        "reason": "user rejected",
+    })
+    assert "req-1" not in tui.pending_writes
+    fake_block.set_status.assert_called_once_with("rejected", "err")
+
+
+def test_on_file_write_rejected_unknown_request_is_noop():
+    """Rejection for a request_id we don't know (edge case: block already
+    replaced by a file_write, or teardown-initiated reject after state wipe)
+    must not crash."""
+    tui = _make_tui()
+    # No entry for req-ghost.
+    tui._handle_file_write_rejected({
+        "agent": "coder",
+        "request_id": "req-ghost",
+        "path": "src/x.py",
+        "reason": "timeout",
+    })
+    # Silent — just ensure no exception.
+    assert tui.pending_writes == {}
+
+
+# ── approval flow: file_write resolves pending ──────────────────────
+
+
+def test_on_file_write_updates_pending_block_to_applied():
+    tui = _make_tui()
+    fake_block = MagicMock()
+    tui.pending_writes["req-1"] = {
+        "path": "src/x.py", "agent": "coder",
+        "content": "c", "old_content": "",
+        "block": fake_block,
+    }
+    tui._handle_file_write({
+        "type": "file_write",
+        "agent": "coder",
+        "path": "src/x.py",
+        "old_content": "",
+        "content": "c",
+    })
+    # Pending entry cleared, block flipped to applied.
+    assert "req-1" not in tui.pending_writes
+    fake_block.set_status.assert_called_once_with("applied", "ok")
+    # file_changes still records the write (rail display parity).
+    assert "src/x.py" in tui.file_changes
+    # _emit_block NOT called a second time — the existing block was updated in place.
+    tui._emit_block.assert_not_called()
+
+
+def test_on_file_write_without_pending_renders_as_before():
+    """Non-approval flow (approval_required=False or hook-disabled agent)
+    must keep emitting a fresh ToolBlock like before."""
+    tui = _make_tui()
+    tui._handle_file_write({
+        "type": "file_write",
+        "agent": "coder",
+        "path": "src/untracked.py",
+        "old_content": "",
+        "content": "body",
+    })
+    assert "src/untracked.py" in tui.file_changes
+    tui._emit_block.assert_called_once()
+
+
+# ── ToolBlock post-hoc updates ───────────────────────────────────────
+
+
+def test_tool_block_set_status_updates_rendered_pill():
+    from orb.cli.tui_repl import ToolBlock
+
+    block = ToolBlock(
+        glyph="±",
+        label="edit_file",
+        meta="src/x.py",
+        pill="pending",
+        pill_kind="warn",
+        body="",
+        agent="coder",
+        accept=["y/accept", "n/reject"],
+    )
+    # Capture render calls so we can inspect the rewritten content.
+    captured: list[str] = []
+    block.update = lambda text: captured.append(text)
+    block.set_status("applied", "ok")
+    assert captured, "set_status must trigger a re-render via update()"
+    new_markup = captured[-1]
+    assert "applied" in new_markup
+    assert "pending" not in new_markup

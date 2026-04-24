@@ -148,6 +148,17 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             agent_models=agent_models,
             model_pin=model_pin,
         )
+        # Optional per-session pre-write approval gate. Coerce explicitly
+        # so the string "true" doesn't silently flip the flag — only a
+        # real bool counts. We set it post-create rather than threading
+        # it through ``manager.create_session`` so the manager API stays
+        # focused on topology/model wiring.
+        approval_required = body.get("approval_required")
+        if approval_required is True:
+            runtime._conversation_session.approval_required = True  # noqa: SLF001
+            runtime._sync_session_state()  # noqa: SLF001
+            runtime._persist_session()  # noqa: SLF001
+            runtime._persist_dashboard_snapshot()  # noqa: SLF001
         return ok("SESSION_CREATED", _session_summary(runtime), status=201)
 
     async def list_sessions(request: web.Request) -> web.Response:
@@ -287,6 +298,61 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
                 code = "NO_RUN_IN_FLIGHT"
             return err(code, payload.get("error") or "Inject failed", status=status_code or 400)
         return ok("MESSAGE_INJECTED", {"session_id": session_id, "target": target})
+
+    # ---- Approvals ----
+
+    async def resolve_approval(request: web.Request) -> web.Response:
+        """Approve or reject a staged file write.
+
+        Body: ``{"action": "approve"|"reject", "edited_content"?: str,
+        "reason"?: str}``. ``edited_content`` lets the user commit a
+        modified version of the proposed content; empty string is a
+        deliberate edit ("wipe the file"). On reject the runtime
+        broadcasts ``file_write_rejected`` so the dashboard/TUI can drop
+        the staged row from their UI without polling.
+        """
+        session_id = request.match_info["session_id"]
+        request_id = request.match_info["request_id"]
+        runtime = _get_session(manager, session_id)
+        if runtime is None:
+            return err("SESSION_NOT_FOUND", f"No session with id {session_id!r}", status=404)
+        try:
+            body = await request.json()
+        except (JSONDecodeError, UnicodeDecodeError, ValueError):
+            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        if not isinstance(body, dict):
+            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        action = (body.get("action") or "").strip()
+        if action not in ("approve", "reject"):
+            return err(
+                "INVALID_ACTION",
+                "action must be 'approve' or 'reject'",
+                status=400,
+            )
+        raw_edited = body.get("edited_content")
+        edited_content: str | None
+        if raw_edited is None:
+            edited_content = None
+        else:
+            edited_content = str(raw_edited)
+        raw_reason = body.get("reason")
+        reason = str(raw_reason) if raw_reason is not None else None
+
+        status_code, payload = await runtime.resolve_approval(
+            request_id, action, edited_content, reason
+        )
+        if status_code == 404:
+            return err("APPROVAL_UNKNOWN", str(payload.get("error") or "unknown approval"), status=404)
+        if status_code == 400:
+            return err(
+                str(payload.get("code") or "INVALID_ACTION"),
+                str(payload.get("error") or "invalid action"),
+                status=400,
+            )
+        return ok(
+            "APPROVAL_RESOLVED",
+            payload.get("data") or {"request_id": request_id, "action": action},
+        )
 
     # ---- State ----
 
@@ -783,6 +849,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
     app.router.add_post("/api/v1/sessions/{session_id}/runs", start_run)
     app.router.add_post("/api/v1/sessions/{session_id}/runs/stop", stop_run)
     app.router.add_post("/api/v1/sessions/{session_id}/runs/inject", inject_message)
+    app.router.add_post(
+        "/api/v1/sessions/{session_id}/approvals/{request_id}",
+        resolve_approval,
+    )
     app.router.add_get("/api/v1/sessions/{session_id}/state", session_state)
     app.router.add_get("/api/v1/ws", ws_handler)
 
