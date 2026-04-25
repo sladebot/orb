@@ -58,6 +58,12 @@ with per-hunk author chips.
 
 ![Orb TUI](docs/orb-tui.svg)
 
+The TUI streams LLM responses **token-by-token** into the active turn — no waiting for the full message at completion. Multi-agent topologies (e.g. `triad`) keep each agent's stream in its own lane.
+
+**Pre-write approval.** By default, agent file writes pause for explicit user approval — the TUI prompts with `y` (accept), `a` (accept all), `e` (edit), `n` (reject). Pass `--no-review` to `orb tui` to let agents write directly, or set `approval_required: false` when creating a session via the API.
+
+**Slash commands.** Type `/help` in the TUI for the full list. The picker on launch covers topology selection (no `--topology` flag needed); `/topology` mid-session is honored when the topology isn't already locked.
+
 ## What Orb Does
 
 - Runs coding tasks through explicit topologies (`solo`, `triad`, `dual-review`, `hierarchy`) — picks the smallest one the task actually needs

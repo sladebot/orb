@@ -528,14 +528,28 @@ class Turn(Static):
     def _schedule_flush(self) -> None:
         """Arm a one-shot timer to coalesce streaming renders. If a
         timer is already pending, do nothing — the current handle
-        will catch any chunks that arrived since."""
+        will catch any chunks that arrived since.
+
+        Guarded so we only call ``set_timer`` when the widget is
+        actually mounted in a running app. Textual's ``set_timer``
+        builds the underlying ``Timer._run_timer`` coroutine BEFORE
+        raising on a missing loop, which leaves a ``RuntimeWarning:
+        coroutine ... was never awaited`` even when our except-branch
+        catches the failure. The mounted-state pre-check skips that
+        construction entirely; the synchronous fallback runs the
+        rebuild immediately. The ``try/except`` stays as belt-and-
+        suspenders for any edge case where ``is_mounted`` reports
+        True but the loop has gone away.
+        """
         if self._pending_flush is not None:
             return
+        if not getattr(self, "is_mounted", False):
+            # No app context — render synchronously and return. There's
+            # nothing to debounce against; subsequent appends in this
+            # context will hit the same path.
+            self._flush_streamed_render()
+            return
         try:
-            # ``set_timer`` returns a Timer handle on Textual >= 0.x;
-            # the call may fail if the widget isn't mounted yet (e.g.
-            # during the constructor's first render). Fall back to a
-            # synchronous flush in that case so we don't drop the chunk.
             self._pending_flush = self.set_timer(
                 self._STREAM_FLUSH_MS / 1000.0, self._flush_streamed_render
             )
