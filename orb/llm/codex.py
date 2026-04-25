@@ -77,7 +77,12 @@ class OpenAICodexProvider(LLMClient):
 
     # ── core completion ───────────────────────────────────────────────────────
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(
+        self,
+        request: CompletionRequest,
+        *,
+        on_chunk=None,
+    ) -> CompletionResponse:
         config = request.model_config
         model  = config.model_id if config else _DEFAULT_MODEL
 
@@ -130,7 +135,16 @@ class OpenAICodexProvider(LLMClient):
                 etype = event.get("type", "")
 
                 if etype == "response.output_text.delta":
-                    content_text += event.get("delta", "")
+                    delta = event.get("delta", "")
+                    if delta:
+                        # Hand the delta to the agent's streaming hook
+                        # BEFORE accumulating, so the UI paints tokens as
+                        # they arrive. No-op when ``on_chunk is None``
+                        # (session opted out of streaming, or caller
+                        # invoked us legacy-style).
+                        if on_chunk is not None:
+                            await on_chunk(delta)
+                        content_text += delta
 
                 elif etype == "response.output_item.added":
                     item = event.get("item", {})

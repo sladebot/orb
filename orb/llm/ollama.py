@@ -39,7 +39,12 @@ class OllamaProvider(LLMClient):
         self._keep_alive = str(keep_alive).strip() if keep_alive is not None else None
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(
+        self,
+        request: CompletionRequest,
+        *,
+        on_chunk=None,  # noqa: ARG002 — accepted for uniform call site; Ollama path doesn't stream.
+    ) -> CompletionResponse:
         config = request.model_config
         messages = to_openai_messages(
             request.messages,

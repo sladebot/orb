@@ -77,7 +77,12 @@ class AnthropicProvider(LLMClient):
         else:
             self._client = anthropic.AsyncAnthropic(api_key=token)
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(
+        self,
+        request: CompletionRequest,
+        *,
+        on_chunk=None,
+    ) -> CompletionResponse:
         config = request.model_config
         model_id = config.model_id if config else DEFAULT_MODEL
         resolved_model = ANTHROPIC_MODEL_ALIASES.get(model_id, model_id)
@@ -91,26 +96,50 @@ class AnthropicProvider(LLMClient):
         if request.tools:
             kwargs["tools"] = request.tools
 
-        response = await self._client.messages.create(**kwargs)
+        # Non-streaming path — preserve exact legacy shape.
+        if on_chunk is None:
+            response = await self._client.messages.create(**kwargs)
+            return _assemble_response(response)
 
-        content_text = ""
-        tool_calls: list[ToolCall] = []
-        for block in response.content:
-            if block.type == "text":
-                content_text += block.text
-            elif block.type == "tool_use":
-                tool_calls.append(ToolCall(id=block.id, name=block.name, input=block.input))
-
-        return CompletionResponse(
-            content=content_text,
-            tool_calls=tool_calls,
-            model=response.model,
-            stop_reason=response.stop_reason,
-            usage={
-                "input":  response.usage.input_tokens,
-                "output": response.usage.output_tokens,
-            },
-        )
+        # Streaming path — ``messages.stream`` yields text deltas as
+        # they arrive; we hand them to ``on_chunk`` before doing anything
+        # else so the TUI/dashboard sees tokens live. Tool-call blocks
+        # are resolved once the stream finishes via
+        # ``get_final_message()``; the resulting assembly is identical
+        # to the non-streaming return shape.
+        async with self._client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    await on_chunk(text)
+            final_message = await stream.get_final_message()
+        return _assemble_response(final_message)
 
     async def close(self) -> None:
         await self._client.close()
+
+
+def _assemble_response(response) -> CompletionResponse:
+    """Collapse an Anthropic Message into our CompletionResponse shape.
+
+    Shared by the streaming and non-streaming paths so the two branches
+    can't drift. Tool-use blocks resolve identically in both modes
+    (streaming returns them via ``get_final_message()`` after the
+    content stream closes).
+    """
+    content_text = ""
+    tool_calls: list[ToolCall] = []
+    for block in response.content:
+        if block.type == "text":
+            content_text += block.text
+        elif block.type == "tool_use":
+            tool_calls.append(ToolCall(id=block.id, name=block.name, input=block.input))
+    return CompletionResponse(
+        content=content_text,
+        tool_calls=tool_calls,
+        model=response.model,
+        stop_reason=response.stop_reason,
+        usage={
+            "input":  response.usage.input_tokens,
+            "output": response.usage.output_tokens,
+        },
+    )

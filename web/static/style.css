@@ -1989,6 +1989,45 @@ body.is-resizing-panels {
     background: linear-gradient(180deg, rgba(205, 189, 255, 0.95), rgba(172, 199, 255, 0.22));
 }
 
+/* Streaming bubble (task #14, parity with TUI's pending turn).
+   Active while ``message_delta`` events are arriving for a chain_id;
+   removed when the terminal ``message`` event finalizes. The blinking
+   caret reads as "still streaming" without the heavy scaffolding of
+   the thinking-indicator. */
+.msg-entry.pending {
+    border-color: rgba(172, 199, 255, 0.28);
+    animation: orb-bubble-pulse 1.6s ease-in-out infinite;
+}
+
+.msg-entry.pending::before {
+    background: linear-gradient(180deg, rgba(172, 199, 255, 0.95), rgba(172, 199, 255, 0.18));
+    animation: orb-bubble-rail 1.6s ease-in-out infinite;
+}
+
+.msg-entry.pending .msg-preview::after,
+.msg-entry.pending .msg-full-content::after {
+    content: "▍";
+    display: inline-block;
+    margin-left: 2px;
+    color: rgba(172, 199, 255, 0.85);
+    animation: orb-caret-blink 1s steps(2, end) infinite;
+}
+
+@keyframes orb-bubble-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(172, 199, 255, 0.0); }
+    50%      { box-shadow: 0 0 0 1px rgba(172, 199, 255, 0.18); }
+}
+
+@keyframes orb-bubble-rail {
+    0%, 100% { opacity: 0.65; }
+    50%      { opacity: 1.0; }
+}
+
+@keyframes orb-caret-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.15; }
+}
+
 .msg-header {
     display: flex;
     align-items: center;

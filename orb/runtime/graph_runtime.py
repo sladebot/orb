@@ -1430,6 +1430,12 @@ class GraphRuntime:
         self.state.approval_required = bool(
             getattr(self._conversation_session, "approval_required", False)
         )
+        # Mirror the streaming toggle so ``state.to_init_event()``
+        # surfaces it at the top level — TUI + dashboard key their
+        # active-turn rendering off this single bool.
+        self.state.streaming_enabled = bool(
+            getattr(self._conversation_session, "streaming_enabled", True)
+        )
 
     @staticmethod
     def _sanitize_carryover(messages: list[dict]) -> list[dict]:
@@ -2724,6 +2730,24 @@ class GraphRuntime:
             agent._on_activity = on_agent_activity
             agent._on_heartbeat = on_agent_heartbeat
             agent._shared_transcript = self._run_transcript
+
+        # Token-streaming hook. Only wire it when the session opted in
+        # (default: ``streaming_enabled=True``). The agent skips
+        # providing ``on_chunk`` to the provider when the hook is
+        # unset, which gives back-compat sessions the legacy one-shot
+        # ``message`` event path without any broadcast overhead.
+        #
+        # Shared contract with stream-tui/#13 and stream-dashboard/#14:
+        # bridge emits ``{"type":"message_delta", "from","chain_id",
+        # "delta","index"}`` — see ``DashboardBridge.on_message_delta``.
+        if getattr(self._conversation_session, "streaming_enabled", True):
+            def _make_delta_cb(aid: str):
+                async def cb(chain_id: str, delta: str, index: int) -> None:
+                    await bridge.on_message_delta(chain_id, aid, delta, index)
+                return cb
+
+            for aid, agent in orchestrator.agents.items():
+                agent._on_message_delta = _make_delta_cb(aid)
 
         def _make_file_write_cb(aid: str):
             def cb(_, path: str, content: str, old_content: str = "") -> None:

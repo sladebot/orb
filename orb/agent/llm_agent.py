@@ -100,6 +100,20 @@ class LLMAgent(AgentNode):
         self._on_write_request: Optional[
             Callable[[str, str, str, str], Awaitable[tuple[bool, str]]]
         ] = None
+        # Per-token streaming hook. When set by the runtime (only on
+        # sessions with ``streaming_enabled=True``), the agent builds an
+        # ``on_chunk`` callable that feeds text deltas into this hook
+        # with the incoming message's ``chain_id`` + a monotonic
+        # per-turn ``index``. Staying unset means the agent omits
+        # ``on_chunk`` entirely when calling the provider — the
+        # non-streaming back-compat path.
+        #
+        # Signature: ``(chain_id, delta, index) -> Awaitable[None]``.
+        # See ``web/bridge.py::on_message_delta`` + the shared contract
+        # with stream-tui/#13 and stream-dashboard/#14.
+        self._on_message_delta: Optional[
+            Callable[[str, str, int], Awaitable[None]]
+        ] = None
         self._tier_override = tier_override
         self._system_prompt: str = ""
         self._tools: list[dict] = []
@@ -281,13 +295,46 @@ class LLMAgent(AgentNode):
 
         MAX_SAME_MODEL_RETRIES = 3
 
+        # Per-turn streaming index. Increments across every LLM call
+        # within this ``process()`` invocation — all share the incoming
+        # ``msg.chain_id``, so receivers see a single monotonic stream
+        # keyed by that chain_id (matches the final ``message`` event's
+        # chain_id). Only meaningful when ``_on_message_delta`` is set;
+        # the agent skips passing ``on_chunk`` otherwise.
+        delta_index = 0
+        delta_hook = self._on_message_delta
+        stream_chain_id = msg.chain_id
+
+        async def _on_chunk(delta: str) -> None:
+            # The contract forbids emitting empty deltas; drop them
+            # before the hook so receivers don't need a guard.
+            nonlocal delta_index
+            if not delta:
+                return
+            await delta_hook(stream_chain_id, delta, delta_index)
+            delta_index += 1
+
+        # Pass ``on_chunk`` only when the runtime attached the delta
+        # hook. Non-streaming sessions (and all non-streaming providers)
+        # keep the legacy zero-kwarg call shape.
+        provider_on_chunk = _on_chunk if delta_hook is not None else None
+
         while True:
             await self._emit(f"Calling {_display_model_name(model_config.model_id)}…")
             response = None
             last_exc: Exception | None = None
             for attempt in range(1, MAX_SAME_MODEL_RETRIES + 1):
                 try:
-                    response = await provider.complete(request)
+                    # Only pass ``on_chunk`` when the session opted into
+                    # streaming. Legacy mock providers / tests whose
+                    # ``complete`` signature predates the kwarg stay
+                    # compatible as long as this hook is unset.
+                    if provider_on_chunk is not None:
+                        response = await provider.complete(
+                            request, on_chunk=provider_on_chunk,
+                        )
+                    else:
+                        response = await provider.complete(request)
                     break
                 except Exception as exc:
                     last_exc = exc

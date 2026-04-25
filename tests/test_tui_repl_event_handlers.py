@@ -42,6 +42,11 @@ def _make_tui():
     t.pending_writes = {}
     t.approve_all = False
     t.approval_required = False
+    # Streaming state (task #13). Keyed by chain_id; each value is the
+    # in-progress Turn widget receiving deltas. Final ``message`` event
+    # for a chain pops the entry and finalizes the Turn body.
+    t._streaming_turns = {}
+    t.streaming_enabled = False
     # Stub out widget-touching sinks with no-ops.
     t._emit_turn = MagicMock()
     t._emit_block = MagicMock()
@@ -613,6 +618,209 @@ def test_on_file_write_without_pending_renders_as_before():
 
 
 # ── ToolBlock post-hoc updates ───────────────────────────────────────
+
+
+# ── Streaming: Turn mutability + message_delta dispatch (task #13) ──
+
+
+def test_turn_append_mutates_body_and_re_renders():
+    """``Turn.append(delta)`` extends the body in-place and reruns the
+    markup builder so the on-screen widget reflects the new content
+    without remounting. This is the foundation of token streaming."""
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "", model="sonnet")
+    captured: list[str] = []
+    # Replace ``update`` so we can observe re-renders.
+    turn.update = lambda text: captured.append(text)
+    turn.append("Hello, ")
+    turn.append("world!")
+    assert turn.body == "Hello, world!"
+    assert captured, "append must call update() so the widget redraws"
+    # Final render contains the latest body verbatim somewhere in the
+    # markup (it's wrapped in style tags; we just check the substring).
+    assert "Hello, world!" in captured[-1]
+
+
+def test_turn_set_body_replaces_content_and_re_renders():
+    """The final ``message`` event closes the stream by replacing the
+    Turn body wholesale (e.g. when WS dropped some deltas and we want
+    the canonical full content)."""
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "partial", model="sonnet")
+    captured: list[str] = []
+    turn.update = lambda text: captured.append(text)
+    turn.set_body("the full canonical body", model="sonnet-4.6")
+    assert turn.body == "the full canonical body"
+    assert turn.model == "sonnet-4.6"
+    assert "the full canonical body" in captured[-1]
+
+
+def test_handle_message_delta_mounts_new_turn_when_chain_id_unseen():
+    """First delta for a (chain_id, from) pair mounts a fresh Turn into
+    the stream and stores it under ``_streaming_turns[(chain_id, from)]``.
+    The key is a tuple — two different agents on the same chain_id are
+    independent streams (per the #12 contract: monotonic per agent)."""
+    tui = _make_tui()
+    fake_stream = MagicMock()
+    tui.query_one = MagicMock(return_value=fake_stream)
+    tui._handle_message_delta({
+        "type": "message_delta",
+        "from": "coder",
+        "chain_id": "chain-1",
+        "delta": "Hel",
+        "index": 0,
+    })
+    # A turn was mounted into the stream.
+    fake_stream.mount.assert_called_once()
+    mounted = fake_stream.mount.call_args[0][0]
+    # The mounted widget is the one we tracked under the tuple key.
+    assert tui._streaming_turns.get(("chain-1", "coder")) is mounted
+    # Body is the first delta (append happened after mount).
+    assert mounted.body == "Hel"
+
+
+def test_handle_message_delta_appends_to_existing_turn():
+    """Subsequent deltas for the same (chain_id, from) append onto the
+    existing Turn instead of mounting a new one."""
+    from orb.cli.tui_repl import Turn
+
+    tui = _make_tui()
+    existing = Turn("coder", 0.0, "Hel", model="")
+    # Capture re-renders so we can verify ``append`` ran without
+    # touching real Textual update plumbing.
+    existing.update = MagicMock()
+    tui._streaming_turns[("chain-1", "coder")] = existing
+    fake_stream = MagicMock()
+    tui.query_one = MagicMock(return_value=fake_stream)
+
+    tui._handle_message_delta({
+        "type": "message_delta",
+        "from": "coder",
+        "chain_id": "chain-1",
+        "delta": "lo, world",
+        "index": 1,
+    })
+
+    # No new Turn mounted — the existing one was reused.
+    fake_stream.mount.assert_not_called()
+    assert existing.body == "Hello, world"
+    existing.update.assert_called()  # at least one re-render fired
+
+
+def test_handle_message_delta_keys_per_agent_so_two_agents_get_separate_turns():
+    """#12 contract: monotonic ``index`` is per-agent-per-chain. Two
+    agents on the same ``chain_id`` each emit their own 0..N sequence
+    and must render into independent Turns. If we keyed by ``chain_id``
+    alone, agent B's deltas would collapse onto agent A's Turn."""
+    tui = _make_tui()
+    fake_stream = MagicMock()
+    tui.query_one = MagicMock(return_value=fake_stream)
+
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "coder",
+        "chain_id": "shared", "delta": "A1", "index": 0,
+    })
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "reviewer",
+        "chain_id": "shared", "delta": "B1", "index": 0,
+    })
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "coder",
+        "chain_id": "shared", "delta": "A2", "index": 1,
+    })
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "reviewer",
+        "chain_id": "shared", "delta": "B2", "index": 1,
+    })
+
+    # Two separate Turns mounted, one per (chain_id, from).
+    assert fake_stream.mount.call_count == 2
+    coder_turn = tui._streaming_turns[("shared", "coder")]
+    reviewer_turn = tui._streaming_turns[("shared", "reviewer")]
+    assert coder_turn is not reviewer_turn
+    assert coder_turn.body == "A1A2"
+    assert reviewer_turn.body == "B1B2"
+
+
+def test_handle_message_delta_ignores_missing_chain_id_or_delta():
+    """A malformed delta event (missing chain_id or empty delta) is a
+    no-op. Defensive — protects against bus replay edge cases."""
+    tui = _make_tui()
+    fake_stream = MagicMock()
+    tui.query_one = MagicMock(return_value=fake_stream)
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "coder", "delta": "x", "index": 0,
+    })
+    tui._handle_message_delta({
+        "type": "message_delta", "from": "coder", "chain_id": "c", "delta": "", "index": 0,
+    })
+    fake_stream.mount.assert_not_called()
+    assert tui._streaming_turns == {}
+
+
+def test_handle_message_finalizes_streaming_turn_when_chain_id_matches():
+    """The terminal ``message`` event closes the stream — it finds the
+    matching streaming Turn (keyed by ``(chain_id, from)``), pops it
+    from ``_streaming_turns``, and leaves the accumulated streamed
+    body in place. It must NOT call ``set_body`` to overwrite — the
+    final ``message.content`` is the ``send_message`` tool arg, not
+    the streamed assistant text (the bridge truncates it to 500 chars
+    too) — and must NOT call ``_emit_turn`` which would mount a
+    duplicate Turn."""
+    from orb.cli.tui_repl import Turn
+
+    tui = _make_tui()
+    turn = Turn("coder", 0.0, "Hel", model="")
+    turn.update = MagicMock()
+    turn.set_body = MagicMock()
+    tui._streaming_turns[("chain-1", "coder")] = turn
+
+    tui._handle_message({
+        "type": "message",
+        "from": "coder",
+        "content": "Hello, world!",
+        "model": "sonnet",
+        "chain_id": "chain-1",
+    })
+
+    # Streamed body preserved — no set_body call.
+    turn.set_body.assert_not_called()
+    # Streaming entry was popped.
+    assert ("chain-1", "coder") not in tui._streaming_turns
+    # Non-streaming render path (which mounts a new Turn) was bypassed.
+    tui._emit_turn.assert_not_called()
+    # Counters still tick.
+    assert tui.message_count == 1
+
+
+def test_handle_message_falls_back_to_emit_when_no_streaming_turn():
+    """Providers that don't stream emit only a final ``message`` — the
+    handler must keep the original ``_emit_turn`` path so those
+    responses still render."""
+    tui = _make_tui()
+    tui._handle_message({
+        "type": "message",
+        "from": "coder",
+        "content": "no stream here",
+        "model": "haiku",
+    })
+    tui._emit_turn.assert_called_once()
+    assert tui.message_count == 1
+
+
+def test_handle_init_records_streaming_enabled_flag():
+    """``init.streaming_enabled`` is hydrated onto the TUI so callers
+    can read whether this session streams. Purely informational."""
+    tui = _make_tui()
+    tui._handle_init({
+        "type": "init",
+        "session_id": "s",
+        "streaming_enabled": True,
+        "agents": [],
+    })
+    assert tui.streaming_enabled is True
 
 
 def test_tool_block_set_status_updates_rendered_pill():

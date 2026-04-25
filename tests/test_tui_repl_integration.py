@@ -1086,3 +1086,99 @@ async def test_file_write_rejected_flips_pill_to_rejected():
         assert "rejected" in rendered
         # Pending entry cleared from state.
         assert "req-1" not in app.pending_writes
+
+
+# ── Test: streaming flow (task #13) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_message_delta_streams_into_one_turn_then_finalizes():
+    """Drive a token-by-token stream — three deltas + a terminal
+    ``message`` — through a real mounted app. Exactly one Turn must
+    be mounted for that chain_id, its body must accumulate the
+    deltas, and the final ``message`` must replace the body with the
+    canonical full content rather than mounting a second Turn."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        stream = app.query_one(ReplStream)
+        turns_before = len(list(stream.query(Turn)))
+
+        for i, chunk in enumerate(["Hel", "lo, ", "world"]):
+            app._handle_server_event({
+                "type": "message_delta",
+                "from": "coder",
+                "chain_id": "chain-A",
+                "delta": chunk,
+                "index": i,
+            })
+            await pilot.pause()
+
+        # Exactly one new Turn was mounted for this (chain, agent).
+        turns_mid = list(stream.query(Turn))
+        assert len(turns_mid) == turns_before + 1
+        streaming_turn = turns_mid[-1]
+        assert streaming_turn.body == "Hello, world"
+        # Per task #12 contract, _streaming_turns is keyed by (chain_id, from)
+        # so two agents replying on the same chain stay isolated.
+        assert app._streaming_turns.get(("chain-A", "coder")) is streaming_turn
+
+        # Terminal message closes the stream — chain is popped from tracking.
+        # The accumulated streamed body is preserved (we don't overwrite with
+        # data["content"], which is the send_message tool arg, not the
+        # streamed assistant text — they differ semantically).
+        app._handle_server_event({
+            "type": "message",
+            "from": "coder",
+            "chain_id": "chain-A",
+            "content": "Hello, world!",
+            "model": "sonnet",
+        })
+        await pilot.pause()
+
+        turns_after = list(stream.query(Turn))
+        # No second Turn mounted on finalization.
+        assert len(turns_after) == len(turns_mid)
+        # Streamed body preserved — NOT overwritten with the canonical content.
+        assert streaming_turn.body == "Hello, world"
+        assert ("chain-A", "coder") not in app._streaming_turns
+        # Render still works (no MarkupError).
+        _render_plain(streaming_turn)
+
+
+@pytest.mark.asyncio
+async def test_message_without_preceding_deltas_uses_non_streaming_path():
+    """A ``message`` event for a chain we never saw deltas for must
+    fall back to mounting a fresh Turn (the non-streaming path).
+    Providers without stream support hit this branch."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        stream = app.query_one(ReplStream)
+        turns_before = len(list(stream.query(Turn)))
+
+        app._handle_server_event({
+            "type": "message",
+            "from": "coder",
+            "content": "no streaming here",
+            "model": "haiku",
+        })
+        await pilot.pause()
+
+        turns_after = list(stream.query(Turn))
+        assert len(turns_after) == turns_before + 1
+        assert "no streaming here" in _render_plain(turns_after[-1])

@@ -159,6 +159,17 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             runtime._sync_session_state()  # noqa: SLF001
             runtime._persist_session()  # noqa: SLF001
             runtime._persist_dashboard_snapshot()  # noqa: SLF001
+        # Per-session token-streaming toggle. Default is ON (set by
+        # ``ConversationSession`` itself), so we only touch the session
+        # when the caller explicitly sent a literal ``False`` — strings
+        # like ``"false"``/``0``/``None`` must NOT flip the flag. Same
+        # strict check shape as ``approval_required`` above, inverted.
+        streaming_enabled = body.get("streaming_enabled")
+        if streaming_enabled is False:
+            runtime._conversation_session.streaming_enabled = False  # noqa: SLF001
+            runtime._sync_session_state()  # noqa: SLF001
+            runtime._persist_session()  # noqa: SLF001
+            runtime._persist_dashboard_snapshot()  # noqa: SLF001
         return ok("SESSION_CREATED", _session_summary(runtime), status=201)
 
     async def list_sessions(request: web.Request) -> web.Response:
