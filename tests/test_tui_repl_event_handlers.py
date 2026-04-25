@@ -46,6 +46,7 @@ def _make_tui():
     # in-progress Turn widget receiving deltas. Final ``message`` event
     # for a chain pops the entry and finalizes the Turn body.
     t._streaming_turns = {}
+    t._finalized_streams = {}
     t.streaming_enabled = False
     # Stub out widget-touching sinks with no-ops.
     t._emit_turn = MagicMock()
@@ -793,6 +794,78 @@ def test_handle_message_finalizes_streaming_turn_when_chain_id_matches():
     tui._emit_turn.assert_not_called()
     # Counters still tick.
     assert tui.message_count == 1
+
+
+def test_late_delta_after_finalize_is_dropped():
+    """If a delta arrives AFTER the terminal ``message`` for the same
+    (chain_id, from), the handler must ignore it instead of mounting a
+    fresh Turn or appending to a popped reference. Catches the
+    out-of-order / replay scenario flagged in the post-streaming review.
+    """
+    from orb.cli.tui_repl import Turn
+
+    tui = _make_tui()
+    fake_stream = MagicMock()
+    tui.query_one = MagicMock(return_value=fake_stream)
+
+    # Stream a delta, finalize, then send a late delta.
+    tui._handle_message_delta({
+        "type": "message_delta",
+        "from": "coder",
+        "chain_id": "chain-late",
+        "delta": "first",
+        "index": 0,
+    })
+    assert ("chain-late", "coder") in tui._streaming_turns
+    tui._handle_message({
+        "type": "message",
+        "from": "coder",
+        "chain_id": "chain-late",
+        "content": "first done",
+    })
+    assert ("chain-late", "coder") not in tui._streaming_turns
+    assert "coder" in tui._finalized_streams.get("chain-late", set())
+
+    # Reset the mount counter so the next assertion is unambiguous.
+    fake_stream.mount.reset_mock()
+
+    # Late delta — should be dropped silently, NO new Turn mounted.
+    tui._handle_message_delta({
+        "type": "message_delta",
+        "from": "coder",
+        "chain_id": "chain-late",
+        "delta": "late",
+        "index": 1,
+    })
+    fake_stream.mount.assert_not_called()
+    assert ("chain-late", "coder") not in tui._streaming_turns
+
+
+def test_run_complete_clears_streaming_bookkeeping():
+    """``run_complete`` is the natural lifecycle boundary — clear out
+    any orphaned ``_streaming_turns`` (whose terminal message never
+    arrived) and the ``_finalized_streams`` tombstone set so a long
+    session doesn't accumulate dead references / unbounded sets.
+    """
+    tui = _make_tui()
+    tui._emit_turn = MagicMock()
+    tui._refresh_chrome = MagicMock()
+    tui._exit_after_run = False  # control the post-cleanup branch
+    tui._live_started = None
+    # Seed both — one un-closed stream, one tombstoned.
+    fake_turn = MagicMock()
+    tui._streaming_turns[("chain-orphan", "coder")] = fake_turn
+    tui._finalized_streams.setdefault("chain-done", set()).add("reviewer")
+
+    tui._handle_run_complete({
+        "type": "run_complete",
+        "agent": "coordinator",
+        "elapsed": 1.0,
+        "result": "all good",
+    })
+
+    assert tui._streaming_turns == {}
+    assert tui._finalized_streams == {}
 
 
 def test_handle_message_falls_back_to_emit_when_no_streaming_turn():

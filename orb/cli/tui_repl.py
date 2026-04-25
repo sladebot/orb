@@ -961,6 +961,12 @@ class OrbReplTUI(App[None]):
         # one Turn would interleave their content; keeping them separate
         # keeps each lane's stream coherent.
         self._streaming_turns: dict[tuple[str, str], "Turn"] = {}
+        # Tombstone for finalized streams. When a terminal ``message``
+        # event closes a stream, we record ``chain_id → {agents}`` so
+        # any straggler delta arriving after the close is dropped on
+        # the floor instead of corrupting an already-finalized Turn.
+        # Cleared on session switch and ``run_complete``.
+        self._finalized_streams: dict[str, set[str]] = {}
         self.streaming_enabled: bool = False
 
     # ── Widget tree ───────────────────────────────────────────────────────
@@ -1203,6 +1209,7 @@ class OrbReplTUI(App[None]):
             # are uuids so collision is unlikely, but the fix is
             # cheap and the leak is real).
             self._streaming_turns.clear()
+            self._finalized_streams.clear()
         stream = self.query_one(ReplStream)
         if session_changed or not stream.children:
             stream.remove_children()
@@ -1231,6 +1238,10 @@ class OrbReplTUI(App[None]):
         key = (chain_id, speaker) if chain_id and speaker else None
         if key is not None and key in self._streaming_turns:
             self._streaming_turns.pop(key)
+            # Tombstone the stream so a late delta (rare, but possible
+            # with reordering / replay) is dropped instead of appended
+            # to the now-finalized Turn.
+            self._finalized_streams.setdefault(chain_id, set()).add(speaker)
             # Body already accumulated via ``_handle_message_delta``; don't
             # overwrite. Optional polish (deferred): if the final content
             # diverges non-trivially, render a "sent: <truncated>" affordance.
@@ -1255,6 +1266,18 @@ class OrbReplTUI(App[None]):
         if not chain_id or not delta or not speaker:
             return
         key = (chain_id, speaker)
+        # Late-delta guard: if the terminal ``message`` event for this
+        # (chain, agent) already finalized and popped the entry, drop the
+        # late chunk on the floor. Without this guard, a stale Turn ref
+        # would receive an out-of-order append and corrupt its body —
+        # rare in practice (WS preserves order) but easy to defend
+        # against and not worth a 1-line absence.
+        finalized = (
+            chain_id in self._finalized_streams
+            and speaker in self._finalized_streams[chain_id]
+        )
+        if finalized:
+            return
         turn = self._streaming_turns.get(key)
         if turn is None:
             # First delta for this (chain, agent) — mount a fresh Turn
@@ -1340,6 +1363,13 @@ class OrbReplTUI(App[None]):
         if locked:
             self.locked_topology = locked
         self._emit_turn(agent, f"[#86d8ab]✓ run complete · {elapsed:.1f}s[/]\n{result[:800]}")
+        # Run is over — drop any streaming bookkeeping that didn't get
+        # closed by a terminal ``message`` event (a crashed agent, a WS
+        # drop right at the end, etc.). Without this, ``_streaming_turns``
+        # leaks Turn references across runs and the tombstone set grows
+        # unbounded over a long session.
+        self._streaming_turns.clear()
+        self._finalized_streams.clear()
         self.live_text = "done"
         self._live_started = None
         self._refresh_chrome()
@@ -1664,6 +1694,7 @@ class OrbReplTUI(App[None]):
             # tries to ``.append`` on a detached widget, silently losing
             # the chunk (or raising if the widget got fully GC'd).
             self._streaming_turns.clear()
+            self._finalized_streams.clear()
             self._emit_turn("system", "[#8796a7]stream cleared[/]")
         elif cmd in {"stop", "cancel"}:
             await self.action_cancel_run()

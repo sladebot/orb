@@ -3476,6 +3476,15 @@ class Dashboard {
         this.graph.setRunState('completed');
         this._updateSessionUrl(data.session_id || '');
 
+        // Drop any streaming bookkeeping that didn't get closed by a
+        // terminal `message` event (a crashed agent, a WS drop right
+        // at the end, etc.). Without this, `_streamingBubbles` leaks
+        // bubble references across runs in a long-lived dashboard tab.
+        // Parity with the TUI's `_handle_run_complete` in tui_repl.py.
+        if (this._streamingBubbles && this._streamingBubbles.size > 0) {
+            this._streamingBubbles.clear();
+        }
+
         // Refresh the session lock if run_complete carries ``locked_topology``
         // (parity with the TUI's handler in ``orb/cli/tui_repl.py``). This is
         // belt-and-braces — the next init broadcast will re-emit the full
