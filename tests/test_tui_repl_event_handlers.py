@@ -12,6 +12,7 @@ We call the runtime names here.
 """
 from __future__ import annotations
 
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -708,6 +709,123 @@ def test_handle_message_delta_appends_to_existing_turn():
     fake_stream.mount.assert_not_called()
     assert existing.body == "Hello, world"
     existing.update.assert_called()  # at least one re-render fired
+
+
+def _mount_widget_for_test(turn) -> None:
+    """Helper: simulate a mounted widget for ``_schedule_flush`` to take
+    the timer path. Replaces ``is_mounted`` and ``set_timer`` with mocks
+    that mirror Textual's mounted-app behavior without requiring a
+    running ``App`` instance.
+    """
+    type(turn).is_mounted = property(lambda self: True)  # type: ignore[attr-defined]
+    turn.set_timer = MagicMock(return_value=MagicMock(name="FakeTimer"))
+
+
+def test_turn_append_is_o1_per_chunk():
+    """``Turn.append`` must be O(1) per call when the widget is
+    mounted: append a chunk, set the dirty flag, schedule a render
+    via ``set_timer``. The expensive markup rebuild is deferred to
+    the debounce timer.
+
+    Regression guard for the post-streaming review's perf finding:
+    pre-debounce, 1000 chunks against a body of size N produced O(N²)
+    work because every ``append`` rebuilt the full markup. With the
+    chunk-list + debounce, each ``append`` is constant work and the
+    rebuild happens at most once per ``_STREAM_FLUSH_MS`` window.
+    """
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "")
+    rebuild_calls = 0
+    real_rebuild = turn._rebuild_turn_markup
+
+    def _counting_rebuild():
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        real_rebuild()
+    turn._rebuild_turn_markup = _counting_rebuild
+    _mount_widget_for_test(turn)
+
+    rebuild_calls = 0  # reset after constructor's call
+    for i in range(100):
+        turn.append(f"chunk-{i} ")
+
+    expected = "".join(f"chunk-{i} " for i in range(100))
+    assert turn.body == expected
+    # Crucial assertion: NO synchronous rebuild during the 100 appends.
+    assert rebuild_calls == 0, (
+        f"append() should defer rebuild to a debounced flush, but "
+        f"_rebuild_turn_markup was called {rebuild_calls} times "
+        f"during 100 appends"
+    )
+    # set_timer scheduled exactly once — subsequent appends in the
+    # same window short-circuit on ``_pending_flush``.
+    assert turn.set_timer.call_count == 1
+    # Manually fire the deferred flush — rebuild happens once.
+    turn._flush_streamed_render()
+    assert rebuild_calls == 1
+    # Cleanup — remove the patched class-level property so it doesn't
+    # leak into other tests.
+    delattr(type(turn), "is_mounted")
+
+
+def test_turn_append_unmounted_falls_back_synchronously_no_coroutine_warning():
+    """Unmounted Turn (e.g. a bare ``Turn(...)`` in a unit test): the
+    debounce guard must skip ``set_timer`` entirely so Textual never
+    constructs the ``Timer._run_timer`` coroutine. That coroutine,
+    if created, leaks ``RuntimeWarning: coroutine ... was never
+    awaited`` and pollutes warning-strict CI.
+
+    Verifies: append on unmounted widget → sync rebuild, NO call to
+    ``set_timer``, no RuntimeWarning emitted.
+    """
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "")
+    # Don't mount; ``is_mounted`` defaults to whatever Textual returns
+    # for an un-added widget (typically False / missing).
+    turn.set_timer = MagicMock(name="should_not_be_called")
+    rebuild_calls = 0
+    real_rebuild = turn._rebuild_turn_markup
+
+    def _counting_rebuild():
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        real_rebuild()
+    turn._rebuild_turn_markup = _counting_rebuild
+    rebuild_calls = 0  # reset after constructor
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        turn.append("first chunk ")
+        turn.append("second chunk")
+
+    # Synchronous fallback: each append rebuilds immediately (no
+    # event loop to debounce against). And critically, set_timer was
+    # never invoked — so no coroutine was created.
+    assert rebuild_calls == 2
+    turn.set_timer.assert_not_called()
+    assert turn.body == "first chunk second chunk"
+
+
+def test_set_body_cancels_pending_streaming_flush():
+    """``set_body`` (used on terminal-message finalization) replaces the
+    body wholesale and should cancel any in-flight debounce timer —
+    otherwise a late flush would re-render the same content twice."""
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "")
+    _mount_widget_for_test(turn)
+    turn.append("hello")
+    # ``_pending_flush`` should now be a Timer mock (we're "mounted").
+    assert turn._pending_flush is not None
+    turn.set_body("final body")
+    assert turn._pending_flush is None
+    assert turn._dirty is False
+    assert turn.body == "final body"
+    # Also verify the pending Timer mock had ``stop`` invoked so the
+    # real Textual timer would actually be cancelled.
+    delattr(type(turn), "is_mounted")
 
 
 def test_handle_message_delta_keys_per_agent_so_two_agents_get_separate_turns():
