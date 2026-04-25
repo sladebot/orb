@@ -1196,6 +1196,13 @@ class OrbReplTUI(App[None]):
             # A must not silently auto-approve writes in session B.
             self.pending_writes.clear()
             self.approve_all = False
+            # Streaming turns hold widget references that we're about
+            # to unmount via stream.remove_children below. Clear the
+            # dict too so a stale (chain_id, from) key from session A
+            # can't accidentally claim deltas in session B (chain_ids
+            # are uuids so collision is unlikely, but the fix is
+            # cheap and the leak is real).
+            self._streaming_turns.clear()
         stream = self.query_one(ReplStream)
         if session_changed or not stream.children:
             stream.remove_children()
@@ -1651,6 +1658,12 @@ class OrbReplTUI(App[None]):
             )
         elif cmd == "clear":
             self.query_one(ReplStream).remove_children()
+            # Streaming turns dict holds widget references that we just
+            # removed from the DOM. Clear it too — otherwise the next
+            # ``message_delta`` for any (chain, agent) still in the dict
+            # tries to ``.append`` on a detached widget, silently losing
+            # the chunk (or raising if the widget got fully GC'd).
+            self._streaming_turns.clear()
             self._emit_turn("system", "[#8796a7]stream cleared[/]")
         elif cmd in {"stop", "cancel"}:
             await self.action_cancel_run()
@@ -1703,12 +1716,20 @@ class OrbReplTUI(App[None]):
 
     async def action_cancel_run(self) -> None:
         if not self.session_id:
+            self._emit_whisper("system", "[#f3afa7]no active session — nothing to stop[/]")
             return
         try:
             async with self._http_session.post(self._session_url("/runs/stop")) as resp:
-                await resp.read()
-        except Exception:  # noqa: BLE001
-            pass
+                body_text = await resp.text()
+                if resp.status >= 400:
+                    self._emit_whisper(
+                        "system",
+                        f"[#f3afa7]/stop failed ({resp.status})[/] {body_text[:160]}",
+                    )
+                    return
+            self._emit_whisper("system", "[#8796a7]stop requested[/]")
+        except Exception as exc:  # noqa: BLE001
+            self._emit_whisper("system", f"[#f3afa7]/stop error:[/] {exc}")
 
     async def action_resume_session(self) -> None:
         """Open the session picker — lists known sessions from the daemon."""
