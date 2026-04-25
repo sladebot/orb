@@ -912,6 +912,116 @@ def _seed_pending(app, request_id: str, path: str, agent: str = "coder", content
 
 
 @pytest.mark.asyncio
+async def test_y_key_routes_to_approval_even_with_composer_focused():
+    """User-reported regression: with the composer focused (the default
+    after submitting a query), pressing ``y`` against an active pending
+    write must POST ``approve`` to ``/approvals/{rid}`` — NOT type "y"
+    into the composer + later inject "y" via Enter, which previously
+    surfaced as "inject failed (400)".
+
+    Root cause: ``ComposerTextArea._on_key`` was overridden to handle
+    Enter, and its fall-through to ``super()._on_key`` let TextArea
+    insert the literal "y" before the app-level priority binding fired.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-y-focus"
+        app.run_state = "running"  # in-flight, so a stray inject would 400 on a real daemon
+        _seed_pending(app, "req-y", "src/edited.py")
+        await pilot.pause()
+
+        # Focus the composer (mirrors real usage: user just sent a
+        # prompt, composer still has focus when the approval arrives).
+        ta = app.query_one("#query-input")
+        ta.focus()
+        await pilot.pause()
+
+        await pilot.press("y")
+        await pilot.pause()
+
+        # Composer must remain empty — "y" did NOT land in the buffer.
+        assert ta.text == "", (
+            f"y key leaked into composer instead of triggering approval; "
+            f"composer text = {ta.text!r}"
+        )
+        # An approval POST must have fired.
+        approve_posts = [p for p in fake.posts if "/approvals/req-y" in p["url"]]
+        assert len(approve_posts) == 1, (
+            f"y press should POST /approvals/req-y; got fake.posts = {fake.posts}"
+        )
+        assert approve_posts[0]["json"]["action"] == "approve"
+        # And NO stray inject — the bug used to show as a /runs/inject POST.
+        inject_posts = [p for p in fake.posts if p["url"].endswith("/runs/inject")]
+        assert inject_posts == [], (
+            f"y key must not trigger an inject; got: {inject_posts}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_n_key_routes_to_reject_with_composer_focused():
+    """Symmetric to the y-with-composer-focused test, for n → reject."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-n-focus"
+        app.run_state = "running"
+        _seed_pending(app, "req-n", "src/rejected.py")
+        await pilot.pause()
+        ta = app.query_one("#query-input")
+        ta.focus()
+        await pilot.pause()
+
+        await pilot.press("n")
+        await pilot.pause()
+
+        assert ta.text == ""
+        reject_posts = [p for p in fake.posts if "/approvals/req-n" in p["url"]]
+        assert len(reject_posts) == 1
+        assert reject_posts[0]["json"]["action"] == "reject"
+        assert not any(p["url"].endswith("/runs/inject") for p in fake.posts)
+
+
+@pytest.mark.asyncio
+async def test_y_with_composer_focused_falls_through_when_no_pending():
+    """No pending writes → y is regular text, lands in composer.
+    Ensures the override only intercepts when an approval prompt is
+    actually active. Otherwise users typing "yes ship it" would lose
+    the leading "y"."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app.session_id = "sid-noop"
+        # No _seed_pending — pending_writes stays empty.
+        await pilot.pause()
+        ta = app.query_one("#query-input")
+        ta.focus()
+        await pilot.pause()
+
+        await pilot.press("y")
+        await pilot.press("e")
+        await pilot.press("s")
+        await pilot.pause()
+
+        # All three characters land in the composer.
+        assert ta.text == "yes", f"expected 'yes', got {ta.text!r}"
+
+
+@pytest.mark.asyncio
 async def test_y_key_approves_oldest_pending_write():
     app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
     async with app.run_test(size=(140, 44)) as pilot:

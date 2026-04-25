@@ -905,7 +905,7 @@ class ResumeSessionScreen(Screen):
 
 
 class ComposerTextArea(TextArea):
-    """TextArea that submits on Enter.
+    """TextArea that submits on Enter and routes approval keys to the app.
 
     Textual's default TextArea binds Enter to insert-newline. Our composer
     follows chat-UI convention: Enter sends the message. Most terminals
@@ -915,16 +915,40 @@ class ComposerTextArea(TextArea):
     different path than key events. Ctrl+Enter is still handled by the
     app-level Binding for muscle memory, which routes to the same action.
 
-    Submit is delegated back to the App via ``action_submit_input``,
-    which already owns the "is this a slash command? is a run in flight?"
-    routing — we don't duplicate that logic here.
+    Approval keys (``y / n / a / e``) need explicit routing here too.
+    Textual's app-level priority bindings normally preempt the focused
+    widget, but a subclass that overrides ``_on_key`` (i.e. us, for the
+    Enter handler above) gets called first for some keys — and falling
+    through to ``super()._on_key`` would let TextArea insert the literal
+    character into the buffer. That bug surfaced as: user sees the
+    approval prompt, types ``y``, the ``y`` lands in the composer,
+    user hits Enter to "confirm", and the composer's Enter-submit fires
+    an *inject* of the text "y" against the running run — yielding the
+    user-visible "inject failed" error. We forward the approval keys
+    here only when ``pending_writes`` is non-empty, mirroring the
+    ``check_action`` guard on the app-level priority bindings.
     """
+
+    _APPROVAL_KEY_TO_ACTION: dict[str, str] = {
+        "y": "action_approve_pending_write",
+        "n": "action_reject_pending_write",
+        "a": "action_approve_all",
+        "e": "action_edit_pending_write",
+    }
 
     async def _on_key(self, event) -> None:  # type: ignore[override]
         if event.key == "enter":
             event.prevent_default()
             event.stop()
             await self.app.action_submit_input()
+            return
+        action_name = self._APPROVAL_KEY_TO_ACTION.get(event.key)
+        if action_name and getattr(self.app, "pending_writes", None):
+            event.prevent_default()
+            event.stop()
+            handler = getattr(self.app, action_name, None)
+            if handler is not None:
+                await handler()
             return
         await super()._on_key(event)
 
