@@ -4,6 +4,15 @@ import time
 from dataclasses import dataclass, field
 
 
+# Maximum number of distinct files tracked in ``DashboardState.file_changes``.
+# Rewrites of the same path replace in place (path-keyed dedup); distinct paths
+# past this cap evict the oldest entry (LRU by last-touched). The counter
+# ``file_changes_truncated_count`` surfaces the lifetime eviction count so
+# clients can show "N older changes hidden". Exposed as a module constant so
+# it can be tuned or monkeypatched in tests.
+MAX_FILE_CHANGES: int = 200
+
+
 @dataclass
 class AgentState:
     node_id: str
@@ -70,6 +79,9 @@ class DashboardState:
     activity_events: list[ActivityRecord] = field(default_factory=list)
     plan_steps: list[PlanStepRecord] = field(default_factory=list)
     file_changes: list[FileChangeRecord] = field(default_factory=list)
+    # Lifetime count of file_changes entries evicted by the ``MAX_FILE_CHANGES``
+    # cap. Clients render this as "N older changes hidden". Reset on ``reset()``.
+    file_changes_truncated_count: int = 0
     message_count: int = 0
     budget: int = 200
     budget_remaining: int = 200
@@ -91,6 +103,21 @@ class DashboardState:
     session_id: str = ""
     session_generation: int = 1
     workdir: str = ""
+    # Session-level topology/model pin. After the first run completes the
+    # runtime pins ``selected_topology`` + per-agent ``agent_models`` onto
+    # the conversation session; follow-up runs reuse them instead of
+    # re-classifying (see ``GraphRuntime._start_run_planning``). Surfacing
+    # the lock here lets both surfaces (TUI + dashboard) render "pinned"
+    # affordances instead of silently accepting no-op ``/topology``
+    # requests. Empty string / empty dict mean "not yet locked".
+    locked_topology: str = ""
+    locked_agent_models: dict[str, str] = field(default_factory=dict)
+    # Per-session "stage every file write for human approval" toggle.
+    # Mirrored from ``ConversationSession.approval_required`` via
+    # ``GraphRuntime._sync_session_state`` so both the init event and the
+    # live state stay in sync. See ``GraphRuntime.request_write_approval``
+    # for the runtime side of the staging pipeline.
+    approval_required: bool = False
 
     def reset(self) -> None:
         """Reset all state back to defaults (called before starting a new run)."""
@@ -100,6 +127,7 @@ class DashboardState:
         self.activity_events = []
         self.plan_steps = []
         self.file_changes = []
+        self.file_changes_truncated_count = 0
         self.message_count = 0
         self.budget_remaining = self.budget
         self.start_time = time.time()
@@ -120,6 +148,45 @@ class DashboardState:
         self.session_id = ""
         self.session_generation = 1
         self.workdir = ""
+        self.locked_topology = ""
+        self.locked_agent_models = {}
+        self.approval_required = False
+
+    def record_file_change(
+        self,
+        *,
+        path: str,
+        agent: str,
+        content: str,
+        old_content: str = "",
+    ) -> None:
+        """Record a file write, path-keyed with LRU eviction at ``MAX_FILE_CHANGES``.
+
+        Rewrites of the same path replace the existing entry in-place (and
+        refresh its LRU position to "most recently touched"). When the cap is
+        exceeded by a brand-new path, the oldest entry is evicted and
+        ``file_changes_truncated_count`` is incremented so clients can surface
+        the fact that older changes were dropped.
+
+        Prefer this helper over appending to ``self.file_changes`` directly so
+        the cap isn't silently bypassed.
+        """
+        if not path:
+            return
+        record = FileChangeRecord(
+            path=path, agent=agent, content=content, old_content=old_content
+        )
+        # Drop any existing entry for this path so we can re-append at the end
+        # (newest position). This gives us path-dedup + LRU-by-last-touched.
+        for idx, existing in enumerate(self.file_changes):
+            if existing.path == path:
+                del self.file_changes[idx]
+                break
+        self.file_changes.append(record)
+        # Evict oldest entries once we exceed the cap.
+        while len(self.file_changes) > MAX_FILE_CHANGES:
+            self.file_changes.pop(0)
+            self.file_changes_truncated_count += 1
 
     def to_init_event(self) -> dict:
         return {
@@ -195,6 +262,7 @@ class DashboardState:
                 }
                 for change in self.file_changes
             ],
+            "file_changes_truncated_count": self.file_changes_truncated_count,
             "stats": {
                 "message_count": self.message_count,
                 "budget_remaining": self.budget_remaining,
@@ -207,4 +275,20 @@ class DashboardState:
             "session_id": self.session_id,
             "session_generation": self.session_generation,
             "workdir": self.workdir,
+            # Session-level lock block. ``GraphRuntime._dashboard_snapshot_payload``
+            # may extend this with runtime-only fields (``id``, ``workdir``,
+            # ``locked_model_pin``) before the payload goes on the wire, but
+            # the ``DashboardState`` contract is the stable source of truth
+            # for ``locked_topology`` + ``locked_agent_models`` so tests and
+            # consumers that read ``to_init_event()`` directly get a
+            # consistent shape.
+            "session": {
+                "locked_topology": self.locked_topology,
+                "locked_agent_models": dict(self.locked_agent_models),
+            },
+            # Top-level so clients (TUI keypress handler, dashboard) can
+            # check ``init.approval_required`` without diving into a
+            # nested block. The TUI flips its "(staged)" affordance off
+            # this single bool.
+            "approval_required": bool(self.approval_required),
         }

@@ -46,6 +46,12 @@ class ConversationSession:
     locked_topology: str = ""
     locked_agent_models: dict[str, str] = field(default_factory=dict)
     locked_model_pin: str = ""
+    # Per-session toggle: when True, every agent file write is staged in
+    # ``GraphRuntime._pending_approvals`` and broadcast as
+    # ``file_write_pending`` until the user approves/rejects via
+    # ``POST /api/v1/sessions/{sid}/approvals/{request_id}``. Default False
+    # so the existing autonomous path stays zero-overhead.
+    approval_required: bool = False
 
     def add_message(self, msg: Message, *, max_turns: int = 500) -> None:
         self._append(ConversationTurn(
@@ -159,6 +165,7 @@ class ConversationSession:
             "locked_topology": self.locked_topology,
             "locked_agent_models": dict(self.locked_agent_models),
             "locked_model_pin": self.locked_model_pin,
+            "approval_required": bool(self.approval_required),
         }
 
     @classmethod
@@ -173,6 +180,7 @@ class ConversationSession:
             locked_topology=str(payload.get("locked_topology") or ""),
             locked_agent_models=dict(payload.get("locked_agent_models") or {}),
             locked_model_pin=str(payload.get("locked_model_pin") or ""),
+            approval_required=bool(payload.get("approval_required") or False),
         )
         session.turns = [
             ConversationTurn(**turn)

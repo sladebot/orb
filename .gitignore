@@ -21,3 +21,6 @@ node_modules/
 # Stray node / npm scratch that crept into working tree
 .npm/
 tmp/
+
+# Design-bundle reference (fetched from claude.ai/design) — not code
+orb-design-system/

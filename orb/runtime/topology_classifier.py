@@ -50,6 +50,91 @@ class TopologyClassifier(ABC):
         raise NotImplementedError
 
 
+def _is_trivial_query(query: str, signals: dict[str, object]) -> bool:
+    """Return True for queries that don't need LLM classification.
+
+    Criteria (all must hold):
+    - word count <= 3
+    - no domain keyword signal fires (code/review/research/risk/breadth)
+    - no ``@agent`` scope mention
+
+    Anything failing any condition falls through to the LLM classifier,
+    so this stays conservative — when in doubt, we call the LLM.
+
+    The motivation is the 3-15s blank window users saw on queries like
+    ``"say hi"``: the classifier ate an LLM round-trip with nothing to
+    actually decide, and then a multi-agent topology (``triad``) tried
+    to run a full consensus cycle on the resulting one-word answer,
+    looping until budget/timeout.
+    """
+    word_count = int(signals.get("word_count") or 0)
+    if word_count == 0 or word_count > 3:
+        return False
+    keyword_signals = (
+        "mentions_code", "mentions_review", "mentions_research",
+        "mentions_risk", "mentions_breadth",
+    )
+    if any(bool(signals.get(s)) for s in keyword_signals):
+        return False
+    if "@" in str(query or ""):
+        # @-scoped queries want a specific agent; respect that and let
+        # the LLM classify so it can route properly.
+        return False
+    return True
+
+
+def _synth_trivial_classification(
+    *,
+    requested_topology: str,
+    topologies: dict[str, TopologySchema],
+    signals: dict[str, object],
+) -> TopologyClassification:
+    """Synthesize a ``TopologyClassification`` for trivial queries,
+    bypassing the LLM.
+
+    Topology choice:
+    - If ``requested_topology`` is an explicit, valid topology → honor it.
+    - Otherwise pick the lowest-complexity topology available
+      (``selection_hints.min_complexity``). ``solo`` is the usual winner.
+
+    ``stop_early_allowed=True`` is the key field — without it,
+    multi-agent topologies don't short-circuit and loop on trivial
+    answers.
+    """
+    pinned = requested_topology != "auto" and requested_topology in topologies
+    if pinned:
+        topology_id = requested_topology
+    else:
+        topology_id = min(
+            topologies.keys(),
+            key=lambda tid: (
+                topologies[tid].selection_hints.min_complexity
+                if topologies[tid].selection_hints
+                else 100
+            ),
+        )
+    topo = topologies[topology_id]
+    return TopologyClassification(
+        topology_id=topology_id,
+        label=topo.label,
+        description=topo.description,
+        task_type="simple_direct",
+        summary="trivial query — short-circuited",
+        complexity=10,
+        reason="Query too short / lacks task signals; skipped LLM classification.",
+        candidates=[],
+        escalation_allowed=False,
+        stop_early_allowed=True,
+        escalation_reason="",
+        stop_early_reason="Trivial query — topology can terminate after first response.",
+        requested_topology=requested_topology,
+        routing_mode="heuristic",
+        signals=dict(signals),
+        classifier_model="",
+        classifier_provider="",
+    )
+
+
 class ProviderBackedTopologyClassifier(TopologyClassifier):
     def __init__(self, planner_model_config_fn, provider_lookup_fn) -> None:
         self._planner_model_config_fn = planner_model_config_fn
@@ -65,6 +150,22 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
     ) -> TopologyClassification:
         from orb.llm.types import CompletionRequest
 
+        routing_signals = self._query_signals(
+            query=query,
+            requested_topology=requested_topology,
+            model_pin=model_pin,
+            topologies=topologies,
+        )
+        # Trivial-query short-circuit: skip the LLM round-trip entirely
+        # when the query is objectively too small to need classification.
+        # See ``_is_trivial_query`` for the exact criteria.
+        if _is_trivial_query(query, routing_signals) and topologies:
+            return _synth_trivial_classification(
+                requested_topology=requested_topology,
+                topologies=topologies,
+                signals=routing_signals,
+            )
+
         planner_model = self._planner_model_config_fn()
         if planner_model is None:
             raise RuntimeError("No providers available for task classification")
@@ -72,12 +173,6 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
         predict_provider = self._provider_lookup_fn(planner_model.provider)
         if predict_provider is None:
             raise RuntimeError(f"Planner provider '{planner_model.provider}' is not available")
-        routing_signals = self._query_signals(
-            query=query,
-            requested_topology=requested_topology,
-            model_pin=model_pin,
-            topologies=topologies,
-        )
 
         prompt = (
             "Classify this software task and choose the best topology. Respond with JSON only.\n\n"

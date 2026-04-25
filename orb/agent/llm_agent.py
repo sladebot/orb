@@ -90,6 +90,16 @@ class LLMAgent(AgentNode):
         self._on_heartbeat = on_heartbeat
         self._trace = trace
         self._on_file_write: Optional[Callable] = None  # (agent_id, path, content) -> None
+        # Optional pre-write approval gate. When set (by the runtime when
+        # the session has ``approval_required=True``), every
+        # ``_handle_write_file`` call awaits this callback before
+        # touching the sandbox; ``approved=False`` skips the disk write
+        # entirely and ``effective_content`` lets the user edit before
+        # commit. Signature: ``(agent_id, path, proposed_content,
+        # old_content) -> Awaitable[tuple[bool, str]]``.
+        self._on_write_request: Optional[
+            Callable[[str, str, str, str], Awaitable[tuple[bool, str]]]
+        ] = None
         self._tier_override = tier_override
         self._system_prompt: str = ""
         self._tools: list[dict] = []
@@ -609,6 +619,26 @@ class LLMAgent(AgentNode):
             old_content = self._sandbox().read_file(path)
         except FileNotFoundError:
             old_content = ""
+        # Pre-write approval gate. Runtime wires this hook only on
+        # opted-in sessions (``ConversationSession.approval_required``).
+        # Skip when the hook is unset so the default path stays a single
+        # sandbox call.
+        if self._on_write_request is not None:
+            approved, effective = await self._on_write_request(
+                self.node_id, path, content, old_content
+            )
+            if not approved:
+                # The Anthropic API requires every ``tool_use`` block to
+                # be paired with a matching ``tool_result`` in history,
+                # otherwise the next turn 400s. Record the rejection so
+                # the LLM sees it and adapts.
+                self._conversation.add_tool_result(
+                    tool_id, "Write rejected by user"
+                )
+                return
+            # User-approved (possibly with edits — empty string is a
+            # valid edit meaning "wipe the file").
+            content = effective
         try:
             result = self._sandbox().write_file(path, content)
         except (PermissionError, OSError, ValueError) as exc:

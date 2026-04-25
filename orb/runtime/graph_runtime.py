@@ -37,6 +37,27 @@ class AgentModelAssignment:
     reason: str = ""
 
 
+@dataclass
+class PendingApproval:
+    """A staged file-write awaiting user approval.
+
+    Created by :meth:`GraphRuntime.request_write_approval` when the
+    session has ``approval_required=True`` set; the agent coroutine
+    awaits ``future``, the user's approve/reject lands via
+    :meth:`GraphRuntime.resolve_approval`, and the runtime resolves
+    the future to ``(approved, effective_content)`` so the agent's
+    ``_handle_write_file`` can either commit or skip the disk write.
+    """
+
+    request_id: str
+    agent_id: str
+    path: str
+    proposed_content: str
+    old_content: str
+    future: asyncio.Future
+    created_at: float
+
+
 class GraphRuntime:
     """Owns orchestration and exposes a subscriber-oriented runtime interface."""
 
@@ -76,6 +97,11 @@ class GraphRuntime:
             self._planner_model_config,
             lambda provider_name: self._providers.get(provider_name),
         )
+        # Pre-write staging map. Populated by ``request_write_approval``,
+        # drained by ``resolve_approval`` (and by ``_reject_all_pending_approvals``
+        # on teardown). Keyed by ``request_id`` so the HTTP endpoint can
+        # do an O(1) lookup.
+        self._pending_approvals: dict[str, PendingApproval] = {}
 
     @staticmethod
     def _available_topologies() -> dict:
@@ -319,6 +345,150 @@ class GraphRuntime:
                 stale.append(callback)
         for callback in stale:
             self._subscribers.discard(callback)
+
+    # ── Pre-write staging / approval pipeline ────────────────────────
+
+    async def request_write_approval(
+        self,
+        agent_id: str,
+        path: str,
+        content: str,
+        old_content: str,
+    ) -> tuple[bool, str]:
+        """Stage an agent's proposed file write and wait for the user.
+
+        Allocates a fresh ``request_id``, broadcasts ``file_write_pending``
+        on the session WebSocket so the TUI/dashboard can render the
+        diff, and awaits the future the matching call to
+        :meth:`resolve_approval` will resolve.
+        Returns ``(approved, effective_content)``.
+
+        Callers (the LLMAgent ``_on_write_request`` hook) treat
+        ``approved=False`` as "skip the sandbox write" and a non-empty
+        ``effective_content`` as "the user edited the proposed content".
+        Empty string is a meaningful edit (user wiped the file).
+        """
+        from uuid import uuid4
+
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+        request_id = uuid4().hex
+        pending = PendingApproval(
+            request_id=request_id,
+            agent_id=agent_id,
+            path=path,
+            proposed_content=content,
+            old_content=old_content or "",
+            future=future,
+            created_at=time.time(),
+        )
+        self._pending_approvals[request_id] = pending
+        await self._broadcast(json.dumps({
+            "type": "file_write_pending",
+            "agent": agent_id,
+            "request_id": request_id,
+            "path": path,
+            "content": content,
+            "old_content": old_content or "",
+        }))
+        try:
+            approved, effective = await future
+        finally:
+            # Always drain — resolve_approval pops on success too, but
+            # if the future was set by ``_reject_all_pending_approvals``
+            # we still want to clean up.
+            self._pending_approvals.pop(request_id, None)
+        return approved, effective
+
+    async def resolve_approval(
+        self,
+        request_id: str,
+        action: str,
+        edited_content: str | None,
+        reason: str | None,
+    ) -> tuple[int, dict]:
+        """Resolve a pending approval. See module-level contract for fields.
+
+        404 if the id is unknown (or already resolved); 400 on an unknown
+        action; otherwise 200 + ``APPROVAL_RESOLVED``. On reject, also
+        broadcasts a ``file_write_rejected`` event so observers can drop
+        the pending row from their UI.
+        """
+        # Pop first so a second concurrent resolve can't double-set the
+        # future and so a user retry deterministically 404s instead of
+        # racing the awaiting coroutine.
+        pending = self._pending_approvals.pop(request_id, None)
+        if pending is None:
+            return 404, {
+                "ok": False,
+                "code": "APPROVAL_UNKNOWN",
+                "error": f"No pending approval with id {request_id!r}",
+            }
+        if action == "approve":
+            # Empty string is a deliberate edit (user wiped the content),
+            # so check ``is not None`` rather than truthiness.
+            effective = (
+                edited_content
+                if edited_content is not None
+                else pending.proposed_content
+            )
+            if not pending.future.done():
+                pending.future.set_result((True, effective))
+        elif action == "reject":
+            if not pending.future.done():
+                pending.future.set_result((False, ""))
+            await self._broadcast(json.dumps({
+                "type": "file_write_rejected",
+                "agent": pending.agent_id,
+                "request_id": request_id,
+                "path": pending.path,
+                "reason": (reason or "rejected by user"),
+            }))
+        else:
+            # Unknown action — put the pending entry back so the user
+            # can retry without losing the staged write.
+            self._pending_approvals[request_id] = pending
+            return 400, {
+                "ok": False,
+                "code": "INVALID_ACTION",
+                "error": f"action must be 'approve' or 'reject', got {action!r}",
+            }
+        return 200, {
+            "ok": True,
+            "code": "APPROVAL_RESOLVED",
+            "data": {"request_id": request_id, "action": action},
+        }
+
+    def _reject_all_pending_approvals(self, reason: str) -> None:
+        """Drain ``_pending_approvals`` on teardown (stop / delete / errored).
+
+        Each waiting agent coroutine wakes up with ``(False, "")`` and
+        returns through the rejected branch in
+        ``LLMAgent._handle_write_file`` — no agent ever sits forever on
+        a staged write across a session reset.
+
+        Synchronous: ``future.set_result`` is sync, and we want this
+        callable from FSM/teardown paths that don't await.
+        """
+        if not self._pending_approvals:
+            return
+        for pending in list(self._pending_approvals.values()):
+            if not pending.future.done():
+                pending.future.set_result((False, ""))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._broadcast(json.dumps({
+                    "type": "file_write_rejected",
+                    "agent": pending.agent_id,
+                    "request_id": pending.request_id,
+                    "path": pending.path,
+                    "reason": reason,
+                })))
+            except RuntimeError:
+                # No loop running — caller is unit-testing the helper
+                # directly. The future is set; that's the contract.
+                pass
+        self._pending_approvals.clear()
 
     def _on_fsm_state_changed(self, from_state: RunState, to_state: RunState, event: str) -> None:
         """FSM listener — schedule a ``run_state_changed`` WebSocket broadcast.
@@ -1244,6 +1414,22 @@ class GraphRuntime:
         self.state.session_turn = self._conversation_session.user_turn_count()
         self.state.session_id = self._conversation_session.session_id
         self.state.session_generation = self._conversation_session.generation
+        # Mirror the session's topology/model lock onto ``DashboardState`` so
+        # ``state.to_init_event()`` can emit it in the ``session`` block. The
+        # runtime-level ``_dashboard_snapshot_payload`` still extends that
+        # block with ``id``/``workdir``/``locked_model_pin``, but the
+        # single-source-of-truth for the lock fields lives on the session
+        # object — this just keeps the DashboardState view in sync.
+        self.state.locked_topology = self._conversation_session.locked_topology or ""
+        self.state.locked_agent_models = dict(
+            self._conversation_session.locked_agent_models or {}
+        )
+        # Mirror the per-session approval gate so ``state.to_init_event()``
+        # surfaces the flag and the TUI/dashboard can render their
+        # "(staged)" affordance without asking the runtime.
+        self.state.approval_required = bool(
+            getattr(self._conversation_session, "approval_required", False)
+        )
 
     @staticmethod
     def _sanitize_carryover(messages: list[dict]) -> list[dict]:
@@ -1380,10 +1566,14 @@ class GraphRuntime:
         if agent is None:
             return 404, {"ok": False, "error": f"Unknown agent: {resolved_target}"}
 
+        # A user-injected message is a TASK directed at an agent — not a
+        # RESPONSE. The broadcast payload below must agree (`msg_type:
+        # "task"`) so the dashboard/TUI render it consistently with the
+        # MessageBus events. See CLAUDE.md parity rule.
         msg = Message(
             from_="user",
             to=resolved_target,
-            type=MessageType.RESPONSE,
+            type=MessageType.TASK,
             payload=resolved_text,
         )
         try:
@@ -1409,10 +1599,13 @@ class GraphRuntime:
             "to": resolved_target,
             "content": resolved_text,
             "model": "",
-            "depth": 0,
+            # Top-level user injection: depth=0 matches the synthetic
+            # Message above and how the MessageBus tags fresh tasks.
+            "depth": msg.depth,
             "elapsed": 0,
             "chain_id": msg.chain_id,
-            "msg_type": "response",
+            # Must agree with ``msg.type`` — parity rule in CLAUDE.md.
+            "msg_type": msg.type.value,
             "context_slice": [],
         }))
         return 200, {"ok": True}
@@ -1532,15 +1725,34 @@ class GraphRuntime:
         self._last_trace.record_stage_start("planning", message="run planning started")
         await self._record_plan_step("planning", "Starting run planning", "Analyzing task, topology, and per-agent model allocation.")
 
-        if manual_models and explicit_topology:
-            # Manual mode — skip the classifier entirely. Synthesize a
-            # predicted payload from the caller-supplied topology + models.
+        if explicit_topology:
+            # Explicit-topology fast path — skip the classifier LLM entirely.
+            # The user already picked the topology (via ``--topology X`` or
+            # the TUI's interactive picker); re-deciding via an LLM buys
+            # nothing and costs a 3–15s blank window per submit.
+            #
+            # Safety on trivial queries ("say hi" on triad): ``_manual_prediction``
+            # now inspects the query itself and sets ``stop_early_allowed=True``
+            # when the query matches the same triviality heuristic the
+            # classifier uses (``_is_trivial_query``). That avoids the
+            # earlier regression where triad looped forever because
+            # ``stop_early_allowed=False`` was hardcoded.
             predicted = self._manual_prediction(
                 topology=normalize_topology_id(topology),
                 agent_models=agent_models,
                 model_pin=model_pin,
+                query=query,
             )
         else:
+            # Broadcast BEFORE awaiting the classifier's LLM call. Without
+            # this, the TUI shows a blank window for the 5–15s the classifier
+            # spends over the network with no event traffic between the
+            # "planning" step and the post-classifier "routing" step.
+            await self._record_plan_step(
+                "classifier",
+                "Classifying task",
+                "Calling router model to pick a topology for this query.",
+            )
             predicted = await self.predict_topology(query, model_pin=model_pin, requested_topology=topology)
         selected_topology = normalize_topology_id(topology) if topology != "auto" else predicted.get("topology", "triad")
         routing_payload = {
@@ -1677,6 +1889,10 @@ class GraphRuntime:
 
     async def stop_run(self) -> dict:
         if self.is_run_in_flight:
+            # Auto-reject every staged write before tearing down so no
+            # agent coroutine sits forever on a future the orchestrator
+            # task is about to be cancelled out from under.
+            self._reject_all_pending_approvals("run stopped")
             logger.info("run stop session=%s", self._conversation_session.session_id)
             if self._last_trace is not None:
                 self._last_trace.record_human_override(
@@ -1716,6 +1932,10 @@ class GraphRuntime:
         # on ``session_reset`` rejects in-flight states; ``self.is_run_in_flight``
         # above already short-circuits those, so this fire is safe.
         self._fsm.maybe_fire("session_reset")
+        # Drop any staged writes left over from a prior run on this
+        # session before we replace the ConversationSession out from
+        # under them.
+        self._reject_all_pending_approvals("session reset")
 
         self.state.reset()
         self._agents = {}
@@ -1803,15 +2023,33 @@ class GraphRuntime:
         topology: str,
         agent_models: dict[str, str],
         model_pin: str,
+        query: str = "",
     ) -> dict:
-        """Synthesize a topology-prediction payload for manual mode.
+        """Synthesize a topology-prediction payload without calling the LLM.
 
-        When the caller drives both the topology and the per-agent model
-        pins, we skip the classifier entirely. This returns the same shape
-        ``predict_topology`` would have produced so the rest of
-        ``start_run`` stays on one code path.
+        Two ways into this path:
+        1. The caller supplies both topology AND per-agent models
+           (``--agent-model role=X`` + ``--topology Y``). Legacy manual mode.
+        2. The caller supplies an explicit topology (via ``--topology`` or
+           the TUI picker) and trusts the runtime to fill in models. Added
+           so the user never eats the classifier LLM's 3–15s round-trip on
+           a topology they already picked.
+
+        ``stop_early_allowed`` is computed from the query's own signals:
+        trivial queries (short, no domain keywords, no ``@agent`` scope)
+        get ``True`` so multi-agent topologies like ``triad`` can short-
+        circuit on "say hi" instead of looping forever waiting for
+        consensus on a one-word answer. Anything meatier gets ``False``
+        so the full review cycle runs. The triviality criteria are the
+        same as the classifier's ``_is_trivial_query`` — kept in sync by
+        importing the helper rather than duplicating the thresholds.
         """
         from orb.topologies import normalize_topology_id
+        from orb.runtime.topology_classifier import (
+            ProviderBackedTopologyClassifier,
+            _is_trivial_query,
+        )
+
         topology_id = normalize_topology_id(topology)
         topo = self._available_topologies().get(topology_id)
         label = topo.label if topo else topology_id
@@ -1825,25 +2063,37 @@ class GraphRuntime:
                 "provider": "",  # resolved later in _validate_agent_model_assignments
                 "model": str(model_id).strip(),
             }
+        signals = ProviderBackedTopologyClassifier._query_signals(
+            query=query,
+            requested_topology=topology_id,
+            model_pin=model_pin,
+            topologies=self._available_topologies(),
+        )
+        stop_early = _is_trivial_query(query, signals)
+        task_type = "simple_direct" if stop_early else "manual"
+        stop_early_reason = (
+            "Trivial query — topology can terminate after first response."
+            if stop_early else "Manual run"
+        )
         return {
             "topology": topology_id,
             "label": label,
             "description": description,
             "options": self._topology_options(topology_id),
-            "task_type": "manual",
-            "reason": "Manual mode — caller supplied topology and per-agent models.",
-            "summary": "Manual topology + model selection",
-            "signals": {"manual": True},
+            "task_type": task_type,
+            "reason": "Explicit topology — classifier bypassed.",
+            "summary": "Explicit topology + heuristic stop-early",
+            "signals": dict(signals),
             "candidates": [],
             "escalation_allowed": False,
-            "stop_early_allowed": False,
+            "stop_early_allowed": stop_early,
             "escalation_reason": "",
-            "stop_early_reason": "Manual run",
+            "stop_early_reason": stop_early_reason,
             "requested_topology": topology_id,
             "routing_mode": "manual",
             "classifier_model": "",
             "classifier_provider": "",
-            "complexity": 50,
+            "complexity": 10 if stop_early else 50,
             "agent_complexity": {},
             "agent_assignments": agent_assignments,
             "agent_models": {role: data.get("model", "") for role, data in agent_assignments.items()},
@@ -2495,6 +2745,14 @@ class GraphRuntime:
         for aid, agent in orchestrator.agents.items():
             agent._on_file_write = _make_file_write_cb(aid)
 
+        # Conditional: only wire the approval gate when the session
+        # opted in. Default sessions skip this entirely so the autonomous
+        # path stays zero-overhead — agents call ``self._sandbox().write_file``
+        # directly without a hook detour.
+        if getattr(self._conversation_session, "approval_required", False):
+            for agent in orchestrator.agents.values():
+                agent._on_write_request = self.request_write_approval
+
         # Wire GraphRAG subgraph stores if the topology defines clusters
         from orb.topologies import get_loader
         from orb.memory.graphrag_config import GraphRAGConfig
@@ -2522,6 +2780,11 @@ class GraphRuntime:
         except asyncio.CancelledError:
             # stop_run() cancelled us; land the FSM in IDLE via stop_finished.
             logger.info("Orchestrator run cancelled session=%s", self._conversation_session.session_id)
+            # Defensive: stop_run already drained the staging map, but a
+            # cancel that originated outside stop_run (e.g. session
+            # delete) might not have. Either way the orchestrator task
+            # is going away — release any agents still awaiting.
+            self._reject_all_pending_approvals("run cancelled")
             self._fsm.maybe_fire("stop_finished")
             result = None
             raise
@@ -2530,6 +2793,7 @@ class GraphRuntime:
             # `orchestrator_errored` is valid from both RUNNING and STOPPING
             # (if a cancel race dropped us into STOPPING before the error
             # surfaced), so maybe_fire covers both cases.
+            self._reject_all_pending_approvals("run errored")
             self._fsm.maybe_fire("orchestrator_errored")
             result = None
         else:
@@ -2597,6 +2861,15 @@ class GraphRuntime:
                     "session_id": self._conversation_session.session_id,
                     "session_generation": self._conversation_session.generation,
                     "routed": self.state.message_count,
+                    # Surface the session's topology/model lock so TUI +
+                    # dashboard clients can refresh their "pinned"
+                    # affordances without waiting for the next ``init``
+                    # broadcast (which fires on the *next* run's planning
+                    # stage, not on completion).
+                    "locked_topology": self._conversation_session.locked_topology or "",
+                    "locked_agent_models": dict(
+                        self._conversation_session.locked_agent_models or {}
+                    ),
                 }))
 
         if self._last_trace is not None:

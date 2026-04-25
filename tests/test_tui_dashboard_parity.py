@@ -13,7 +13,7 @@ import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent
-TUI_PATH = REPO / "orb" / "cli" / "tui.py"
+TUI_PATH = REPO / "orb" / "cli" / "tui_repl.py"
 BRIDGE_PATH = REPO / "web" / "bridge.py"
 RUNTIME_PATH = REPO / "orb" / "runtime" / "graph_runtime.py"
 APP_JS_PATH = REPO / "web" / "static" / "app.js"
@@ -62,6 +62,8 @@ TUI_IGNORED_EVENTS: set[str] = {
     "chat_final",           # rendered via `complete` / `run_complete`
     "chat_assistant_message",  # rendered via `message`
     "catalog_refresh",      # dashboard catalog pane only
+    "agent_stats",          # dashboard agent-card msg/complexity only
+    "agent_heartbeat",      # dashboard agent-card last-heartbeat pill only
 }
 
 
@@ -76,9 +78,35 @@ def test_tui_handles_every_runtime_event_type():
 
     assert not missing, (
         f"TUI is missing handlers for broadcast event types: {sorted(missing)}.\n"
-        "Either add a handler in orb/cli/tui.py::_handle_server_event, or "
+        "Either add a handler in orb/cli/tui_repl.py::_handle_server_event, or "
         "add the type to TUI_IGNORED_EVENTS with a comment explaining why "
         "it is intentionally dashboard-only."
+    )
+
+
+def test_dashboard_handles_file_write_pending_and_rejected():
+    """Parity rule (CLAUDE.md): TUI + dashboard must react to the same
+    runtime events. Task #10 wires both sides up for the approval flow;
+    this test guards that the dashboard dispatcher learned the new types.
+    """
+    src = APP_JS_PATH.read_text()
+    assert "case 'file_write_pending'" in src, (
+        "web/static/app.js has no dispatcher branch for file_write_pending — "
+        "TUI/dashboard parity (CLAUDE.md) broken."
+    )
+    assert "case 'file_write_rejected'" in src, (
+        "web/static/app.js has no dispatcher branch for file_write_rejected."
+    )
+
+
+def test_tui_handles_approval_flow_events():
+    """TUI dispatcher must branch on both new approval event types."""
+    tui_src = TUI_PATH.read_text()
+    assert 't == "file_write_pending"' in tui_src, (
+        "orb/cli/tui_repl.py::_handle_server_event missing branch for file_write_pending."
+    )
+    assert 't == "file_write_rejected"' in tui_src, (
+        "orb/cli/tui_repl.py::_handle_server_event missing branch for file_write_rejected."
     )
 
 

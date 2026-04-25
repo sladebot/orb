@@ -13,6 +13,7 @@ in its registry".
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -129,15 +130,15 @@ class RuntimeManager:
         same file.
         """
         if session_path is None:
-            # Seed a throwaway runtime just to get a fresh uuid, then
-            # discard it — we'll construct the real runtime with the
-            # pre-allocated path so _load_session reads from disk exactly
-            # once against the right file.
+            # Allocate the snapshot path under the daemon's fixed anchor
+            # (~/.orb/daemon/sessions/{sid}/snapshot.json) so it matches
+            # what GraphRuntime._default_session_path returns. Any other
+            # location (especially under the user's workdir) means the
+            # registry points at a file the runtime will never touch.
             from .transcript import ConversationSession as _CS
+            from orb.cli.paths import session_state_dir
             fresh_id = _CS().session_id
-            from pathlib import Path as _P
-            base = _P(workdir) if workdir else _P.cwd()
-            session_path = base / ".orb" / "sessions" / f"{fresh_id}.json"
+            session_path = session_state_dir(fresh_id) / "snapshot.json"
             session_path.parent.mkdir(parents=True, exist_ok=True)
         runtime = GraphRuntime(session_path=session_path, compactor=self._compactor)
         if self._providers:
@@ -291,15 +292,96 @@ class RuntimeManager:
     def get_session(self, session_id: str) -> GraphRuntime | None:
         return self._sessions.get(session_id)
 
+    # Bounded timeout for awaiting a cancelled run task to drain. Large
+    # enough to cover realistic persistence work (trace + snapshot writes)
+    # but small enough that a misbehaving task can't pin an HTTP worker
+    # indefinitely.
+    _DELETE_DRAIN_TIMEOUT = 5.0
+
     def delete_session(self, session_id: str) -> bool:
-        """Tear down a session.
+        """Tear down a session (synchronous best-effort path).
 
         Cancels any in-flight run and removes the session from the registry.
         Returns True if the session existed, False otherwise.
+
+        NOTE: this variant does **not** await the cancelled task. Callers
+        running inside an event loop (e.g. HTTP handlers) should prefer
+        :meth:`adelete_session` so the response isn't sent before the
+        task's persistence cleanup completes — otherwise a follow-up
+        ``GET /sessions`` can race with trace/snapshot writes and, in
+        pathological cases, the trace is written after the registry
+        entry is already gone.
+        """
+        runtime, _ = self._detach_session(session_id)
+        if runtime is None:
+            return False
+        return True
+
+    async def adelete_session(self, session_id: str) -> bool:
+        """Async tear-down: cancel the run task and await its drain.
+
+        Mirrors :meth:`delete_session` but awaits the cancelled task with
+        a bounded timeout so on-disk persistence (run trace + dashboard
+        snapshot written inside the orchestrator's unwind path) is
+        observably complete before returning. If the task swallows
+        :class:`asyncio.CancelledError` we still return after
+        ``_DELETE_DRAIN_TIMEOUT`` so the HTTP worker isn't pinned.
+        """
+        runtime, run_task = self._detach_session(session_id)
+        if runtime is None:
+            return False
+        if run_task is not None and not run_task.done():
+            # We already called cancel() on the run task in
+            # _detach_session; now wait (with a bounded timeout) for it
+            # to actually unwind so the orchestrator's persistence path
+            # (run trace + dashboard snapshot) is observably complete
+            # before we return to the HTTP caller.
+            #
+            # We use ``asyncio.wait`` (not ``wait_for``) because on 3.11+
+            # ``wait_for`` awaits cancellation of the inner task before
+            # raising TimeoutError — if the task swallows CancelledError
+            # (a misbehaving orchestrator, or a bug), ``wait_for`` itself
+            # never returns. ``wait`` returns on its own timeout regardless.
+            _, pending = await asyncio.wait(
+                {run_task}, timeout=self._DELETE_DRAIN_TIMEOUT
+            )
+            if pending:
+                # The task swallowed its cancellation and is still alive.
+                # Don't pin the HTTP worker — log and abandon it. The task
+                # will be garbage-collected when the event loop ends; until
+                # then it's orphaned but harmless (no one is subscribed to
+                # its broadcasts any more, the registry entry is gone).
+                logger.warning(
+                    "session %s run task did not drain within %.1fs; "
+                    "returning anyway to keep HTTP responsive",
+                    session_id,
+                    self._DELETE_DRAIN_TIMEOUT,
+                )
+            elif run_task.cancelled():
+                # Expected: the run task unwound via CancelledError.
+                pass
+            elif run_task.exception() is not None:
+                # The task raised — we still consider the session deleted.
+                logger.warning(
+                    "session %s run task errored during delete drain: %r",
+                    session_id,
+                    run_task.exception(),
+                )
+        return True
+
+    def _detach_session(
+        self, session_id: str
+    ) -> tuple[GraphRuntime | None, "asyncio.Task | None"]:
+        """Pop the session, unsubscribe, cancel the run task, drop registry.
+
+        Shared teardown for both :meth:`delete_session` and
+        :meth:`adelete_session`. Returns ``(runtime, run_task)`` so the
+        async variant can await the cancelled task. The second tuple
+        element is the run task (if any) that was cancelled here.
         """
         runtime = self._sessions.pop(session_id, None)
         if runtime is None:
-            return False
+            return None, None
         # Unhook the forwarder so a future broadcast from a stopping task
         # doesn't try to fan out through a dead session.
         try:
@@ -307,16 +389,18 @@ class RuntimeManager:
         except Exception:  # noqa: BLE001
             pass
         # Fire a stop through the runtime's normal path so the FSM
-        # cleans up. We don't await here — the task will drain on its own.
+        # cleans up.
+        run_task = None
         try:
             runtime._fsm.maybe_fire("stop_requested")  # noqa: SLF001
-            if runtime._run_task is not None:  # noqa: SLF001
-                runtime._run_task.cancel()  # noqa: SLF001
+            run_task = runtime._run_task  # noqa: SLF001
+            if run_task is not None:
+                run_task.cancel()
         except Exception:  # noqa: BLE001
             logger.exception("failed to cancel session %s on delete", session_id)
         self._drop_registry_entry(session_id)
         logger.info("session deleted id=%s", session_id)
-        return True
+        return runtime, run_task
 
     def list_sessions(self) -> list[GraphRuntime]:
         return list(self._sessions.values())

@@ -230,38 +230,23 @@ async def test_async_main_tui_subcommand_defaults_to_local_daemon():
 async def test_async_main_tui_defaults_session_workdir_to_cwd(tmp_path, monkeypatch):
     """Invoking `orb tui` without --workdir must scope the session to the
     shell's current working directory, not leave it blank.
+
+    Session creation is now handled inside ``attach_tui_repl``; main.py
+    just forwards the resolved workdir through the ``attach_tui``
+    kwarg, so we assert on that.
     """
     monkeypatch.chdir(tmp_path)
     args = _base_args(subcommand="tui", query="hello")
 
-    captured: dict = {}
-
-    class _FakeResp:
-        async def json(self):
-            return {"ok": True, "session_id": "sid-1"}
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakeSess:
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *a):
-            return False
-        def post(self, url, json=None):
-            captured["url"] = url
-            captured["json"] = json
-            return _FakeResp()
-
+    attach = AsyncMock()
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._setup_log_file"), \
-         patch("aiohttp.ClientSession", lambda *a, **kw: _FakeSess()), \
-         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock):
+         patch("orb.cli.tui.attach_tui", attach):
         await async_main()
 
-    assert captured.get("url", "").endswith("/api/session/new"), captured
-    assert captured.get("json", {}).get("workdir") == str(tmp_path.resolve()), captured
+    attach.assert_awaited_once()
+    _, kwargs = attach.call_args
+    assert kwargs["workdir"] == str(tmp_path.resolve())
 
 
 @pytest.mark.asyncio
@@ -272,32 +257,15 @@ async def test_async_main_tui_workdir_flag_overrides_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(cwd)
     args = _base_args(subcommand="tui", query="hello", workdir=str(explicit))
 
-    captured: dict = {}
-
-    class _FakeResp:
-        async def json(self):
-            return {"ok": True, "session_id": "sid-2"}
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *a):
-            return False
-
-    class _FakeSess:
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *a):
-            return False
-        def post(self, url, json=None):
-            captured["json"] = json
-            return _FakeResp()
-
+    attach = AsyncMock()
     with patch("orb.cli.main.parse_args", return_value=args), \
          patch("orb.cli.main._setup_log_file"), \
-         patch("aiohttp.ClientSession", lambda *a, **kw: _FakeSess()), \
-         patch("orb.cli.tui.attach_tui", new_callable=AsyncMock):
+         patch("orb.cli.tui.attach_tui", attach):
         await async_main()
 
-    assert captured["json"]["workdir"] == str(explicit.resolve())
+    attach.assert_awaited_once()
+    _, kwargs = attach.call_args
+    assert kwargs["workdir"] == str(explicit.resolve())
 
 
 @pytest.mark.asyncio
@@ -594,15 +562,17 @@ async def test_async_main_daemon_restart_restarts_background_process():
          patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon, \
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 5678,
-             "host": "127.0.0.1",
+             "host": "0.0.0.0",
              "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-y",
          }) as start_daemon:
         await async_main()
 
     stop_daemon.assert_awaited_once()
+    # Default host is 0.0.0.0 per CLAUDE.md — binds all interfaces so the
+    # LAN-reachable dashboard works without an extra flag.
     start_daemon.assert_called_once_with(
-        "127.0.0.1",
+        "0.0.0.0",
         DEFAULT_DAEMON_PORT,
         None,
         local_only=False,
@@ -777,3 +747,23 @@ async def test_async_main_direct_run_uses_default_triad_topology():
         await async_main()
 
     assert create_orchestrator.call_args.args[0] == "triad"
+
+
+def test_daemon_host_default_is_unspecified_binds_all_interfaces():
+    """CLAUDE.md's ``"Always run or restart the Orb daemon with host
+    0.0.0.0"`` rule requires ``daemon run/start/restart`` to default to
+    ``0.0.0.0`` — not ``127.0.0.1`` — so the dashboard and TUI are
+    reachable from other hosts on the LAN without a hidden extra flag.
+    Regression guard for the default drift we caught in the review.
+    """
+    import sys
+    from unittest.mock import patch
+
+    from orb.cli.main import parse_args
+
+    for subcmd in ("run", "start", "restart"):
+        with patch.object(sys, "argv", ["orb", "daemon", subcmd]):
+            args = parse_args()
+        assert args.host == "0.0.0.0", (
+            f"`orb daemon {subcmd}` should default --host to 0.0.0.0, got {args.host!r}"
+        )

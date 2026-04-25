@@ -408,7 +408,6 @@ def parse_args() -> argparse.Namespace:
     topologies_sub = topologies_parser.add_subparsers(dest="topologies_action")
     topologies_init = topologies_sub.add_parser("init", help="Create ~/.orb/topologies.yaml from the bundled sample")
     topologies_init.add_argument("--force", action="store_true", help="Overwrite ~/.orb/topologies.yaml if it already exists")
-    topology_choices = ["auto"] + get_loader().list_ids()
 
     sessions_parser = subparsers.add_parser("sessions", help="Manage Orb sessions (list, show, remove, prune)")
     sessions_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
@@ -429,27 +428,31 @@ def parse_args() -> argparse.Namespace:
     tui_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     tui_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     tui_parser.add_argument("--port", type=int, default=None, help="Orb daemon port shorthand for localhost connects")
-    tui_parser.add_argument("--topology", choices=topology_choices, default=None, help="Requested topology when starting a new run (default: prompt interactively)")
     tui_parser.add_argument("--budget", type=int, default=200, help="Requested budget when starting a new run")
     tui_parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI")
     tui_parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
     tui_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (default: current working directory)")
-    tui_parser.add_argument("--no-prompt", action="store_true", help="Skip the startup topology prompt and use --topology (or 'auto')")
+    tui_parser.add_argument("--no-prompt", action="store_true", help="Skip the startup topology prompt; default to 'triad' (non-interactive CI default)")
+    tui_parser.add_argument(
+        "--review",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require y/n approval before each agent file write (default: on). Use --no-review to let agents write directly.",
+    )
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
-    dashboard_parser.add_argument("--topology", choices=topology_choices, default="auto", help="Requested topology when starting a new run")
     dashboard_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (calls /api/session/new with the path)")
     dashboard_parser.add_argument(
         "--agent-model",
         action="append",
         default=[],
         metavar="role=model_id",
-        help="Manual per-node model pin (repeatable). Requires --topology other than 'auto'.",
+        help="Manual per-node model pin (repeatable). Passes through to the daemon as agent_models in the run body.",
     )
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
-    daemon_common.add_argument("--host", default=None, help="Daemon bind host")
+    daemon_common.add_argument("--host", default="0.0.0.0", help="Daemon bind host (default: 0.0.0.0 — listens on all interfaces; pass --host 127.0.0.1 for localhost-only)")
     daemon_common.add_argument("--port", type=int, default=None, help="Daemon bind port")
     daemon_common.add_argument("--workdir", type=str, help="Daemon workspace directory")
     daemon_common.add_argument(
@@ -465,7 +468,7 @@ def parse_args() -> argparse.Namespace:
         help="Use only cloud models in the daemon",
     )
     daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
-    daemon_parser.add_argument("--host", default="127.0.0.1", help="Daemon bind host (default: 127.0.0.1)")
+    daemon_parser.add_argument("--host", default="0.0.0.0", help="Daemon bind host (default: 0.0.0.0 — listens on all interfaces; use --host 127.0.0.1 for localhost-only)")
     daemon_parser.add_argument("--port", type=int, default=DEFAULT_DAEMON_PORT, help=f"Daemon bind port (default: {DEFAULT_DAEMON_PORT})")
     daemon_parser.add_argument("--workdir", type=str, help="Daemon workspace directory (default: create a fresh /tmp/orb-daemon-* dir each start)")
     daemon_sub = daemon_parser.add_subparsers(dest="daemon_action")
@@ -607,7 +610,7 @@ async def _cmd_sessions(args: argparse.Namespace) -> None:
                 print(f"  Session:    {sid}")
                 print(f"   (on-disk only, not loaded by the daemon)")
                 print(f"  Workdir:    {data.get('workdir') or '—'}")
-                print(f"  Topology:   {data.get('locked_topology') or 'auto'}")
+                print(f"  Topology:   {data.get('locked_topology') or '(not set)'}")
                 print(f"  Generation: {data.get('generation') or 1}")
                 print(f"  Turns:      {len(data.get('turns') or [])}")
                 return
@@ -620,7 +623,7 @@ async def _cmd_sessions(args: argparse.Namespace) -> None:
         print(f"  Session:    {data.get('session_id')}")
         print(f"  State:      {data.get('run_state')}")
         print(f"  Workdir:    {data.get('workdir') or '<daemon-cwd>'}")
-        print(f"  Topology:   {data.get('locked_topology') or 'auto'}")
+        print(f"  Topology:   {data.get('locked_topology') or '(not set)'}")
         print(f"  Turn:       {data.get('turn')}")
         print(f"  Generation: {data.get('generation')}")
         return
@@ -710,43 +713,55 @@ def _resolve_connect_url(url: str | None, port: int | None = None) -> str:
     return _normalize_connect_url(None)
 
 
-def _prompt_topology_choice(topology_choices: list[str]) -> str:
-    """Interactive prompt used by `orb tui` when no --topology is set.
+_DEFAULT_TOPOLOGY_PICK = "triad"
 
-    Returns the selected topology id. Always offers "auto" as the first
-    option. EOF / empty input defaults to "auto".
+
+def _prompt_topology_choice(topology_choices: list[str]) -> str:
+    """Interactive prompt used by `orb tui` on startup.
+
+    Returns the selected topology id. Deliberately omits ``auto`` —
+    picking auto would invoke the LLM classifier on every submit, adding
+    a 3–15s blank window per run. Forcing a concrete choice routes
+    through the no-LLM ``_manual_prediction`` fast path in the runtime.
+    If you genuinely want classifier-driven routing, POST directly to
+    ``/api/v1/sessions`` with ``topology: "auto"``.
+
+    EOF / empty input defaults to ``triad`` (a balanced multi-agent
+    starting point). The default can be changed by setting
+    ``_DEFAULT_TOPOLOGY_PICK`` — any value in ``topology_choices`` works.
     """
     print()
     print("  How should Orb route turns in this session?")
     print()
-    # "auto" first, then every other topology in loader order
     ordered: list[str] = []
     seen: set[str] = set()
-    for tid in ["auto", *topology_choices]:
-        if tid in seen:
+    for tid in topology_choices:
+        if tid == "auto" or tid in seen:
             continue
         seen.add(tid)
         ordered.append(tid)
+    if not ordered:
+        # Defensive: should never happen with the default loader set.
+        return _DEFAULT_TOPOLOGY_PICK
+    default = _DEFAULT_TOPOLOGY_PICK if _DEFAULT_TOPOLOGY_PICK in seen else ordered[0]
     for i, tid in enumerate(ordered, 1):
-        if tid == "auto":
-            print(f"    {i}. auto            — let Orb classify every turn (first choice locks in)")
-        else:
-            print(f"    {i}. {tid}")
+        marker = "  (default)" if tid == default else ""
+        print(f"    {i}. {tid}{marker}")
     print()
     while True:
         try:
-            raw = input(f"  Pick [1-{len(ordered)}] or press Enter for auto: ").strip()
+            raw = input(f"  Pick [1-{len(ordered)}] or press Enter for {default}: ").strip()
         except EOFError:
-            return "auto"
+            return default
         if not raw:
-            return "auto"
+            return default
         if raw.isdigit():
             idx = int(raw)
             if 1 <= idx <= len(ordered):
                 return ordered[idx - 1]
         if raw in ordered:
             return raw
-        print(f"  Please enter a number 1-{len(ordered)}, a topology id, or blank for auto.")
+        print(f"  Please enter a number 1-{len(ordered)}, a topology id, or blank for {default}.")
 
 
 def _init_topologies_file(force: bool = False) -> Path:
@@ -1143,7 +1158,7 @@ async def async_main() -> None:
             return
         if daemon_action == "restart":
             await _stop_managed_daemon(args.port or DEFAULT_DAEMON_PORT)
-            host = args.host or "127.0.0.1"
+            host = args.host or "0.0.0.0"
             port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
@@ -1157,7 +1172,7 @@ async def async_main() -> None:
             print(f"  Workspace: {info['workdir']}")
             return
         if daemon_action == "start":
-            host = args.host or "127.0.0.1"
+            host = args.host or "0.0.0.0"
             port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
@@ -1174,7 +1189,7 @@ async def async_main() -> None:
         from web.server import DashboardServer
         from web.state import DashboardState
 
-        daemon_host = args.host or "127.0.0.1"
+        daemon_host = args.host or "0.0.0.0"
         daemon_port = args.port or DEFAULT_DAEMON_PORT
         daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
         # No process-level chdir — each Session owns its workdir and the
@@ -1241,7 +1256,6 @@ async def async_main() -> None:
 
     if args.subcommand == "tui":
         from .tui import attach_tui
-        import aiohttp
 
         connect_url = _resolve_connect_url(args.connect, getattr(args, "port", None))
 
@@ -1250,31 +1264,30 @@ async def async_main() -> None:
         workdir = args.workdir or str(Path.cwd())
         workdir = str(Path(workdir).expanduser().resolve())
 
-        # Ask the user how they'd like to route runs unless --topology was set
-        # or --no-prompt was passed.
-        topology = args.topology
-        if topology is None and not getattr(args, "no_prompt", False) and sys.stdin.isatty():
+        # Ask the user how to route runs. The picker deliberately omits
+        # ``"auto"`` — picking auto would invoke the LLM classifier on
+        # every submit, adding a 3–15s blank window per run. Forcing a
+        # concrete topology choice routes through the no-LLM
+        # ``_manual_prediction`` fast path in the runtime.
+        if not getattr(args, "no_prompt", False) and sys.stdin.isatty():
             from orb.topologies import get_loader
-            topo_choices = ["auto"] + get_loader().list_ids()
+            topo_choices = get_loader().list_ids()
             topology = _prompt_topology_choice(topo_choices)
-        if topology is None:
-            topology = "auto"
+        else:
+            # Non-interactive fallback (--no-prompt, piped stdin, CI).
+            # ``triad`` is the balanced multi-agent default; callers who
+            # want something else should run interactively or POST
+            # directly to the daemon with their chosen topology.
+            topology = "triad"
 
-        # Create a workdir-scoped session before attaching the TUI so every
-        # run we launch lands in the right folder. Soft-fail if the daemon
-        # isn't reachable — attach_tui will surface the real error.
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(f"{connect_url}/api/session/new", json={"workdir": workdir}) as resp:
-                    payload = await resp.json()
-                    if payload.get("ok"):
-                        print(f"  Session scoped to: {workdir}")
-                        print(f"  Topology: {topology}")
-                    else:
-                        print(f"  Warning: couldn't scope session to {workdir}: {payload.get('error', 'unknown')}")
-        except aiohttp.ClientError:
-            # Daemon unreachable at this point — leave it to attach_tui to fail loudly.
-            pass
+        # attach_tui handles session creation itself via POST /api/v1/sessions
+        # so each `orb tui` invocation gets its own runtime (like the
+        # dashboard's New Session modal). Print the intent here so the
+        # user sees the scoping before the TUI mounts.
+        review = bool(getattr(args, "review", True))
+        print(f"  Session scoped to: {workdir}")
+        print(f"  Topology: {topology}")
+        print(f"  Review mode: {'on (y/n before each file write)' if review else 'off (agents write directly)'}")
 
         await attach_tui(
             connect_url=connect_url,
@@ -1283,6 +1296,8 @@ async def async_main() -> None:
             show_logs=args.logs,
             initial_query=args.query,
             exit_after_run=args.exit_after_run,
+            workdir=workdir,
+            approval_required=review,
         )
         return
 
@@ -1305,9 +1320,9 @@ async def async_main() -> None:
                 print_error(f"--agent-model expects role=model_id, got: {pair}")
                 sys.exit(1)
             agent_model_pins[role] = model_id
-        if agent_model_pins and args.topology == "auto":
-            print_error("--agent-model requires --topology other than 'auto'")
-            sys.exit(1)
+        # ``--topology`` was removed from the CLI — the dashboard
+        # subcommand now always launches runs with a concrete topology.
+        # See ``_DEFAULT_TOPOLOGY_PICK`` for the picked default.
 
         async with aiohttp.ClientSession() as session:
             # Scope the session to a workdir first, if requested.
@@ -1323,7 +1338,7 @@ async def async_main() -> None:
             if args.query:
                 start_body: dict = {
                     "query": args.query,
-                    "topology": args.topology,
+                    "topology": _DEFAULT_TOPOLOGY_PICK,
                 }
                 if agent_model_pins:
                     start_body["agent_models"] = agent_model_pins

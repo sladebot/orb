@@ -2,6 +2,12 @@
  * Dashboard app — WebSocket client, message log, agent cards, chat panel.
  */
 
+// Parity with web/state.py::MAX_FILE_CHANGES and orb/cli/tui_repl.py. The
+// `_fileChanges` Map is path-keyed (rewrites collide); distinct paths past
+// this cap evict the oldest entry (LRU by insertion order). `_fileChangesTruncatedCount`
+// tracks the total evicted so the changes panel can show "N older changes hidden".
+const MAX_FILE_CHANGES = 200;
+
 function safeParseWsMessage(data) {
     if (typeof data !== 'string' || !data) return null;
     try {
@@ -140,6 +146,10 @@ class Dashboard {
         this._agentActivityLines = {};  // agentId -> recent structured activity events
         this._plan = null;
         this._fileChanges = new Map();
+        // Lifetime count of file_changes entries evicted by the MAX_FILE_CHANGES
+        // cap (mirrors DashboardState.file_changes_truncated_count). Populated
+        // from the server's init event + bumped locally on overflow.
+        this._fileChangesTruncatedCount = 0;
         this._panelWidthKeys = ['changes-panel', 'communications-panel'];
         this._activePanelDrag = null;
         this._mentionTargets = [];
@@ -1021,6 +1031,7 @@ class Dashboard {
             // this as a brand-new session (re-probes workdir files, etc.).
             this._sessionLock = { topology: '', agentModels: {}, modelPin: '', workdir: '' };
             this._fileChanges = new Map();
+            this._fileChangesTruncatedCount = 0;
             this._workspaceFiles = [];
 
             // v1 multi-tenant route: POST /api/v1/sessions. Sends the
@@ -1283,6 +1294,8 @@ class Dashboard {
             case 'run_state_changed': this._handleRunStateChanged(data); break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
             case 'file_write':     this._handleFileWrite(data);      break;
+            case 'file_write_pending':  this._handleFileWritePending(data);  break;
+            case 'file_write_rejected': this._handleFileWriteRejected(data); break;
             case 'topologies_reloaded': this._loadTopologyOptions();   break;
         }
     }
@@ -1294,6 +1307,7 @@ class Dashboard {
         this._plan = data.plan || null;
         this._planSteps = Array.isArray(data.plan_steps) ? [...data.plan_steps] : [];
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         this._feedSequence = 0;
         this._clearThinking();
         this._updateSessionUrl(data.session_id || '');
@@ -1609,12 +1623,93 @@ class Dashboard {
     _handleFileWrite(data) {
         const path = data.path || '';
         if (!path) return;
+        // Refresh LRU position on rewrite: delete then re-insert so the path
+        // moves to the tail of the Map's insertion order.
+        if (this._fileChanges.has(path)) this._fileChanges.delete(path);
         this._fileChanges.set(path, {
             path,
             agent: data.agent || '',
             content: data.content || '',
             oldContent: data.old_content || '',
+            approvalStatus: 'applied',  // approval-flow parity: resolved writes land green
         });
+        // Evict oldest (head of insertion order) past the cap, bumping the
+        // truncated counter so the UI can surface "N older changes hidden".
+        while (this._fileChanges.size > MAX_FILE_CHANGES) {
+            const oldestPath = this._fileChanges.keys().next().value;
+            this._fileChanges.delete(oldestPath);
+            this._fileChangesTruncatedCount += 1;
+        }
+        // Resolve any matching pending entry (approval flow).
+        if (this._pendingWrites) {
+            for (const [reqId, entry] of this._pendingWrites) {
+                if (entry.path === path) {
+                    this._pendingWrites.delete(reqId);
+                    break;
+                }
+            }
+        }
+        this._renderLiveCodeChanges();
+    }
+
+    // ── Approval flow (task #10) ─────────────────────────────────────────
+    //
+    // The daemon broadcasts ``file_write_pending`` when an agent stages a
+    // write that requires user approval, and ``file_write_rejected`` when
+    // the user (or teardown) rejects it. We mirror the TUI's state
+    // machine here: pending writes show with a yellow pill in the code-
+    // changes rail, then flip to green (applied) on the follow-up
+    // ``file_write`` or red (rejected) on ``file_write_rejected``.
+
+    _ensurePendingWriteStore() {
+        if (!this._pendingWrites) {
+            this._pendingWrites = new Map();
+        }
+        return this._pendingWrites;
+    }
+
+    _handleFileWritePending(data) {
+        const requestId = data.request_id || '';
+        const path = data.path || '';
+        if (!requestId || !path) return;
+        const store = this._ensurePendingWriteStore();
+        store.set(requestId, {
+            requestId,
+            path,
+            agent: data.agent || '',
+            content: data.content || '',
+            oldContent: data.old_content || '',
+        });
+        // Stage a pending entry in the changes map so the rail renders it
+        // with a warning pill. The resolving ``file_write`` or
+        // ``file_write_rejected`` event will upgrade/remove it.
+        if (this._fileChanges.has(path)) this._fileChanges.delete(path);
+        this._fileChanges.set(path, {
+            path,
+            agent: data.agent || '',
+            content: data.content || '',
+            oldContent: data.old_content || '',
+            approvalStatus: 'pending',
+            requestId,
+        });
+        this._renderLiveCodeChanges();
+    }
+
+    _handleFileWriteRejected(data) {
+        const requestId = data.request_id || '';
+        if (!requestId) return;
+        const store = this._ensurePendingWriteStore();
+        const entry = store.get(requestId);
+        store.delete(requestId);
+        const path = (entry && entry.path) || data.path || '';
+        if (path && this._fileChanges.has(path)) {
+            const existing = this._fileChanges.get(path);
+            this._fileChanges.set(path, {
+                ...existing,
+                approvalStatus: 'rejected',
+                reason: data.reason || '',
+            });
+        }
         this._renderLiveCodeChanges();
     }
 
@@ -3016,6 +3111,7 @@ class Dashboard {
         this._showLoader('Starting runtime…');
         this._lastQuery = query;
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         input.value = '';
         input.style.height = 'auto';
         this._hideMentionSuggestions();
@@ -3213,6 +3309,20 @@ class Dashboard {
         this.graph.setRunState('completed');
         this._updateSessionUrl(data.session_id || '');
 
+        // Refresh the session lock if run_complete carries ``locked_topology``
+        // (parity with the TUI's handler in ``orb/cli/tui_repl.py``). This is
+        // belt-and-braces — the next init broadcast will re-emit the full
+        // session block, but a client that reconnects and sees only
+        // run_complete first should still render the "pinned" affordance.
+        if (typeof data.locked_topology === 'string' && data.locked_topology) {
+            this._applySessionLock({
+                locked_topology: data.locked_topology,
+                locked_agent_models: data.locked_agent_models || this._sessionLock?.agentModels || {},
+                locked_model_pin: data.locked_model_pin || this._sessionLock?.modelPin || '',
+                workdir: this._sessionLock?.workdir || '',
+            });
+        }
+
         // Force status to Done
         const statusEl = document.getElementById('stat-status');
         statusEl.textContent = 'Done';
@@ -3325,9 +3435,17 @@ class Dashboard {
 
     _hydrateLiveCodeChangesFromInit(data) {
         const fileChanges = Array.isArray(data.file_changes) ? data.file_changes : [];
+        // Always refresh the truncated counter from the server — it's the
+        // source of truth across reconnects. Defensive: a server running an
+        // older build won't send this field, leaving the count as-is.
+        if (typeof data.file_changes_truncated_count === 'number') {
+            this._fileChangesTruncatedCount = data.file_changes_truncated_count;
+        }
         if (!fileChanges.length) return;
+        // Respect the cap on hydrate too — keep the most-recent N.
+        const capped = fileChanges.slice(-MAX_FILE_CHANGES);
         this._fileChanges = new Map(
-            fileChanges.map((file) => [file.path, {
+            capped.map((file) => [file.path, {
                 path: file.path,
                 agent: file.agent || '',
                 content: file.content || '',
@@ -3346,6 +3464,7 @@ class Dashboard {
         this._plan = null;
         this._planSteps = [];
         this._fileChanges = new Map();
+        this._fileChangesTruncatedCount = 0;
         this.agents = {};
         this.selectedAgent = null;
         this._isRunActive = false;
@@ -3519,7 +3638,22 @@ class Dashboard {
                 byline = `<span class="byline"><span class="track-label">file</span></span>`;
             } else {
                 const role = (this._roleOf(f.agent) || 'generic').toLowerCase();
+                // Approval-flow pill: render a small yellow/red/green tag
+                // beside the byline when the write is tied to a pending
+                // approval. TUI parity — the TUI flips its ToolBlock
+                // pill through the same states.
+                const aStat = f.approvalStatus || '';
+                let approvalPill = '';
+                if (aStat === 'pending') {
+                    approvalPill = `<span class="approval-pill approval-pending" title="awaiting user approval">pending</span><span class="sep">·</span>`;
+                } else if (aStat === 'rejected') {
+                    const why = f.reason ? ` · ${f.reason}` : '';
+                    approvalPill = `<span class="approval-pill approval-rejected" title="rejected${this._escapeAttr(why)}">rejected</span><span class="sep">·</span>`;
+                } else if (aStat === 'applied') {
+                    approvalPill = `<span class="approval-pill approval-applied" title="approved & applied">applied</span><span class="sep">·</span>`;
+                }
                 byline = `<span class="byline">
+                        ${approvalPill}
                         <span class="byline-author v2-role-${this._escapeAttr(role)}"><span class="role-dot"></span>${this._escapeHtml(this._roleDisplayName(f.agent, f.agent))}</span>
                         <span class="sep">·</span>
                         <span class="stat-add">+${f.added || 0}</span>
@@ -3679,7 +3813,11 @@ class Dashboard {
         const totalAdd = files.reduce((s, f) => s + (f.added || 0), 0);
         const totalDel = files.reduce((s, f) => s + (f.removed || 0), 0);
         const authors = new Set(files.map((f) => f.agent).filter(Boolean));
-        if (countEl) countEl.textContent = `${files.length} file${files.length === 1 ? '' : 's'}`;
+        if (countEl) {
+            const truncated = this._fileChangesTruncatedCount || 0;
+            const base = `${files.length} file${files.length === 1 ? '' : 's'}`;
+            countEl.textContent = truncated ? `${base} · ${truncated} older hidden` : base;
+        }
         if (addEl) addEl.textContent = `+${totalAdd}`;
         if (delEl) delEl.textContent = `−${totalDel}`;
         if (contribEl) contribEl.textContent = `${authors.size} agent${authors.size === 1 ? '' : 's'} contributed`;

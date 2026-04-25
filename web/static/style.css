@@ -4322,6 +4322,33 @@ body.v2 .repo-file .byline-author {
     align-items: center;
     gap: 4px;
 }
+/* Approval-flow pill next to the byline — parity with the TUI's
+   ToolBlock pill states. Yellow while pending, green once applied,
+   red once rejected. */
+body.v2 .repo-file .approval-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    border-radius: 3px;
+    letter-spacing: 0.01em;
+}
+body.v2 .repo-file .approval-pill.approval-pending {
+    color: var(--warning, #f0c982);
+    background: rgba(240, 201, 130, 0.14);
+    border: 1px solid rgba(240, 201, 130, 0.28);
+}
+body.v2 .repo-file .approval-pill.approval-applied {
+    color: var(--success, #86d8ab);
+    background: rgba(134, 216, 171, 0.14);
+    border: 1px solid rgba(134, 216, 171, 0.28);
+}
+body.v2 .repo-file .approval-pill.approval-rejected {
+    color: var(--error, #f3afa7);
+    background: rgba(243, 175, 167, 0.14);
+    border: 1px solid rgba(243, 175, 167, 0.28);
+}
 body.v2 .repo-file .byline-author .role-dot {
     display: inline-block;
     width: 5px;
