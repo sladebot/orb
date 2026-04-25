@@ -118,6 +118,12 @@ class DashboardState:
     # live state stay in sync. See ``GraphRuntime.request_write_approval``
     # for the runtime side of the staging pipeline.
     approval_required: bool = False
+    # Per-session token-streaming toggle. Mirrored from
+    # ``ConversationSession.streaming_enabled``. Surfaces on the init
+    # event as ``streaming_enabled`` (top-level) so TUI + dashboard can
+    # decide whether to render active-turn delta bubbles or wait for
+    # the final ``message`` event.
+    streaming_enabled: bool = True
 
     def reset(self) -> None:
         """Reset all state back to defaults (called before starting a new run)."""
@@ -151,6 +157,7 @@ class DashboardState:
         self.locked_topology = ""
         self.locked_agent_models = {}
         self.approval_required = False
+        self.streaming_enabled = True
 
     def record_file_change(
         self,
@@ -291,4 +298,9 @@ class DashboardState:
             # nested block. The TUI flips its "(staged)" affordance off
             # this single bool.
             "approval_required": bool(self.approval_required),
+            # Top-level so clients (TUI + dashboard) can branch on
+            # streaming vs. one-shot rendering without diving into a
+            # nested block. The flag is default-on, so legacy clients
+            # that ignore it keep working.
+            "streaming_enabled": bool(self.streaming_enabled),
         }

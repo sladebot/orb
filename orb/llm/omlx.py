@@ -34,7 +34,12 @@ class OmlxProvider(LLMClient):
         self._api_key = str(api_key).strip() if api_key else None
         self._client = httpx.AsyncClient(timeout=_TIMEOUT)
 
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def complete(
+        self,
+        request: CompletionRequest,
+        *,
+        on_chunk=None,  # noqa: ARG002 — accepted for uniform call site; OMLX path doesn't stream.
+    ) -> CompletionResponse:
         config = request.model_config
         messages = to_openai_messages(request.messages, request.system)
         model_id = config.model_id if config else provider_default_model("omlx", "local_small")

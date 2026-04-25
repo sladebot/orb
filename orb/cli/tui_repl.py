@@ -424,10 +424,26 @@ class Turn(Static):
 
     def __init__(self, speaker: str, elapsed: float, body: str, *, model: str = "") -> None:
         super().__init__()
-        color = AGENT_STYLE.get(speaker, "#8796a7")
-        label = AGENT_LABELS.get(speaker, speaker or "?")
-        ts = _fmt_timestamp(elapsed)
-        mdl = (model or "").strip()
+        # Persist the constructor inputs so streaming deltas (task #13)
+        # can mutate the body in place via ``append`` / ``set_body``
+        # without rebuilding the full Turn widget. Lane styling is
+        # derived from ``speaker`` on every render so a future change
+        # to ``AGENT_STYLE`` would already be picked up.
+        self.speaker = speaker
+        self.elapsed = elapsed
+        self.body = body or ""
+        self.model = (model or "").strip()
+        self._rebuild_turn_markup()
+        self.add_class("turn")
+
+    def _rebuild_turn_markup(self) -> None:
+        """Rebuild the rendered markup from current ``speaker / elapsed
+        / body / model``. Called on init and again whenever the body
+        mutates (streaming deltas, finalization)."""
+        color = AGENT_STYLE.get(self.speaker, "#8796a7")
+        label = AGENT_LABELS.get(self.speaker, self.speaker or "?")
+        ts = _fmt_timestamp(self.elapsed)
+        mdl = self.model
 
         # Left-lane cells. Pad/truncate each to the lane width so the
         # body column stays aligned even when ``label`` or ``model`` is
@@ -438,7 +454,7 @@ class Turn(Static):
             (mdl, "#6b7685", False) if mdl else ("", "", False),
         ]
 
-        body_lines = (body or "").split("\n") or [""]
+        body_lines = (self.body or "").split("\n") or [""]
 
         out: list[str] = []
         rows = max(len(lane_cells), len(body_lines))
@@ -457,7 +473,32 @@ class Turn(Static):
             out.append(f"{lane_markup} {sep} [#c4ced9]{body_line}[/]")
 
         self.update("\n".join(out))
-        self.add_class("turn")
+
+    def append(self, delta: str) -> None:
+        """Extend the body with a streamed token chunk and re-render.
+
+        Streaming path (task #13): the bridge broadcasts ``message_delta``
+        events with monotonically-indexed chunks; the TUI's
+        ``_handle_message_delta`` calls this on the active Turn so the
+        text appears token-by-token instead of all-at-once at the end.
+        """
+        if not delta:
+            return
+        self.body = (self.body or "") + delta
+        self._rebuild_turn_markup()
+
+    def set_body(self, body: str, *, model: str | None = None) -> None:
+        """Replace the body wholesale and re-render.
+
+        Used when the terminal ``message`` event closes a streaming
+        chain (replaces accumulated deltas with the canonical full
+        content) and when there's no retroactive replay needed even
+        if some deltas were dropped on the WS.
+        """
+        self.body = body or ""
+        if model is not None:
+            self.model = (model or "").strip()
+        self._rebuild_turn_markup()
 
 
 class Whisper(Static):
@@ -906,6 +947,27 @@ class OrbReplTUI(App[None]):
         self.pending_writes: dict[str, dict] = {}
         self.approve_all: bool = False
         self.approval_required: bool = False
+        # Streaming flow (task #13). ``_streaming_turns`` is keyed by
+        # the bus-minted ``chain_id`` and carries the in-progress Turn
+        # widget receiving deltas. The terminal ``message`` event for
+        # the same chain_id finalizes the body and pops the entry.
+        # ``streaming_enabled`` mirrors the init payload's flag — purely
+        # informational; if False the daemon won't broadcast deltas in
+        # the first place.
+        # Keyed by ``(chain_id, from)`` not just ``chain_id`` — per the
+        # daemon's contract (task #12) the monotonic ``index`` resets per
+        # agent within a chain, so two agents replying to the same chain
+        # produce independent 0..N delta sequences. Collapsing them into
+        # one Turn would interleave their content; keeping them separate
+        # keeps each lane's stream coherent.
+        self._streaming_turns: dict[tuple[str, str], "Turn"] = {}
+        # Tombstone for finalized streams. When a terminal ``message``
+        # event closes a stream, we record ``chain_id → {agents}`` so
+        # any straggler delta arriving after the close is dropped on
+        # the floor instead of corrupting an already-finalized Turn.
+        # Cleared on session switch and ``run_complete``.
+        self._finalized_streams: dict[str, set[str]] = {}
+        self.streaming_enabled: bool = False
 
     # ── Widget tree ───────────────────────────────────────────────────────
 
@@ -990,6 +1052,8 @@ class OrbReplTUI(App[None]):
             self._handle_init(data)
         elif t == "message":
             self._handle_message(data)
+        elif t == "message_delta":
+            self._handle_message_delta(data)
         elif t == "agent_status":
             self._handle_agent_status(data)
         elif t == "agent_activity":
@@ -1122,6 +1186,10 @@ class OrbReplTUI(App[None]):
         # at all; we mirror it so the TUI can surface the mode + guard
         # its y/a/e/n keybindings accordingly.
         self.approval_required = bool(data.get("approval_required"))
+        # Streaming flag from the init event (task #13). Purely
+        # informational — even if False, the handler's existence is
+        # safe; no deltas would be broadcast in that case.
+        self.streaming_enabled = bool(data.get("streaming_enabled"))
         # Only clear when the user actually switched sessions. During a
         # run the server re-broadcasts init with fresh agent/model state;
         # wiping on every re-broadcast erases the user's in-flight
@@ -1134,6 +1202,14 @@ class OrbReplTUI(App[None]):
             # A must not silently auto-approve writes in session B.
             self.pending_writes.clear()
             self.approve_all = False
+            # Streaming turns hold widget references that we're about
+            # to unmount via stream.remove_children below. Clear the
+            # dict too so a stale (chain_id, from) key from session A
+            # can't accidentally claim deltas in session B (chain_ids
+            # are uuids so collision is unlikely, but the fix is
+            # cheap and the leak is real).
+            self._streaming_turns.clear()
+            self._finalized_streams.clear()
         stream = self.query_one(ReplStream)
         if session_changed or not stream.children:
             stream.remove_children()
@@ -1146,10 +1222,81 @@ class OrbReplTUI(App[None]):
         self._refresh_chrome()
 
     def _handle_message(self, data: dict) -> None:
-        self._render_message(data)
+        # Streaming finalization path (task #13): if we've been streaming
+        # deltas into a Turn for this (chain_id, from) pair, the terminal
+        # ``message`` event closes the stream. We deliberately do NOT
+        # replace the streamed body with ``data["content"]`` — per the
+        # daemon contract (task #12), the final content is the
+        # ``send_message`` tool arg, not the streamed assistant text;
+        # they differ semantically and the bridge truncates the routed
+        # payload to 500 chars (web/bridge.py), so replacing would
+        # actively clobber long streamed turns. We just pop tracking
+        # and let the accumulated streamed body stand. Skip the
+        # ``_render_message`` path so we don't mount a duplicate Turn.
+        chain_id = str(data.get("chain_id") or "")
+        speaker = str(data.get("from") or "")
+        key = (chain_id, speaker) if chain_id and speaker else None
+        if key is not None and key in self._streaming_turns:
+            self._streaming_turns.pop(key)
+            # Tombstone the stream so a late delta (rare, but possible
+            # with reordering / replay) is dropped instead of appended
+            # to the now-finalized Turn.
+            self._finalized_streams.setdefault(chain_id, set()).add(speaker)
+            # Body already accumulated via ``_handle_message_delta``; don't
+            # overwrite. Optional polish (deferred): if the final content
+            # diverges non-trivially, render a "sent: <truncated>" affordance.
+        else:
+            self._render_message(data)
         self.message_count += 1
         self.budget_remaining = max(0, self._budget - self.message_count)
         self._refresh_chrome()
+
+    def _handle_message_delta(self, data: dict) -> None:
+        """Render a streamed token chunk into the active Turn.
+
+        Contract (from task #12): one stream per ``chain_id``; ``index``
+        is monotonic from 0; the terminal ``message`` event closes the
+        stream. We don't gate on ``index`` here — the WS preserves
+        order, and even if it didn't, dropped/reordered chunks are
+        reconciled when the final ``message`` resets the body wholesale.
+        """
+        chain_id = str(data.get("chain_id") or "")
+        delta = data.get("delta") or ""
+        speaker = str(data.get("from") or "")
+        if not chain_id or not delta or not speaker:
+            return
+        key = (chain_id, speaker)
+        # Late-delta guard: if the terminal ``message`` event for this
+        # (chain, agent) already finalized and popped the entry, drop the
+        # late chunk on the floor. Without this guard, a stale Turn ref
+        # would receive an out-of-order append and corrupt its body —
+        # rare in practice (WS preserves order) but easy to defend
+        # against and not worth a 1-line absence.
+        finalized = (
+            chain_id in self._finalized_streams
+            and speaker in self._finalized_streams[chain_id]
+        )
+        if finalized:
+            return
+        turn = self._streaming_turns.get(key)
+        if turn is None:
+            # First delta for this (chain, agent) — mount a fresh Turn
+            # with an empty body. ``model`` is unknown until the final
+            # message event; leave it blank so the lane stays uncluttered.
+            try:
+                stream = self.query_one(ReplStream)
+            except Exception:  # noqa: BLE001
+                return
+            turn = Turn(speaker, self.elapsed, "", model="")
+            stream.mount(turn)
+            self._streaming_turns[key] = turn
+        turn.append(delta)
+        # Keep the latest token visible — same scroll discipline the
+        # other emit helpers use.
+        try:
+            self.query_one(ReplStream).scroll_end(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _render_message(self, m: dict) -> None:
         frm = m.get("from") or "system"
@@ -1216,6 +1363,13 @@ class OrbReplTUI(App[None]):
         if locked:
             self.locked_topology = locked
         self._emit_turn(agent, f"[#86d8ab]✓ run complete · {elapsed:.1f}s[/]\n{result[:800]}")
+        # Run is over — drop any streaming bookkeeping that didn't get
+        # closed by a terminal ``message`` event (a crashed agent, a WS
+        # drop right at the end, etc.). Without this, ``_streaming_turns``
+        # leaks Turn references across runs and the tombstone set grows
+        # unbounded over a long session.
+        self._streaming_turns.clear()
+        self._finalized_streams.clear()
         self.live_text = "done"
         self._live_started = None
         self._refresh_chrome()
@@ -1534,6 +1688,13 @@ class OrbReplTUI(App[None]):
             )
         elif cmd == "clear":
             self.query_one(ReplStream).remove_children()
+            # Streaming turns dict holds widget references that we just
+            # removed from the DOM. Clear it too — otherwise the next
+            # ``message_delta`` for any (chain, agent) still in the dict
+            # tries to ``.append`` on a detached widget, silently losing
+            # the chunk (or raising if the widget got fully GC'd).
+            self._streaming_turns.clear()
+            self._finalized_streams.clear()
             self._emit_turn("system", "[#8796a7]stream cleared[/]")
         elif cmd in {"stop", "cancel"}:
             await self.action_cancel_run()
@@ -1586,12 +1747,20 @@ class OrbReplTUI(App[None]):
 
     async def action_cancel_run(self) -> None:
         if not self.session_id:
+            self._emit_whisper("system", "[#f3afa7]no active session — nothing to stop[/]")
             return
         try:
             async with self._http_session.post(self._session_url("/runs/stop")) as resp:
-                await resp.read()
-        except Exception:  # noqa: BLE001
-            pass
+                body_text = await resp.text()
+                if resp.status >= 400:
+                    self._emit_whisper(
+                        "system",
+                        f"[#f3afa7]/stop failed ({resp.status})[/] {body_text[:160]}",
+                    )
+                    return
+            self._emit_whisper("system", "[#8796a7]stop requested[/]")
+        except Exception as exc:  # noqa: BLE001
+            self._emit_whisper("system", f"[#f3afa7]/stop error:[/] {exc}")
 
     async def action_resume_session(self) -> None:
         """Open the session picker — lists known sessions from the daemon."""

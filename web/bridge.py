@@ -193,6 +193,42 @@ class DashboardBridge:
             "is_consensus": is_consensus,
         })
 
+    async def on_message_delta(
+        self,
+        chain_id: str,
+        from_: str,
+        delta: str,
+        index: int,
+    ) -> None:
+        """Broadcast a single streaming token chunk.
+
+        Fired by the agent's per-chunk hook (wired in
+        ``GraphRuntime._start_run``) for every non-empty delta a
+        streaming provider emits. The envelope shape is the shared
+        contract with stream-tui/#13 + stream-dashboard/#14 on
+        ``tui-improvements`` — keep it exactly:
+
+            {
+              "type": "message_delta",
+              "from": <agent_id>,
+              "chain_id": <chain_id>,
+              "delta": <text>,
+              "index": <0-based monotonic int per chain_id>,
+            }
+
+        The final ``message`` event still fires after the last delta
+        with the full accumulated content — deltas do NOT replace it.
+        No state is mutated here: a dropped client can resync off the
+        next ``message`` event without needing the deltas replayed.
+        """
+        await self._send({
+            "type": "message_delta",
+            "from": from_,
+            "chain_id": chain_id,
+            "delta": delta,
+            "index": index,
+        })
+
     async def on_agent_heartbeat(self, agent_id: str, payload: dict) -> None:
         ts = float(payload.get("ts", time.time()))
         status = payload.get("status", "")

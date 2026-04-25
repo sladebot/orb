@@ -110,6 +110,38 @@ def test_tui_handles_approval_flow_events():
     )
 
 
+def test_dashboard_handles_message_delta_streaming():
+    """Parity rule (CLAUDE.md): both surfaces must stream LLM output into an
+    active bubble/turn keyed by ``chain_id``. Task #14 wires up the dashboard
+    side — this guards the dispatcher branch + the state machine.
+    """
+    src = APP_JS_PATH.read_text()
+    assert "case 'message_delta'" in src, (
+        "web/static/app.js has no dispatcher branch for message_delta — "
+        "streaming bubbles will never populate."
+    )
+    assert "_handleMessageDelta" in src, (
+        "web/static/app.js missing _handleMessageDelta — streaming renderer gone."
+    )
+    assert "_streamingBubbles" in src, (
+        "web/static/app.js missing _streamingBubbles state map — finalize step "
+        "can't find the active bubble on the terminal `message` event."
+    )
+
+
+def test_tui_handles_message_delta_streaming():
+    """Parity rule (CLAUDE.md): TUI dispatcher must branch on message_delta
+    and maintain a chain_id-keyed active turn. This test will fail until
+    task #13 (stream-tui) lands — that is intentional, it gates the parity
+    sweep for streaming.
+    """
+    src = TUI_PATH.read_text()
+    assert 't == "message_delta"' in src, (
+        "orb/cli/tui_repl.py::_handle_server_event missing branch for "
+        "message_delta. TUI/dashboard streaming parity broken."
+    )
+
+
 def test_tui_reconnect_receives_fresh_init_via_ws_handler():
     """The v1 WS handler sends current_init_event on every new connection.
 

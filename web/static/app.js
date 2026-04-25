@@ -163,6 +163,11 @@ class Dashboard {
         this._traceDemoStarted = false;
         this._feedSequence = 0;
         this._thinkingAgents = new Set();
+        // Task #14 (streaming parity with TUI): one active bubble per chain_id
+        // while `message_delta` events are arriving. Cleared on session switch
+        // via _handleInit. Entries: { entry, text, preview, full, from, to }.
+        this._streamingBubbles = new Map();
+        this._streamingEnabled = false;
 
         // Graph node click
         this.graph.onNodeClick = (id, node) => this._selectAgent(id);
@@ -1285,6 +1290,7 @@ class Dashboard {
             case 'init':           this._handleInit(data);           break;
             case 'plan_step':      this._handlePlanStep(data);       break;
             case 'message':        this._handleMessage(data);        break;
+            case 'message_delta': this._handleMessageDelta(data);     break;
             case 'agent_status':   this._handleAgentStatus(data);    break;
             case 'agent_stats':    this._handleAgentStats(data);     break;
             case 'agent_heartbeat': this._handleAgentHeartbeat(data); break;
@@ -1309,6 +1315,10 @@ class Dashboard {
         this._fileChanges = new Map();
         this._fileChangesTruncatedCount = 0;
         this._feedSequence = 0;
+        // Streaming bubbles are session-scoped — drop any stale pending
+        // entries so a new session starts with no orphaned "…" caret.
+        this._streamingBubbles = new Map();
+        this._streamingEnabled = !!data.streaming_enabled;
         this._clearThinking();
         this._updateSessionUrl(data.session_id || '');
         if (!document.getElementById('trace-admin-modal')?.classList.contains('hidden')) {
@@ -1463,7 +1473,22 @@ class Dashboard {
 
         // Clear thinking for the sender (they just responded)
         this._clearThinking(data.from);
-        this._addMessageEntry(data);
+
+        // Streaming finalize (task #14, parity with TUI task #13): if we
+        // have an active pending bubble for this (chain_id, from), finalize
+        // it in-place instead of appending a brand-new msg-entry. Non-
+        // streaming providers never populate `_streamingBubbles`, so they
+        // flow through the original ``_addMessageEntry`` path below.
+        // Key shape — see Fix A note in `_handleMessageDelta`.
+        const streamKey = this._streamBubbleKey(data.chain_id, data.from);
+        let finalized = false;
+        if (streamKey && this._streamingBubbles.has(streamKey)) {
+            finalized = this._finalizeStreamingBubble(streamKey, data);
+        }
+        if (!finalized) {
+            this._addMessageEntry(data);
+        }
+
         this.graph.animateEdge(data.from, data.to);
         if (data.model) this.graph.updateAgentStatus(data.from, this.agents[data.from]?.status || '', data.model || '');
         // Push last activity preview into sender node
@@ -1475,6 +1500,148 @@ class Dashboard {
         if (this.selectedAgent && (data.from === this.selectedAgent || data.to === this.selectedAgent)) {
             this._refreshNodePanel();
         }
+    }
+
+    // ── Streaming: message_delta → active bubble (task #14) ──────────────
+    //
+    // Contract (mirrors TUI task #13):
+    //   message_delta { from, chain_id, delta, index }
+    //       — Fix A: ``index`` is monotonic per (chain_id, from). Two
+    //         agents can share a chain_id and each emit their own 0..N
+    //         sequence, so the active-bubble map is keyed by the pair,
+    //         not chain_id alone.
+    //       — We don't gate on ``index`` (WS preserves order; if the
+    //         daemon ever ships out-of-order, that's a #12 bug to fix
+    //         upstream, not paper over here).
+    //   Terminal ``message`` event finalizes the bubble (drops .pending,
+    //       removes caret). Fix B: we keep the streamed text — final
+    //       ``message.content`` is the ``send_message`` tool arg, not the
+    //       streamed assistant text. Replacing produces a visible jump.
+    //   init.streaming_enabled — informational; dispatch is driven by
+    //       whether deltas actually arrive, so providers that don't stream
+    //       fall through to the non-streaming ``message`` path unchanged.
+    //
+    // NOTE: the DOM class is ``.msg-entry`` (not ``.bubble``); the
+    // streaming-pending style attaches as ``.msg-entry.pending`` in
+    // web/static/style.css. No ``animateEdge`` / ``_clearThinking`` /
+    // ``_rawMessages.push`` here — those are terminal-event duties.
+
+    // Composite key for `_streamingBubbles`. Fix A: per-agent-per-chain.
+    _streamBubbleKey(chainId, from) {
+        if (!chainId) return '';
+        return `${String(chainId)}::${String(from || '')}`;
+    }
+
+    _handleMessageDelta(data) {
+        const chainId = data && data.chain_id ? String(data.chain_id) : '';
+        const from = data && data.from ? String(data.from) : '';
+        const delta = data && typeof data.delta === 'string' ? data.delta : '';
+        if (!chainId || !delta) return;
+        const key = this._streamBubbleKey(chainId, from);
+
+        let bubble = this._streamingBubbles.get(key);
+        if (!bubble) {
+            bubble = this._createStreamingBubble(chainId, data);
+            if (!bubble) return;
+            this._streamingBubbles.set(key, bubble);
+        }
+        bubble.text += delta;
+        if (bubble.full) {
+            bubble.full.textContent = bubble.text;
+        }
+        if (bubble.preview) {
+            const firstLine = bubble.text.split('\n')[0].slice(0, 120);
+            bubble.preview.textContent = firstLine;
+        }
+        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+    }
+
+    _createStreamingBubble(chainId, data) {
+        if (!this.messageLog) return null;
+        const empty = this.messageLog.querySelector('.empty-state');
+        if (empty) empty.remove();
+
+        const from = data.from || '';
+        const to = data.to || '';
+        const fromClass = AGENT_CSS_CLASS[from] || 'agent-user';
+        const toClass = AGENT_CSS_CLASS[to] || 'agent-user';
+        const modelLabel = this._shortModel(data.model || '');
+
+        const entry = document.createElement('div');
+        entry.className = 'msg-entry pending';
+        entry.dataset.chainId = chainId;
+        entry.dataset.streamFrom = from;
+        entry.innerHTML = `
+            <div class="msg-header">
+                <span class="msg-time">·</span>
+                <span class="${fromClass}">${this._escapeHtml(from || '…')}</span>
+                ${modelLabel ? `<span class="msg-model-pill">${this._escapeHtml(modelLabel)}</span>` : ''}
+                <span class="msg-arrow">&rarr;</span>
+                <span class="${toClass}">${this._escapeHtml(to || '…')}</span>
+                <span class="msg-type-badge msg-type-system">streaming</span>
+            </div>
+            <div class="msg-preview"></div>
+            <div class="msg-expanded">
+                <div class="msg-section-label">Payload</div>
+                <div class="msg-full-content"></div>
+            </div>
+        `;
+        entry.addEventListener('click', () => entry.classList.toggle('expanded'));
+        this.messageLog.appendChild(entry);
+        this.messageLog.scrollTop = this.messageLog.scrollHeight;
+
+        return {
+            entry,
+            text: '',
+            preview: entry.querySelector('.msg-preview'),
+            full: entry.querySelector('.msg-full-content'),
+            from,
+            to,
+        };
+    }
+
+    // Fix B: do NOT overwrite the streamed body with msg.content. Final
+    // `content` is the send_message tool arg, semantically distinct from
+    // the assistant text we streamed — replacing causes a visible jump.
+    // We only update the header (elapsed/to/model/depth/badge) since
+    // those were placeholders during streaming.
+    _finalizeStreamingBubble(streamKey, msg) {
+        const bubble = this._streamingBubbles.get(streamKey);
+        if (!bubble || !bubble.entry) {
+            this._streamingBubbles.delete(streamKey);
+            return false;
+        }
+
+        // Swap placeholder meta (·, …) in the header for the real values
+        // now that the terminal event has arrived with authoritative
+        // routing/model/depth info. The body (.msg-full-content,
+        // .msg-preview) stays as the accumulated streamed text — that's
+        // Fix B, see the contract block above.
+        const header = bubble.entry.querySelector('.msg-header');
+        if (header) {
+            const elapsed = msg && msg.elapsed !== undefined ? msg.elapsed.toFixed(1) + 's' : '';
+            const msgType = (msg && (msg.msg_type || msg.type)) || 'system';
+            const badgeCls = MSG_TYPE_BADGE_CLASS[msgType] || 'msg-type-system';
+            const from = (msg && msg.from) || bubble.from || '';
+            const to = (msg && msg.to) || bubble.to || '';
+            const fromClass = AGENT_CSS_CLASS[from] || 'agent-user';
+            const toClass = AGENT_CSS_CLASS[to] || 'agent-user';
+            const modelLabel = this._shortModel((msg && msg.model) || '');
+            const depth = msg && msg.depth !== undefined ? msg.depth : '';
+            header.innerHTML = `
+                <span class="msg-time">${elapsed}</span>
+                <span class="${fromClass}">${this._escapeHtml(from)}</span>
+                ${modelLabel ? `<span class="msg-model-pill">${this._escapeHtml(modelLabel)}</span>` : ''}
+                <span class="msg-arrow">&rarr;</span>
+                <span class="${toClass}">${this._escapeHtml(to)}</span>
+                <span class="msg-type-badge ${badgeCls}">${this._escapeHtml(msgType)}</span>
+                ${depth !== '' ? `<span class="msg-depth-badge">${this._escapeHtml(String(depth))}</span>` : ''}
+            `;
+        }
+
+        bubble.entry.classList.remove('pending');
+        this._streamingBubbles.delete(streamKey);
+        return true;
     }
 
     _handleAgentStatus(data) {
@@ -3308,6 +3475,15 @@ class Dashboard {
         this._setRunActive(false);
         this.graph.setRunState('completed');
         this._updateSessionUrl(data.session_id || '');
+
+        // Drop any streaming bookkeeping that didn't get closed by a
+        // terminal `message` event (a crashed agent, a WS drop right
+        // at the end, etc.). Without this, `_streamingBubbles` leaks
+        // bubble references across runs in a long-lived dashboard tab.
+        // Parity with the TUI's `_handle_run_complete` in tui_repl.py.
+        if (this._streamingBubbles && this._streamingBubbles.size > 0) {
+            this._streamingBubbles.clear();
+        }
 
         // Refresh the session lock if run_complete carries ``locked_topology``
         // (parity with the TUI's handler in ``orb/cli/tui_repl.py``). This is

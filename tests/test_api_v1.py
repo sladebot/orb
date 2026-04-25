@@ -106,6 +106,53 @@ class TestSessionLifecycle:
         resp = await test_client.delete("/api/v1/sessions/nope")
         assert resp.status == 404
 
+    async def test_create_session_defaults_streaming_enabled_true(self, client):
+        """Streaming is on by default — callers who don't opt out get deltas.
+
+        Contract with stream-tui/#13 and stream-dashboard/#14 (shared on
+        ``tui-improvements``): init payload MUST carry
+        ``streaming_enabled: true`` so clients can decide whether to paint
+        active-turn bubbles with streaming state or fall back to the
+        one-shot ``message`` event path.
+        """
+        test_client, server = client
+        create = await (await test_client.post("/api/v1/sessions", json={})).json()
+        session_id = create["data"]["session_id"]
+        runtime = server.manager.get_session(session_id)
+        assert runtime._conversation_session.streaming_enabled is True  # noqa: SLF001
+        init = runtime.current_init_event(session_id=session_id)
+        assert init["streaming_enabled"] is True
+
+    async def test_create_session_honors_explicit_streaming_false(self, client):
+        """Only a literal ``false`` disables streaming.
+
+        Strict check mirrors ``approval_required`` (inverted): the field is
+        default-on, so we disable ONLY when the request explicitly sends
+        ``streaming_enabled: false``. Strings like ``"false"`` or missing
+        fields must not flip the flag off.
+        """
+        test_client, server = client
+        resp = await test_client.post(
+            "/api/v1/sessions", json={"streaming_enabled": False},
+        )
+        assert resp.status == 201
+        session_id = (await resp.json())["data"]["session_id"]
+        runtime = server.manager.get_session(session_id)
+        assert runtime._conversation_session.streaming_enabled is False  # noqa: SLF001
+        init = runtime.current_init_event(session_id=session_id)
+        assert init["streaming_enabled"] is False
+
+    async def test_create_session_ignores_nonbool_streaming_values(self, client):
+        """A stringy ``"false"`` must NOT disable streaming — strict True check."""
+        test_client, server = client
+        resp = await test_client.post(
+            "/api/v1/sessions", json={"streaming_enabled": "false"},
+        )
+        session_id = (await resp.json())["data"]["session_id"]
+        runtime = server.manager.get_session(session_id)
+        # "false" (string) isn't a real bool-false, so we keep the default (True).
+        assert runtime._conversation_session.streaming_enabled is True  # noqa: SLF001
+
 
 class TestRunControl:
     async def test_start_run_against_missing_session_404s(self, client):

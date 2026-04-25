@@ -764,6 +764,113 @@ async def test_run_complete_refreshes_locked_topology():
 
 
 @pytest.mark.asyncio
+async def test_slash_clear_drops_streaming_turn_state():
+    """``/clear`` must wipe ``_streaming_turns`` along with the DOM —
+    otherwise the next ``message_delta`` for a still-tracked
+    ``(chain_id, from)`` pair tries to ``.append`` on a widget that's
+    no longer mounted. Silent data loss and possible exception.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        # Stream a delta to populate _streaming_turns.
+        app._handle_server_event({
+            "type": "message_delta",
+            "from": "coder",
+            "chain_id": "chain-X",
+            "delta": "hello",
+            "index": 0,
+        })
+        await pilot.pause()
+        assert ("chain-X", "coder") in app._streaming_turns
+
+        await app._run_slash_command("/clear")
+        await pilot.pause()
+
+        # The streaming-turns tracking dict must be empty (this is the
+        # bug fix). The DOM holds only the "stream cleared" system turn
+        # that ``/clear`` emits as feedback, not the prior streamed Turn.
+        assert app._streaming_turns == {}
+        from orb.cli.tui_repl import Turn, ReplStream
+        stream = app.query_one(ReplStream)
+        remaining = list(stream.query(Turn))
+        # At most one Turn — the "stream cleared" system whisper.
+        assert len(remaining) <= 1
+
+
+@pytest.mark.asyncio
+async def test_slash_stop_emits_whisper_when_no_session():
+    """``/stop`` must surface a clear "no session" whisper instead of
+    silently no-op'ing — users were left thinking the command worked.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        # Explicitly unset session_id so the early-return path fires.
+        app.session_id = ""
+        await pilot.pause()
+
+        await app._run_slash_command("/stop")
+        await pilot.pause()
+
+        # Look for a whisper about no active session.
+        from orb.cli.tui_repl import ReplStream, Whisper
+        stream = app.query_one(ReplStream)
+        whispers = list(stream.query(Whisper))
+        assert any(
+            "no active session" in str(w.render()).lower()
+            or "nothing to stop" in str(w.render()).lower()
+            for w in whispers
+        ), f"expected a 'no active session' whisper, got: {[str(w.render()) for w in whispers]}"
+
+
+@pytest.mark.asyncio
+async def test_session_switch_clears_streaming_state():
+    """Resuming a different session (``init`` with a new ``session_id``)
+    must drop ``_streaming_turns`` along with the existing approval
+    state. Otherwise a stale ``(chain_id, from)`` from session A could
+    capture deltas in session B.
+    """
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        # Session A + a streamed delta.
+        app._handle_server_event({**_init_payload(), "session_id": "sid-A"})
+        await pilot.pause()
+        app._handle_server_event({
+            "type": "message_delta",
+            "from": "coder",
+            "chain_id": "chain-Y",
+            "delta": "hi",
+            "index": 0,
+        })
+        await pilot.pause()
+        assert ("chain-Y", "coder") in app._streaming_turns
+
+        # Switch to session B.
+        app._handle_server_event({**_init_payload(), "session_id": "sid-B"})
+        await pilot.pause()
+
+        assert app._streaming_turns == {}, (
+            "stale streaming state leaked across session switch"
+        )
+
+
+@pytest.mark.asyncio
 async def test_slash_topology_works_when_unlocked():
     """Without a lock, /topology continues to mutate ``_topology`` as before."""
     app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="auto")
@@ -1086,3 +1193,99 @@ async def test_file_write_rejected_flips_pill_to_rejected():
         assert "rejected" in rendered
         # Pending entry cleared from state.
         assert "req-1" not in app.pending_writes
+
+
+# ── Test: streaming flow (task #13) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_message_delta_streams_into_one_turn_then_finalizes():
+    """Drive a token-by-token stream — three deltas + a terminal
+    ``message`` — through a real mounted app. Exactly one Turn must
+    be mounted for that chain_id, its body must accumulate the
+    deltas, and the final ``message`` must replace the body with the
+    canonical full content rather than mounting a second Turn."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        stream = app.query_one(ReplStream)
+        turns_before = len(list(stream.query(Turn)))
+
+        for i, chunk in enumerate(["Hel", "lo, ", "world"]):
+            app._handle_server_event({
+                "type": "message_delta",
+                "from": "coder",
+                "chain_id": "chain-A",
+                "delta": chunk,
+                "index": i,
+            })
+            await pilot.pause()
+
+        # Exactly one new Turn was mounted for this (chain, agent).
+        turns_mid = list(stream.query(Turn))
+        assert len(turns_mid) == turns_before + 1
+        streaming_turn = turns_mid[-1]
+        assert streaming_turn.body == "Hello, world"
+        # Per task #12 contract, _streaming_turns is keyed by (chain_id, from)
+        # so two agents replying on the same chain stay isolated.
+        assert app._streaming_turns.get(("chain-A", "coder")) is streaming_turn
+
+        # Terminal message closes the stream — chain is popped from tracking.
+        # The accumulated streamed body is preserved (we don't overwrite with
+        # data["content"], which is the send_message tool arg, not the
+        # streamed assistant text — they differ semantically).
+        app._handle_server_event({
+            "type": "message",
+            "from": "coder",
+            "chain_id": "chain-A",
+            "content": "Hello, world!",
+            "model": "sonnet",
+        })
+        await pilot.pause()
+
+        turns_after = list(stream.query(Turn))
+        # No second Turn mounted on finalization.
+        assert len(turns_after) == len(turns_mid)
+        # Streamed body preserved — NOT overwritten with the canonical content.
+        assert streaming_turn.body == "Hello, world"
+        assert ("chain-A", "coder") not in app._streaming_turns
+        # Render still works (no MarkupError).
+        _render_plain(streaming_turn)
+
+
+@pytest.mark.asyncio
+async def test_message_without_preceding_deltas_uses_non_streaming_path():
+    """A ``message`` event for a chain we never saw deltas for must
+    fall back to mounting a fresh Turn (the non-streaming path).
+    Providers without stream support hit this branch."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event(_init_payload())
+        await pilot.pause()
+
+        stream = app.query_one(ReplStream)
+        turns_before = len(list(stream.query(Turn)))
+
+        app._handle_server_event({
+            "type": "message",
+            "from": "coder",
+            "content": "no streaming here",
+            "model": "haiku",
+        })
+        await pilot.pause()
+
+        turns_after = list(stream.query(Turn))
+        assert len(turns_after) == turns_before + 1
+        assert "no streaming here" in _render_plain(turns_after[-1])

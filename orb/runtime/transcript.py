@@ -52,6 +52,13 @@ class ConversationSession:
     # ``POST /api/v1/sessions/{sid}/approvals/{request_id}``. Default False
     # so the existing autonomous path stays zero-overhead.
     approval_required: bool = False
+    # Per-session toggle: when True (default), streaming providers invoke
+    # the agent's ``on_chunk`` hook and the bridge broadcasts a
+    # ``message_delta`` envelope per token. Set to False at session
+    # creation to suppress deltas entirely — the final ``message``
+    # event still fires for back-compat. See the shared contract with
+    # stream-tui/#13 and stream-dashboard/#14 on ``tui-improvements``.
+    streaming_enabled: bool = True
 
     def add_message(self, msg: Message, *, max_turns: int = 500) -> None:
         self._append(ConversationTurn(
@@ -166,6 +173,7 @@ class ConversationSession:
             "locked_agent_models": dict(self.locked_agent_models),
             "locked_model_pin": self.locked_model_pin,
             "approval_required": bool(self.approval_required),
+            "streaming_enabled": bool(self.streaming_enabled),
         }
 
     @classmethod
@@ -181,6 +189,12 @@ class ConversationSession:
             locked_agent_models=dict(payload.get("locked_agent_models") or {}),
             locked_model_pin=str(payload.get("locked_model_pin") or ""),
             approval_required=bool(payload.get("approval_required") or False),
+            # Default-on: a missing field in a persisted session (older
+            # than the streaming work) should resume with streaming on,
+            # not silently disabled. We only honor a literal ``False``.
+            streaming_enabled=(
+                False if payload.get("streaming_enabled") is False else True
+            ),
         )
         session.turns = [
             ConversationTurn(**turn)
