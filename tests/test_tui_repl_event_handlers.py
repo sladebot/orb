@@ -710,6 +710,79 @@ def test_handle_message_delta_appends_to_existing_turn():
     existing.update.assert_called()  # at least one re-render fired
 
 
+def test_turn_append_is_o1_per_chunk():
+    """``Turn.append`` must be O(1) per call — append a chunk, set the
+    dirty flag, schedule a render via ``set_timer``. The expensive
+    markup rebuild is deferred to the debounce timer.
+
+    Regression guard for the post-streaming review's perf finding:
+    pre-debounce, 1000 chunks against a body of size N produced O(N²)
+    work because every ``append`` rebuilt the full markup. With the
+    chunk-list + debounce, each ``append`` is constant work and the
+    rebuild happens at most once per ``_STREAM_FLUSH_MS`` window.
+
+    Mocks ``set_timer`` to return a sentinel — the real timer can't
+    fire without an event loop, and the synchronous fallback path
+    only triggers when ``set_timer`` raises. This test verifies the
+    happy-path contract: ``append`` stores + schedules; rebuild defers.
+    """
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "")
+    rebuild_calls = 0
+    real_rebuild = turn._rebuild_turn_markup
+
+    def _counting_rebuild():
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        real_rebuild()
+    turn._rebuild_turn_markup = _counting_rebuild
+    # Mock ``set_timer`` to short-circuit — return a fake Timer-like
+    # so the except-fallback inside ``_schedule_flush`` doesn't fire.
+    # In a real mounted app this is what Textual provides automatically.
+    turn.set_timer = MagicMock(return_value=MagicMock(name="FakeTimer"))
+
+    # Reset the rebuild counter — constructor already called it once.
+    rebuild_calls = 0
+    for i in range(100):
+        turn.append(f"chunk-{i} ")
+
+    # Body is correct (joined view of all chunks).
+    expected = "".join(f"chunk-{i} " for i in range(100))
+    assert turn.body == expected
+    # Crucial assertion: NO synchronous rebuild fired during the 100
+    # appends. The rebuild is deferred to the timer callback.
+    assert rebuild_calls == 0, (
+        f"append() should defer rebuild to a debounced flush, but "
+        f"_rebuild_turn_markup was called {rebuild_calls} times "
+        f"during 100 appends"
+    )
+    # set_timer was scheduled at most once — subsequent appends within
+    # the same window short-circuit because ``_pending_flush`` is set.
+    assert turn.set_timer.call_count == 1
+    # Manually fire the deferred flush — the rebuild happens once.
+    turn._flush_streamed_render()
+    assert rebuild_calls == 1
+
+
+def test_set_body_cancels_pending_streaming_flush():
+    """``set_body`` (used on terminal-message finalization) replaces the
+    body wholesale and should cancel any in-flight debounce timer —
+    otherwise a late flush would re-render the same content twice."""
+    from orb.cli.tui_repl import Turn
+
+    turn = Turn("coder", 0.0, "")
+    # Stage a pending flush by appending without an event loop.
+    turn.append("hello")
+    # ``_pending_flush`` should now hold a Timer object (or be cleared
+    # if the synchronous fallback fired). Accept both shapes.
+    turn.set_body("final body")
+    # After set_body the pending handle is None (cleared) and dirty is False.
+    assert turn._pending_flush is None
+    assert turn._dirty is False
+    assert turn.body == "final body"
+
+
 def test_handle_message_delta_keys_per_agent_so_two_agents_get_separate_turns():
     """#12 contract: monotonic ``index`` is per-agent-per-chain. Two
     agents on the same ``chain_id`` each emit their own 0..N sequence

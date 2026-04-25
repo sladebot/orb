@@ -421,6 +421,13 @@ class Turn(Static):
     """
 
     _LANE_WIDTH = 10  # chars before the │ separator
+    # Streaming render coalesce window. Multiple ``append`` calls inside
+    # this window collapse to a single ``_rebuild_turn_markup`` — which
+    # is the dominant cost (markup re-parse + Textual update). At ~20fps
+    # this still feels live; raising it would make streamed output feel
+    # choppy. Lowering it costs CPU on long responses without a visible
+    # win. 50ms is the sweet spot per the post-streaming review.
+    _STREAM_FLUSH_MS = 50
 
     def __init__(self, speaker: str, elapsed: float, body: str, *, model: str = "") -> None:
         super().__init__()
@@ -431,10 +438,32 @@ class Turn(Static):
         # to ``AGENT_STYLE`` would already be picked up.
         self.speaker = speaker
         self.elapsed = elapsed
-        self.body = body or ""
+        # Body is stored as a list of chunks rather than a single
+        # string so streaming ``append`` is O(1) per call instead of
+        # O(n) on the body length. The single ``body`` attribute is
+        # kept for backward compatibility — readers see the joined
+        # string, writers reset the list. See the property below.
+        self._body_chunks: list[str] = [body] if body else []
         self.model = (model or "").strip()
+        # Debounce state for streaming renders. ``_pending_flush`` is
+        # the active timer handle (None when no flush is scheduled).
+        # ``_dirty`` is set by ``append`` and cleared by the flush.
+        self._pending_flush = None
+        self._dirty = False
         self._rebuild_turn_markup()
         self.add_class("turn")
+
+    @property
+    def body(self) -> str:
+        """Joined view of the accumulated chunks. Read-only-ish: setting
+        it replaces the chunk list wholesale (preserved so legacy callers
+        like ``set_body`` and tests that ``setattr(turn, 'body', x)``
+        keep working)."""
+        return "".join(self._body_chunks)
+
+    @body.setter
+    def body(self, value: str) -> None:
+        self._body_chunks = [value] if value else []
 
     def _rebuild_turn_markup(self) -> None:
         """Rebuild the rendered markup from current ``speaker / elapsed
@@ -475,17 +504,51 @@ class Turn(Static):
         self.update("\n".join(out))
 
     def append(self, delta: str) -> None:
-        """Extend the body with a streamed token chunk and re-render.
+        """Extend the body with a streamed token chunk and schedule a
+        re-render.
 
         Streaming path (task #13): the bridge broadcasts ``message_delta``
         events with monotonically-indexed chunks; the TUI's
         ``_handle_message_delta`` calls this on the active Turn so the
         text appears token-by-token instead of all-at-once at the end.
+
+        Performance: ``append`` is O(1) (list.append + flag set). The
+        markup rebuild — which is what dominates total cost — is
+        coalesced via a ``_STREAM_FLUSH_MS`` timer so 1000 fast chunks
+        produce ~20 renders, not 1000. The visible streaming feel is
+        preserved (50ms ≈ 20fps), but a long response goes from O(n²)
+        to O(n) wall time.
         """
         if not delta:
             return
-        self.body = (self.body or "") + delta
-        self._rebuild_turn_markup()
+        self._body_chunks.append(delta)
+        self._dirty = True
+        self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        """Arm a one-shot timer to coalesce streaming renders. If a
+        timer is already pending, do nothing — the current handle
+        will catch any chunks that arrived since."""
+        if self._pending_flush is not None:
+            return
+        try:
+            # ``set_timer`` returns a Timer handle on Textual >= 0.x;
+            # the call may fail if the widget isn't mounted yet (e.g.
+            # during the constructor's first render). Fall back to a
+            # synchronous flush in that case so we don't drop the chunk.
+            self._pending_flush = self.set_timer(
+                self._STREAM_FLUSH_MS / 1000.0, self._flush_streamed_render
+            )
+        except Exception:  # noqa: BLE001
+            self._flush_streamed_render()
+
+    def _flush_streamed_render(self) -> None:
+        """Render-now callback for the debounce timer. Clears the
+        pending handle + dirty flag, then rebuilds markup once."""
+        self._pending_flush = None
+        if self._dirty:
+            self._dirty = False
+            self._rebuild_turn_markup()
 
     def set_body(self, body: str, *, model: str | None = None) -> None:
         """Replace the body wholesale and re-render.
@@ -494,8 +557,18 @@ class Turn(Static):
         chain (replaces accumulated deltas with the canonical full
         content) and when there's no retroactive replay needed even
         if some deltas were dropped on the WS.
+
+        Cancels any pending streaming flush — the wholesale replace
+        supersedes any in-flight delta-debounce.
         """
-        self.body = body or ""
+        self._body_chunks = [body] if body else []
+        self._dirty = False
+        if self._pending_flush is not None:
+            try:
+                self._pending_flush.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._pending_flush = None
         if model is not None:
             self.model = (model or "").strip()
         self._rebuild_turn_markup()
