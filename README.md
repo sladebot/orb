@@ -60,9 +60,11 @@ with per-hunk author chips.
 
 The TUI streams LLM responses **token-by-token** into the active turn — no waiting for the full message at completion. Multi-agent topologies (e.g. `triad`) keep each agent's stream in its own lane.
 
-**Pre-write approval.** By default, agent file writes pause for explicit user approval — the TUI prompts with `y` (accept), `a` (accept all), `e` (edit), `n` (reject). Pass `--no-review` to `orb tui` to let agents write directly, or set `approval_required: false` when creating a session via the API.
+**Pre-write approval.** By default, agent file writes pause for explicit user approval — the TUI prompts with `y` (accept), `a` (accept all), `e` (edit), `n` (reject). The keys work even while the composer has focus (so you can answer the prompt without first clicking out of the input field) and only intercept while a write is actually pending — typing prose like "yes, ship it" into the composer reads as text when no approval prompt is up. Pass `--no-review` to `orb tui` to let agents write directly, or set `approval_required: false` when creating a session via the API.
 
-**Slash commands.** Type `/help` in the TUI for the full list. The picker on launch covers topology selection (no `--topology` flag needed); `/topology` mid-session is honored when the topology isn't already locked.
+**Streaming.** LLM responses stream token-by-token at ~20fps (renders coalesced via a 50ms debounce on `Turn.append`, so a 1000-chunk response feels live without the O(n²) re-render cost of rebuilding markup per chunk). Two agents responding on the same chain — e.g. coordinator and coder echoing through `triad` — keep their streams in separate lanes keyed by `(chain_id, from)`. The terminal `message` event finalizes a turn without overwriting its streamed body (the routed `message.content` is the `send_message` tool argument, not the streamed assistant text — they intentionally differ).
+
+**Slash commands.** `Enter` submits the composer; `Ctrl+Enter` does the same for muscle memory. `/help` lists every command; the picker on launch covers topology selection (no `--topology` flag needed). `/clear`, `/stop`, `/resume`, `/topology <id>`, and `/quit` round out the in-app vocabulary. `/clear` and the resume flow both reset streaming state so a stale chain from a prior view never captures fresh deltas.
 
 ## What Orb Does
 
