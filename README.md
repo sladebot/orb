@@ -56,7 +56,7 @@ with per-hunk author chips.
 
 ### TUI
 
-![Orb TUI](docs/orb-tui.png)
+![Orb TUI](docs/orb-tui.svg)
 
 ## What Orb Does
 
