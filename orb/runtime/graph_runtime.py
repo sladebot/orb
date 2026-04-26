@@ -40,17 +40,11 @@ class GraphRuntime:
             return ("Unknown", "Unknown topology", {})
 
         positions: dict[str, str] = {}
-        for agent_id in topo.agents:
-            if agent_id == topo.entry_agent:
-                positions[agent_id] = "entry router"
-            elif "coder" in agent_id:
-                positions[agent_id] = "implementation hub"
-            elif "reviewer" in agent_id:
-                positions[agent_id] = f"review branch {agent_id.split('_')[-1].upper()}" if "_" in agent_id else "quality edge"
-            elif "tester" in agent_id:
-                positions[agent_id] = "validation edge"
+        for agent_id, agent_schema in topo.agents.items():
+            if agent_schema.position_hint:
+                positions[agent_id] = agent_schema.position_hint
             else:
-                positions[agent_id] = agent_id
+                positions[agent_id] = agent_schema.role.lower()
         return (topo.label, topo.description, positions)
 
     @staticmethod

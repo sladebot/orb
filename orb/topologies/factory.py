@@ -171,16 +171,24 @@ def _resolve_model_selection(
     existing_agents: dict[str, AgentConfig],
 ) -> "ModelConfig | None":
     """Resolve model_selection hints to a concrete ModelConfig."""
-    from ..llm.types import ModelConfig, ModelTier
+    from ..llm.types import CODEX_MODELS, DEFAULT_MODELS, ModelTier, OPENAI_MODELS
 
-    provider_models: dict[str, ModelConfig] = {
-        "anthropic": ModelConfig(ModelTier.CLOUD_STRONG, "claude-opus-4-20250514", "anthropic"),
-        "openai-codex": ModelConfig(ModelTier.CLOUD_STRONG, "gpt-5.4", "openai-codex"),
-        "openai": ModelConfig(ModelTier.CLOUD_STRONG, "o3", "openai"),
-        "ollama": ModelConfig(ModelTier.LOCAL_LARGE, "qwen3.5:27b", "ollama"),
+    provider_to_models: dict[str, dict[ModelTier, "ModelConfig"]] = {
+        "anthropic": DEFAULT_MODELS,
+        "openai": OPENAI_MODELS,
+        "openai-codex": CODEX_MODELS,
+        "ollama": DEFAULT_MODELS,
     }
 
-    available = [p for p in provider_models if p in providers]
+    def _best_for(provider: str) -> "ModelConfig | None":
+        models = provider_to_models.get(provider)
+        if models and ModelTier.CLOUD_STRONG in models:
+            return models[ModelTier.CLOUD_STRONG]
+        if models:
+            return next(iter(models.values()))
+        return None
+
+    available = [p for p in provider_to_models if p in providers]
 
     if selection.prefer_different_provider_than:
         ref_agent = existing_agents.get(selection.prefer_different_provider_than)
@@ -188,16 +196,16 @@ def _resolve_model_selection(
             exclude = ref_agent.pinned_model.provider
             candidates = [p for p in available if p != exclude]
             if candidates:
-                return provider_models[candidates[0]]
+                return _best_for(candidates[0])
 
     if selection.prefer_provider and selection.prefer_provider in available:
-        return provider_models[selection.prefer_provider]
+        return _best_for(selection.prefer_provider)
 
     for provider in selection.fallback_providers:
         if provider in available:
-            return provider_models[provider]
+            return _best_for(provider)
 
     if available:
-        return provider_models[available[0]]
+        return _best_for(available[0])
 
     return None

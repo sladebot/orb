@@ -100,3 +100,8 @@ def get_loader() -> TopologyLoader:
     if _loader is None:
         _loader = TopologyLoader()
     return _loader
+
+
+def reset_loader() -> None:
+    global _loader
+    _loader = None

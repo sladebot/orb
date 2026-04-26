@@ -23,6 +23,7 @@ class AgentSchema(BaseModel):
     enable_filesystem: bool = False
     suppress_context_guidelines: bool = False
     model_selection: ModelSelectionSchema | None = None
+    position_hint: str | None = None
 
 
 class GraphViewSchema(BaseModel):

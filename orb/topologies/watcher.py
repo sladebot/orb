@@ -63,3 +63,10 @@ def get_watcher() -> TopologyWatcher:
     if _watcher is None:
         _watcher = TopologyWatcher()
     return _watcher
+
+
+def reset_watcher() -> None:
+    global _watcher
+    if _watcher is not None:
+        _watcher.stop()
+    _watcher = None

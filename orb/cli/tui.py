@@ -646,11 +646,14 @@ class GraphPanel(Static):
             t.append("  Type below and press Enter to start.\n\n", style="dim")
             from orb.topologies import get_loader
             loader = get_loader()
-            t.append("  Topologies available:\n", style="dim")
+            t.append("  Topologies available", style="dim")
+            marker_tid = s._topology_name
+            t.append(f"  (active: {marker_tid})\n", style="dim cyan")
             for topo in loader.list_all().values():
-                t.append(f"  {topo.label}\n", style="bold dim")
-                t.append(f"    --topology {topo.id}\n", style="dim")
-                t.append(f"    {len(topo.agents)} agents\n\n", style="dim cyan")
+                marker = " *" if topo.id == marker_tid else ""
+                t.append(f"    {topo.label}{marker}\n", style="bold dim")
+                t.append(f"      /topology {topo.id}  — {len(topo.agents)} agents\n", style="dim cyan")
+            t.append("\n  Commands: /topology <id>, /list-topologies, /reload-topologies\n\n", style="dim")
             return t
 
         # ── Topology graph ─────────────────────────────────────────────
@@ -1473,6 +1476,18 @@ class OrbTUI(App[None]):
             await self._post_json("/api/inject", {"to": entry, "message": raw})
             return
 
+        # Topology commands (idle only)
+        lower = raw.lower()
+        if lower.startswith("/topology "):
+            self._handle_topology_switch(lower.split()[-1])
+            return
+        if lower == "/list-topologies":
+            self._handle_list_topologies()
+            return
+        if lower == "/reload-topologies":
+            self._handle_reload_topologies()
+            return
+
         # New run
         await self._start_new_run(raw)
 
@@ -1539,6 +1554,39 @@ class OrbTUI(App[None]):
             ))
             self._refresh_all()
 
+    # ── Topology commands ──────────────────────────────────────────────────────
+
+    def _handle_topology_switch(self, new_topo: str) -> None:
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        if new_topo in loader.list_ids():
+            self._topology_name = new_topo
+            self.notify(f"Switched to topology: {new_topo}", severity="information", timeout=3)
+        else:
+            available = ", ".join(loader.list_ids())
+            self.notify(f"Unknown topology: {new_topo}. Available: {available}", severity="error", timeout=5)
+        self._refresh_all()
+
+    def _handle_list_topologies(self) -> None:
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        lines = []
+        for tid in loader.list_ids():
+            topo = loader.get(tid)
+            marker = " *" if tid == self._topology_name else ""
+            lines.append(f"{tid}: {topo.label} — {topo.description}{marker}")
+        self.notify("\n".join(lines), severity="information", timeout=8)
+
+    def _handle_reload_topologies(self) -> None:
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        loader.load(force=True)
+        self.notify("Topologies reloaded", severity="information", timeout=3)
+        self._refresh_all()
+
     # ── WebSocket client ──────────────────────────────────────────────────────
 
     async def _post_json(self, path: str, payload: dict) -> dict:
@@ -1601,6 +1649,8 @@ class OrbTUI(App[None]):
                 summary="Execution stopped before completion.",
             ))
             self._refresh_all()
+        elif t == "topologies_reloaded":
+            self._handle_reload_topologies()
         elif t == "stats":
             self._routed = data.get("message_count", self._routed)
             self._last_elapsed = data.get("elapsed", self._last_elapsed)

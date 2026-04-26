@@ -22,6 +22,7 @@ topologies:
           the correct node.
         base_complexity: 20
         suppress_context_guidelines: true
+        position_hint: "entry router"
 
       coder:
         role: "Coder"
@@ -32,6 +33,7 @@ topologies:
           follow-up changes.
         base_complexity: 50
         enable_filesystem: true
+        position_hint: "implementation hub"
 
       reviewer:
         role: "Reviewer"
@@ -41,6 +43,7 @@ topologies:
           feedback to the relevant neighbors.
         base_complexity: 65
         enable_filesystem: true
+        position_hint: "quality edge"
 
       tester:
         role: "Tester"
@@ -50,12 +53,39 @@ topologies:
           run commands, and report concrete findings.
         base_complexity: 25
         enable_filesystem: true
+        position_hint: "validation edge"
 
     edges:
       - [coordinator, coder]
       - [coder, reviewer]
       - [coder, tester]
       - [reviewer, tester]
+
+    graph_view:
+      rows:
+        -
+          - {text: "       "}
+          - {node: "coordinator"}
+        -
+          - {text: "            "}
+          - {edge: ["coordinator", "coder"], text: "|"}
+        -
+          - {text: "  "}
+          - {node: "coder"}
+          - {text: "  "}
+          - {edge: ["coder", "reviewer"], text: "---  "}
+          - {node: "reviewer"}
+        -
+          - {text: "  "}
+          - {edge: ["coder", "tester"], text: "|"}
+          - {text: "                 "}
+          - {edge: ["reviewer", "tester"], text: "|"}
+        -
+          - {text: "  "}
+          - {node: "tester"}
+          - {text: "  "}
+          - {edge: ["tester", "reviewer"], text: "-------------'"}
+      order: ["coordinator", "coder", "reviewer", "tester"]
 
     workflow_steps:
       - "Coordinator receives the user task and routes it into the graph."
@@ -97,6 +127,7 @@ topologies:
           route work and surface direct user clarifications to the correct node.
         base_complexity: 20
         suppress_context_guidelines: true
+        position_hint: "entry router"
 
       coder:
         role: "Coder"
@@ -107,6 +138,7 @@ topologies:
           follow-up changes.
         base_complexity: 50
         enable_filesystem: true
+        position_hint: "implementation hub"
 
       reviewer_a:
         role: "Reviewer A"
@@ -116,6 +148,7 @@ topologies:
           with the other reviewer and relevant neighbors.
         base_complexity: 65
         enable_filesystem: true
+        position_hint: "review branch A"
         model_selection:
           prefer_provider: "anthropic"
           fallback_providers: ["openai-codex", "openai", "ollama"]
@@ -128,6 +161,7 @@ topologies:
           with the other reviewer and relevant neighbors.
         base_complexity: 65
         enable_filesystem: true
+        position_hint: "review branch B"
         model_selection:
           prefer_different_provider_than: "reviewer_a"
           fallback_providers: ["openai-codex", "openai", "ollama"]
@@ -140,6 +174,7 @@ topologies:
           run commands, and report concrete findings.
         base_complexity: 25
         enable_filesystem: true
+        position_hint: "validation sink"
 
     edges:
       - [coordinator, coder]
@@ -155,6 +190,38 @@ topologies:
       - [reviewer_a, tester]
       - [tester, reviewer_b]
       - [reviewer_b, tester]
+
+    graph_view:
+      rows:
+        -
+          - {text: "         "}
+          - {node: "coordinator"}
+        -
+          - {text: "              "}
+          - {edge: ["coordinator", "coder"], text: "|"}
+        -
+          - {text: "         "}
+          - {node: "coder"}
+        -
+          - {text: "        "}
+          - {edge: ["coder", "reviewer_a"], text: "/"}
+          - {text: "     "}
+          - {edge: ["coder", "reviewer_b"], text: "\\\\"}
+        -
+          - {text: "  "}
+          - {node: "reviewer_a"}
+          - {text: "  "}
+          - {edge: ["reviewer_a", "reviewer_b"], text: "---  "}
+          - {node: "reviewer_b"}
+        -
+          - {text: "       "}
+          - {edge: ["reviewer_a", "tester"], text: "\\\\"}
+          - {text: "     "}
+          - {edge: ["reviewer_b", "tester"], text: "/"}
+        -
+          - {text: "          "}
+          - {node: "tester"}
+      order: ["coordinator", "coder", "reviewer_a", "reviewer_b", "tester"]
 
     workflow_steps:
       - "Coordinator routes the incoming task to the Coder."
