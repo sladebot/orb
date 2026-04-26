@@ -1685,6 +1685,168 @@ body {
     background: var(--bg-elevated);
 }
 
+/* ── Topology dropdown (anchored top-right of graph panel) ── */
+
+#topology-dropdown {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 20;
+}
+
+#topology-trigger {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.92);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    line-height: 1.4;
+}
+
+#topology-trigger:hover {
+    border-color: #c084fc;
+    box-shadow: 0 2px 8px rgba(147,51,234,0.1);
+}
+
+#topology-trigger.disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+#topology-trigger .topo-icon {
+    flex-shrink: 0;
+    color: #9333ea;
+}
+
+#topology-trigger-label {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+#topology-trigger-count {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-secondary);
+}
+
+.topo-chevron {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    transition: transform 0.15s;
+}
+
+#topology-dropdown.open .topo-chevron {
+    transform: rotate(180deg);
+}
+
+#topology-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 240px;
+    background: rgba(255,255,255,0.97);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(15,23,42,0.12), 0 2px 6px rgba(15,23,42,0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    overflow: hidden;
+    animation: topo-menu-in 0.12s ease-out;
+}
+
+@keyframes topo-menu-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+#topology-menu.hidden {
+    display: none;
+}
+
+.topo-menu-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-bottom: 1px solid var(--border-muted);
+}
+
+.topo-menu-item:last-child {
+    border-bottom: none;
+}
+
+.topo-menu-item:hover {
+    background: #faf5ff;
+}
+
+.topo-menu-item.active {
+    background: #f3e8ff;
+}
+
+.topo-menu-item-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.topo-menu-item-label {
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.topo-menu-item-agents {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-secondary);
+    margin-left: auto;
+}
+
+.topo-menu-item-desc {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.topo-menu-item.active .topo-menu-item-label {
+    color: #9333ea;
+}
+
+.topo-menu-item-check {
+    width: 14px;
+    font-size: 13px;
+    color: #9333ea;
+    flex-shrink: 0;
+}
+
+.topo-menu-warning {
+    padding: 8px 14px;
+    font-family: 'Inter', sans-serif;
+    font-size: 11px;
+    color: var(--orange);
+    background: #fff7ed;
+    border-bottom: 1px solid var(--border-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 #model-picker {
     display: flex;
     flex-wrap: wrap;

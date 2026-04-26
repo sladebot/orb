@@ -108,9 +108,24 @@ class Dashboard {
         });
 
         this._selectedModel = 'auto';
+        this._selectedTopology = 'auto';
+        this._topologyList = [];    // cached topology metadata
+        this._isRunActive = false;
         this._loadModelOptions();
+        this._loadTopologyOptions();
         this._setMessageEmptyState();
         this._setAgentEmptyState();
+
+        // Topology dropdown toggle
+        document.getElementById('topology-trigger').addEventListener('click', () => this._toggleTopologyMenu());
+        // Close dropdown on outside click
+        document.addEventListener('click', (e) => {
+            const dd = document.getElementById('topology-dropdown');
+            if (!dd.contains(e.target)) {
+                dd.classList.remove('open');
+                document.getElementById('topology-menu').classList.add('hidden');
+            }
+        });
 
         this._connect();
     }
@@ -165,6 +180,7 @@ class Dashboard {
             case 'stopped':        this._handleStopped();            break;
             case 'run_complete':   this._handleRunComplete(data);    break;
             case 'agent_activity': this._handleAgentActivity(data);  break;
+            case 'topologies_reloaded': this._loadTopologyOptions();   break;
         }
     }
 
@@ -173,6 +189,12 @@ class Dashboard {
         this._rawMessages = [];
         this._agentActivityLines = {};
         this._plan = data.plan || null;
+
+        // Update topology stat from server plan
+        if (this._plan?.topology?.label) {
+            document.getElementById('stat-topology').textContent = this._plan.topology.label;
+        }
+
         // Reset panel without side-effects of _hideNodePanel (which clears selectedAgent)
         document.getElementById('node-detail-panel').classList.add('ndp-closed');
         this.selectedAgent = null;
@@ -916,7 +938,131 @@ class Dashboard {
             this._modelLabels[this._selectedModel] || 'Auto';
     }
 
+    async _loadTopologyOptions() {
+        const res = await fetch('/api/topologies');
+        const data = await res.json();
+        this._topologyList = data.topologies || [];
+        this._renderTopologyMenu();
+        this._updateTopologyTrigger();
+    }
+
+    _renderTopologyMenu() {
+        const menu = document.getElementById('topology-menu');
+        menu.innerHTML = '';
+
+        // Auto option
+        const autoItem = this._createTopologyMenuItem({
+            id: 'auto',
+            label: 'Auto',
+            description: 'Let the runtime choose based on task complexity',
+            agents: [],
+        });
+        menu.appendChild(autoItem);
+
+        for (const t of this._topologyList) {
+            menu.appendChild(this._createTopologyMenuItem(t));
+        }
+    }
+
+    _createTopologyMenuItem(t) {
+        const item = document.createElement('div');
+        item.className = 'topo-menu-item' + (t.id === this._selectedTopology ? ' active' : '');
+
+        const header = document.createElement('div');
+        header.className = 'topo-menu-item-header';
+
+        const check = document.createElement('span');
+        check.className = 'topo-menu-item-check';
+        check.textContent = t.id === this._selectedTopology ? '\u2713' : '';
+        header.appendChild(check);
+
+        const label = document.createElement('span');
+        label.className = 'topo-menu-item-label';
+        label.textContent = t.label;
+        header.appendChild(label);
+
+        if (t.agents && t.agents.length > 0) {
+            const count = document.createElement('span');
+            count.className = 'topo-menu-item-agents';
+            count.textContent = `${t.agents.length} agents`;
+            header.appendChild(count);
+        }
+
+        item.appendChild(header);
+
+        if (t.description) {
+            const desc = document.createElement('div');
+            desc.className = 'topo-menu-item-desc';
+            desc.textContent = t.description;
+            item.appendChild(desc);
+        }
+
+        item.addEventListener('click', () => {
+            if (this._isRunActive) return;
+            this._selectedTopology = t.id;
+            this._renderTopologyMenu();
+            this._updateTopologyTrigger();
+            document.getElementById('topology-dropdown').classList.remove('open');
+            document.getElementById('topology-menu').classList.add('hidden');
+        });
+
+        return item;
+    }
+
+    _updateTopologyTrigger() {
+        const label = document.getElementById('topology-trigger-label');
+        const count = document.getElementById('topology-trigger-count');
+        const statEl = document.getElementById('stat-topology');
+
+        if (this._selectedTopology === 'auto') {
+            label.textContent = 'Auto';
+            count.textContent = '';
+            statEl.textContent = 'Auto';
+        } else {
+            const topo = this._topologyList.find(t => t.id === this._selectedTopology);
+            if (topo) {
+                label.textContent = topo.label;
+                count.textContent = `\u2014 ${topo.agents.length} agents`;
+                statEl.textContent = topo.label;
+            } else {
+                label.textContent = this._selectedTopology;
+                count.textContent = '';
+                statEl.textContent = this._selectedTopology;
+            }
+        }
+
+        // Disable trigger while running
+        const trigger = document.getElementById('topology-trigger');
+        trigger.classList.toggle('disabled', this._isRunActive);
+    }
+
+    _toggleTopologyMenu() {
+        if (this._isRunActive) return;
+        const dd = document.getElementById('topology-dropdown');
+        const menu = document.getElementById('topology-menu');
+
+        if (dd.classList.contains('open')) {
+            dd.classList.remove('open');
+            menu.classList.add('hidden');
+        } else {
+            // Re-render to pick up any hot-reloaded changes
+            this._renderTopologyMenu();
+
+            // Add warning banner if running
+            if (this._isRunActive) {
+                const warn = document.createElement('div');
+                warn.className = 'topo-menu-warning';
+                warn.innerHTML = '\u26a0 Cannot switch topology while agents are running';
+                menu.prepend(warn);
+            }
+
+            dd.classList.add('open');
+            menu.classList.remove('hidden');
+        }
+    }
+
     _setRunActive(active) {
+        this._isRunActive = active;
         const send = document.getElementById('query-send');
         const stop = document.getElementById('query-stop');
         const input = document.getElementById('query-input');
@@ -924,6 +1070,13 @@ class Dashboard {
         stop.classList.toggle('hidden', !active);
         input.disabled = active;
         if (!active) this._hideLoader();
+
+        // Close and disable/enable topology dropdown
+        document.getElementById('topology-trigger').classList.toggle('disabled', active);
+        if (active) {
+            document.getElementById('topology-dropdown').classList.remove('open');
+            document.getElementById('topology-menu').classList.add('hidden');
+        }
     }
 
     _showLoader(text = 'Starting agents…') {
@@ -973,6 +1126,7 @@ class Dashboard {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 query,
+                topology: this._selectedTopology,
                 model: this._selectedModel,
             }),
         });

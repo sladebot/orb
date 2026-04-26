@@ -12,7 +12,7 @@ load_dotenv()
 from ..llm.registry import build_providers
 from ..llm.types import ModelTier, ModelConfig, DEFAULT_MODELS
 from ..orchestrator.types import OrchestratorConfig
-from ..topologies.triad import create_triad
+from ..topologies import create_orchestrator, get_loader
 from .display import print_header, print_result, print_error
 from .repl import run_repl
 
@@ -151,7 +151,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dashboard-port", type=int, default=8080, help="Dashboard server port")
     parser.add_argument("--connect", type=str, help="Connect TUI or dashboard client to an existing Orb daemon URL")
     parser.add_argument("--dev", action="store_true", help="Dev mode: auto-restart on file changes")
-    parser.add_argument("--topology", choices=["auto", "triangle", "dual-review"], default="auto", help="Agent topology to use")
+    topology_choices = ["auto"] + get_loader().list_ids()
+    parser.add_argument("--topology", choices=topology_choices, default="auto", help="Agent topology to use")
     parser.add_argument("--tui", action="store_true", help="Launch interactive terminal TUI")
     parser.add_argument("--logs", action="store_true", help="Show live log panel in TUI (requires --tui)")
     parser.add_argument("--exit-after-run", action="store_true", help="Exit automatically after a non-interactive run completes")
@@ -424,6 +425,7 @@ async def async_main() -> None:
             model_overrides=model_overrides or None,
             trace=trace,
             tier_override=tier_override,
+            topology=args.topology if args.topology != "auto" else "triangle",
         )
     else:
         print_header()
@@ -432,23 +434,15 @@ async def async_main() -> None:
         orchestrator = None
 
         if not args.dashboard and trace:
-            if args.topology == "dual-review":
-                from ..topologies.dual_review import create_dual_review
-                orchestrator = create_dual_review(
-                    providers=providers,
-                    config=config,
-                    model_overrides=model_overrides or None,
-                    trace=False,
-                    tier_override=tier_override,
-                )
-            else:
-                orchestrator = create_triad(
-                    providers=providers,
-                    config=config,
-                    model_overrides=model_overrides or None,
-                    trace=False,
-                    tier_override=tier_override,
-                )
+            topology_id = args.topology if args.topology != "auto" else "triangle"
+            orchestrator = create_orchestrator(
+                topology_id,
+                providers=providers,
+                config=config,
+                model_overrides=model_overrides or None,
+                trace=False,
+                tier_override=tier_override,
+            )
             from .live_display import LiveDisplay
             live_display = LiveDisplay(budget=args.budget)
             # Pass topology/model info for the header (use defaults since no LLM prediction here)

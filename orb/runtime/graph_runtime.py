@@ -32,64 +32,48 @@ class GraphRuntime:
 
     @staticmethod
     def _topology_meta(topology_id: str) -> tuple[str, str, dict[str, str]]:
-        if topology_id == "dual-review":
-            return (
-                "Dual Review",
-                "Coder works with two reviewer branches and tester validation.",
-                {
-                    "coordinator": "entry router",
-                    "coder": "implementation hub",
-                    "reviewer_a": "review branch A",
-                    "reviewer_b": "review branch B",
-                    "tester": "validation sink",
-                },
-            )
-        return (
-            "Triad",
-            "Coder, reviewer, and tester collaborate through a compact graph.",
-            {
-                "coordinator": "entry router",
-                "coder": "implementation hub",
-                "reviewer": "quality edge",
-                "tester": "validation edge",
-            },
-        )
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        topo = loader.get(topology_id)
+        if topo is None:
+            return ("Unknown", "Unknown topology", {})
+
+        positions: dict[str, str] = {}
+        for agent_id in topo.agents:
+            if agent_id == topo.entry_agent:
+                positions[agent_id] = "entry router"
+            elif "coder" in agent_id:
+                positions[agent_id] = "implementation hub"
+            elif "reviewer" in agent_id:
+                positions[agent_id] = f"review branch {agent_id.split('_')[-1].upper()}" if "_" in agent_id else "quality edge"
+            elif "tester" in agent_id:
+                positions[agent_id] = "validation edge"
+            else:
+                positions[agent_id] = agent_id
+        return (topo.label, topo.description, positions)
 
     @staticmethod
     def _topology_graph_view(topology_id: str) -> dict:
-        if topology_id == "dual-review":
+        from orb.topologies import get_loader
+
+        loader = get_loader()
+        topo = loader.get(topology_id)
+        if topo is None:
+            return {"rows": [], "order": []}
+
+        if topo.graph_view is not None:
             return {
-                "rows": [
-                    [{"text": "         "}, {"node": "coordinator"}],
-                    [{"text": "              "}, {"edge": ["coordinator", "coder"], "text": "│"}],
-                    [{"text": "         "}, {"node": "coder"}],
-                    [{"text": "        "}, {"edge": ["coder", "reviewer_a"], "text": "╱"},
-                     {"text": "     "},
-                     {"edge": ["coder", "reviewer_b"], "text": "╲"}],
-                    [{"text": "  "}, {"node": "reviewer_a"}, {"text": "  "},
-                     {"edge": ["reviewer_a", "reviewer_b"], "text": "───  "},
-                     {"node": "reviewer_b"}],
-                    [{"text": "       "}, {"edge": ["reviewer_a", "tester"], "text": "╲"},
-                     {"text": "     "},
-                     {"edge": ["reviewer_b", "tester"], "text": "╱"}],
-                    [{"text": "          "}, {"node": "tester"}],
-                ],
-                "order": ["coordinator", "coder", "reviewer_a", "reviewer_b", "tester"],
+                "rows": topo.graph_view.rows,
+                "order": topo.graph_view.order,
             }
-        return {
-            "rows": [
-                [{"text": "       "}, {"node": "coordinator"}],
-                [{"text": "            "}, {"edge": ["coordinator", "coder"], "text": "│"}],
-                [{"text": "  "}, {"node": "coder"}, {"text": "  "},
-                 {"edge": ["coder", "reviewer"], "text": "───  "},
-                 {"node": "reviewer"}],
-                [{"text": "  "}, {"edge": ["coder", "tester"], "text": "│"},
-                 {"text": "                 "}, {"edge": ["reviewer", "tester"], "text": "│"}],
-                [{"text": "  "}, {"node": "tester"}, {"text": "  "},
-                 {"edge": ["tester", "reviewer"], "text": "─────────────╯"}],
-            ],
-            "order": ["coordinator", "coder", "reviewer", "tester"],
-        }
+
+        # Auto-generate a basic fallback when no graph_view is defined
+        order = list(topo.agents.keys())
+        rows: list[list[dict]] = []
+        for agent_id in order:
+            rows.append([{"node": agent_id}])
+        return {"rows": rows, "order": order}
 
     @property
     def running(self) -> bool:
@@ -531,26 +515,16 @@ class GraphRuntime:
         topology_label, topology_description, agent_positions = self._topology_meta(topology)
         graph_view = self._topology_graph_view(topology)
 
-        if topology == "dual-review":
-            from orb.topologies.dual_review import create_dual_review
-            orchestrator = create_dual_review(
-                providers=self._providers,
-                config=self._config,
-                model_overrides=effective_overrides or None,
-                trace=False,
-                tier_override=self._tier_override,
-                agent_model_map=agent_model_map or None,
-            )
-        else:
-            from orb.topologies.triad import create_triad
-            orchestrator = create_triad(
-                providers=self._providers,
-                config=self._config,
-                model_overrides=effective_overrides or None,
-                trace=False,
-                tier_override=self._tier_override,
-                agent_model_map=agent_model_map or None,
-            )
+        from orb.topologies import create_orchestrator
+        orchestrator = create_orchestrator(
+            topology,
+            providers=self._providers,
+            config=self._config,
+            model_overrides=effective_overrides or None,
+            trace=False,
+            tier_override=self._tier_override,
+            agent_model_map=agent_model_map or None,
+        )
 
         agent_roles = {aid: a.config.role for aid, a in orchestrator.agents.items()}
         bridge.setup_agents(agent_roles)

@@ -2,7 +2,7 @@ import pytest
 
 from orb.llm.types import ModelTier, ModelConfig, CompletionResponse, ToolCall
 from orb.orchestrator.types import OrchestratorConfig
-from orb.topologies.triangle import create_triangle
+from orb.topologies import create_orchestrator
 from tests.test_claude_agent import MockLLMClient
 
 
@@ -66,7 +66,8 @@ class TestOrchestrator:
         ])
 
         config = OrchestratorConfig(timeout=5.0, budget=50)
-        orchestrator = create_triangle(
+        orchestrator = create_orchestrator(
+            "triangle",
             providers={"mock": mock_with_flow},
             config=config,
             model_overrides=overrides,
@@ -91,7 +92,8 @@ class TestOrchestrator:
         overrides = {t: mock_model for t in ModelTier}
 
         config = OrchestratorConfig(timeout=0.5, budget=50)
-        orchestrator = create_triangle(
+        orchestrator = create_orchestrator(
+            "triangle",
             providers={"mock": mock},
             config=config,
             model_overrides=overrides,
@@ -108,7 +110,8 @@ class TestOrchestrator:
         overrides = {t: mock_model for t in ModelTier}
 
         config = OrchestratorConfig(entry_agent="nonexistent")
-        orchestrator = create_triangle(
+        orchestrator = create_orchestrator(
+            "triangle",
             providers={"mock": mock},
             config=config,
             model_overrides=overrides,

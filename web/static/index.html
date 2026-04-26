@@ -39,6 +39,10 @@
                 <span id="stat-status" class="stat-value status-waiting">Waiting</span>
             </div>
             <div class="stat">
+                <span class="stat-label">Topology</span>
+                <span id="stat-topology" class="stat-value">Auto</span>
+            </div>
+            <div class="stat">
                 <span class="stat-label">Model</span>
                 <span id="stat-model" class="stat-value">Auto</span>
             </div>
@@ -148,6 +152,26 @@
 
         <!-- Right: graph canvas -->
         <div id="graph-panel">
+            <!-- Topology dropdown anchored top-right -->
+            <div id="topology-dropdown">
+                <button id="topology-trigger" title="Switch topology">
+                    <svg class="topo-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <circle cx="7" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/>
+                        <circle cx="3" cy="11" r="2" stroke="currentColor" stroke-width="1.3"/>
+                        <circle cx="11" cy="11" r="2" stroke="currentColor" stroke-width="1.3"/>
+                        <line x1="6" y1="5" x2="4" y2="9" stroke="currentColor" stroke-width="1.1"/>
+                        <line x1="8" y1="5" x2="10" y2="9" stroke="currentColor" stroke-width="1.1"/>
+                    </svg>
+                    <span id="topology-trigger-label">Auto</span>
+                    <span id="topology-trigger-count"></span>
+                    <svg class="topo-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+                <div id="topology-menu" class="hidden">
+                    <!-- populated by JS -->
+                </div>
+            </div>
             <canvas id="graph-canvas"></canvas>
             <div id="graph-loader" class="hidden">
                 <div class="loader-ring"></div>

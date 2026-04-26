@@ -266,7 +266,7 @@ async def test_async_main_skips_dashboard_prompt_with_exit_after_run():
          patch("orb.cli.main.build_providers", return_value={"mock": object()}), \
          patch("orb.cli.main.print_header"), \
          patch("orb.cli.main.print_result"), \
-         patch("orb.cli.main.create_triad", return_value=FakeOrchestrator()), \
+         patch("orb.cli.main.create_orchestrator", return_value=FakeOrchestrator()), \
          patch("web.server.DashboardServer", FakeDashboardServer), \
          patch("web.bridge.DashboardBridge", FakeBridge), \
          patch("rich.prompt.Prompt.ask") as prompt_ask:
