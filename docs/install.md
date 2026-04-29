@@ -50,21 +50,21 @@ orb auth anthropic
 
 ## Default provider mix
 
-Out of the box, Orb defaults to:
+Out of the box, every provider ships **disabled**. `orb onboard` walks you
+through enabling the ones you actually plan to use — it folds in auth (or a
+reachability probe for local providers), refreshes the model catalog, and
+lets you pick per-tier defaults before flipping `enabled: true` in
+`~/.orb/config.json`.
 
-- `vmlx`: enabled
-- `openai-codex`: enabled
-- `ollama`: disabled
-- `omlx`: disabled
-- `anthropic`: disabled
-
-This gives one local path and one cloud path without requiring all providers configured.
-
-Provider settings live in `~/.orb/config.json`. Provider/model selection comes from config and the provider catalog — runtime paths don't hardcode model IDs or inline fallback defaults. If no valid configured model exists for a selected provider/tier, Orb fails explicitly instead of silently using a hardcoded fallback.
+Provider settings live in `~/.orb/config.json`. Provider/model selection
+comes from config and the provider catalog — runtime paths don't hardcode
+model IDs or inline fallback defaults. If no valid configured model exists
+for a selected provider/tier, Orb fails explicitly instead of silently
+using a hardcoded fallback.
 
 ## Typical first runs
 
-Defaults (local `vmlx` + cloud `openai-codex`):
+First run (any provider mix — onboarding is the entry point):
 
 ```bash
 orb onboard
@@ -72,17 +72,18 @@ orb daemon start
 orb tui
 ```
 
-Local-only:
+Local-only — pick `vmlx`, `omlx`, or `ollama` when prompted by onboard:
 
 ```bash
+orb onboard
 orb daemon start
 orb tui --topology auto
 ```
 
-Cloud-only:
+Cloud-only — onboard collects auth in the same flow:
 
 ```bash
-orb auth openai
+orb onboard
 orb daemon start
 orb tui --connect http://127.0.0.1:1337
 ```

@@ -431,6 +431,46 @@ async def test_configure_provider_bails_when_catalog_is_empty(isolated_config, m
     assert entry.get("catalog") in (None, [])
 
 
+# ── run_onboarding seeds settings on first run ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_onboarding_seeds_config_file_on_first_run(isolated_config, monkeypatch):
+    """A brand-new user (~/.orb/config.json missing) should leave onboard
+    with a real settings file written to disk, every provider disabled."""
+    assert not isolated_config.exists()
+
+    # Quit immediately at the first provider prompt.
+    _inputs(monkeypatch, ["q"])
+
+    await onboard_mod.run_onboarding()
+
+    assert isolated_config.exists()
+    saved = json.loads(isolated_config.read_text())
+    providers = saved.get("providers") or {}
+    assert providers, "expected provider seeds to be written to settings"
+    for name, entry in providers.items():
+        assert isinstance(entry, dict)
+        assert entry.get("enabled") is False, f"{name} should ship disabled on first onboard"
+
+
+@pytest.mark.asyncio
+async def test_run_onboarding_does_not_clobber_existing_config(isolated_config, monkeypatch):
+    """If the user already has settings, onboard must not overwrite them
+    just because they opened and quit the menu."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    existing = {
+        "local_models": True,
+        "providers": {"anthropic": {"enabled": True, "models": {"claude-haiku-4-5-20251001": {"enabled": True}}}},
+    }
+    isolated_config.write_text(json.dumps(existing))
+
+    _inputs(monkeypatch, ["q"])
+    await onboard_mod.run_onboarding()
+
+    saved = json.loads(isolated_config.read_text())
+    assert saved["providers"]["anthropic"]["enabled"] is True
+
+
 # ── CLI wiring ───────────────────────────────────────────────────────────────
 
 def test_onboard_subcommand_is_registered():

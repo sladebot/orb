@@ -6,6 +6,11 @@ from typing import Any
 
 CONFIG_PATH = Path.home() / ".orb" / "config.json"
 
+# Every provider ships disabled — `orb onboard` is what flips an entry to
+# `enabled: True` after the user authenticates (cloud) or we confirm the
+# server is reachable (local). The `models` and `default_models` maps are
+# kept as suggestions that pre-fill the onboard toggle / tier prompts; they
+# are dormant until the provider is enabled.
 _DEFAULTS: dict[str, Any] = {
     "local_models": True,
     "providers": {
@@ -23,7 +28,7 @@ _DEFAULTS: dict[str, Any] = {
             },
         },
         "openai-codex": {
-            "enabled": True,
+            "enabled": False,
             "models": {},
             "default_models": {
                 "cloud_lite": "gpt-5.4-mini",
@@ -41,7 +46,7 @@ _DEFAULTS: dict[str, Any] = {
             "base_url": "http://localhost:1234/v1",
         },
         "omlx": {
-            "enabled": True,
+            "enabled": False,
             "models": {},
             "base_url": "http://localhost:8000/v1",
         },

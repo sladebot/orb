@@ -508,6 +508,14 @@ async def configure_provider(provider: str) -> None:
 
 async def run_onboarding() -> None:
     print("Orb onboarding — interactive provider / model setup")
+
+    # First-run seed: materialise ~/.orb/config.json with the disabled-everywhere
+    # defaults so the rest of Orb (config show, daemon, tui) can stop guessing
+    # whether the user has been here yet. Existing files are left alone.
+    if not config_cli.CONFIG_PATH.exists():
+        config_cli.save_config(config_cli.load_config())
+        print(f"Created {config_cli.CONFIG_PATH} (every provider starts disabled — pick what you want to enable below).")
+
     while True:
         cfg = config_cli.load_config()
         _print_providers(cfg)
