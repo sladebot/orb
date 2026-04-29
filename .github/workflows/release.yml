@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # required for PyPI trusted publishing (OIDC)
 
 jobs:
   build-and-release:
@@ -39,3 +40,11 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # Publishes to PyPI via trusted publishing (OIDC — no API token needed).
+      # Requires a one-time setup on PyPI: project page → Publishing → Add a
+      # new pending publisher → owner=sladebot, repo=orb, workflow=release.yml.
+      # Until that's configured the step will fail loudly, but the GitHub
+      # release above is already created so the failure is non-destructive.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
