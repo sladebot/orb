@@ -3,22 +3,35 @@
 ## Prerequisites
 
 - Python `3.11+`
-- `git`
 - one or more reachable model providers
 - optional: Conda for an isolated env (the repo examples use it)
+- `git` (only needed for the from-source path below)
 
-## Clone and install
+## Install from PyPI (recommended)
 
 ```bash
-git clone <your-orb-repo-url>
-cd orb
+pip install orb-agents
+orb onboard
 ```
 
-Create an environment and install the package:
+The PyPI package is named `orb-agents`; the import path is still `orb`
+(`from orb.client import OrbClient`). `orb onboard` walks through
+initial auth and provider setup.
+
+For an isolated env:
 
 ```bash
 conda create -n orb python=3.12 -y
 conda activate orb
+pip install orb-agents
+orb onboard
+```
+
+## Install from source
+
+```bash
+git clone https://github.com/sladebot/orb.git
+cd orb
 pip install -e .
 orb onboard
 ```
@@ -28,8 +41,6 @@ For local development, install the test extras too:
 ```bash
 pip install -e ".[dev]"
 ```
-
-`orb onboard` walks through initial auth and common setup.
 
 ## Configure providers
 

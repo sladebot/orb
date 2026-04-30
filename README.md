@@ -1,5 +1,9 @@
 # Orb
 
+[![PyPI](https://img.shields.io/pypi/v/orb-agents.svg)](https://pypi.org/project/orb-agents/)
+[![Python](https://img.shields.io/pypi/pyversions/orb-agents.svg)](https://pypi.org/project/orb-agents/)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 > Multi-tenant multi-agent coding runtime — daemon, terminal UI, browser dashboard, persisted run traces, topology selection, per-node model allocation, and a Python SDK for harness integration.
 
 ![Orb dashboard](docs/orb-dashboard.png)
@@ -20,11 +24,17 @@ Orb treats coordination as a runtime problem, not just a prompt problem. It pick
 ## Quick start
 
 ```bash
-git clone <your-orb-repo-url> && cd orb
-pip install -e .
+pip install orb-agents
 orb onboard
 orb daemon start
 orb tui
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/sladebot/orb.git && cd orb
+pip install -e .
 ```
 
 Full setup including provider auth: [docs/install.md](docs/install.md).
