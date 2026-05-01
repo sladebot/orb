@@ -80,7 +80,7 @@ def _init_payload(
         "type": "init",
         "session_id": session_id,
         "workdir": workdir,
-        "plan": {"topology": {"id": "triad"}},
+        "plan": {"topology": {"id": "triad", "entry_agent": "coordinator"}},
         "agents": [
             {"id": "coordinator", "role": "coordinator", "status": "idle", "model": "opus"},
             {"id": "coder", "role": "coder", "status": "idle", "model": "sonnet"},
@@ -307,6 +307,39 @@ async def test_composer_send_starts_run_when_session_is_idle():
         assert post["json"].get("topology") == "solo"
         # Optimistic local state flip so a rapid second Enter injects.
         assert app.run_state in {"planning", "running"}
+
+
+@pytest.mark.asyncio
+async def test_composer_inject_uses_entry_agent_for_solo_topology():
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337, topology="solo")
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession()
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+
+        app._handle_server_event({
+            "type": "init",
+            "session_id": "sid-solo",
+            "plan": {"topology": {"id": "solo", "entry_agent": "solo"}},
+            "agents": [{"id": "solo", "role": "Solo Agent", "status": "running"}],
+            "run_state": "running",
+            "stats": {"message_count": 0, "elapsed": 0.0},
+            "messages": [],
+        })
+        await pilot.pause()
+
+        ta = app.query_one("#query-input")
+        ta.text = "continue"
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        inject_posts = [
+            p for p in fake.posts if p["url"].endswith("/sessions/sid-solo/runs/inject")
+        ]
+        assert len(inject_posts) == 1
+        assert inject_posts[0]["json"] == {"to": "solo", "message": "continue"}
 
 
 # ── Test: malformed / empty payloads must not crash ──────────────────

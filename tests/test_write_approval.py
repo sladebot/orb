@@ -346,6 +346,19 @@ class TestLLMAgentApprovalHook:
         # The sandbox got the *edited* content, not the proposed content.
         agent.config.sandbox.write_file.assert_called_once_with("app.py", "EDITED CONTENT")
 
+    async def test_file_write_callback_accepts_legacy_four_arg_signature(self) -> None:
+        agent = _make_agent()
+        fired: list[tuple[str, str, str, str]] = []
+
+        def legacy_cb(agent_id: str, path: str, content: str, old_content: str) -> None:
+            fired.append((agent_id, path, content, old_content))
+
+        agent._on_file_write = legacy_cb
+        msg = Message(from_="agent_b", to="agent_a", type=MessageType.TASK, payload="go")
+        await agent.process(msg)
+
+        assert fired == [("agent_a", "app.py", "print('hi')", "")]
+
     async def test_rejected_write_skips_sandbox_and_records_tool_result(self) -> None:
         agent = _make_agent()
 

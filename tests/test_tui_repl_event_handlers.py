@@ -36,6 +36,7 @@ def _make_tui():
     t.session_id = ""
     t.workdir = ""
     t.topology = "auto"
+    t.entry_agent = ""
     t.live_text = ""
     # Approval-flow state (task #10). Seeded on every TUI instance whether
     # approvals are enabled or not so the handlers can poke at these
@@ -602,6 +603,36 @@ def test_on_file_write_updates_pending_block_to_applied():
     assert "src/x.py" in tui.file_changes
     # _emit_block NOT called a second time — the existing block was updated in place.
     tui._emit_block.assert_not_called()
+
+
+def test_on_file_write_resolves_pending_block_by_request_id_before_path():
+    tui = _make_tui()
+    old_block = MagicMock()
+    new_block = MagicMock()
+    tui.pending_writes["req-old"] = {
+        "path": "src/x.py", "agent": "coder",
+        "content": "old", "old_content": "",
+        "block": old_block,
+    }
+    tui.pending_writes["req-new"] = {
+        "path": "src/x.py", "agent": "coder",
+        "content": "new", "old_content": "",
+        "block": new_block,
+    }
+
+    tui._handle_file_write({
+        "type": "file_write",
+        "agent": "coder",
+        "request_id": "req-new",
+        "path": "src/x.py",
+        "old_content": "",
+        "content": "new",
+    })
+
+    assert "req-old" in tui.pending_writes
+    assert "req-new" not in tui.pending_writes
+    old_block.set_status.assert_not_called()
+    new_block.set_status.assert_called_once_with("applied", "ok")
 
 
 def test_on_file_write_without_pending_renders_as_before():

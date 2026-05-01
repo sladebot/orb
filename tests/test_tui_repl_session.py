@@ -14,6 +14,7 @@ These tests cover:
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -140,6 +141,85 @@ async def test_attach_tui_repl_posts_new_session_on_startup():
 
 
 # ── _attach_to_session: envelope safety ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ws_client_scopes_connection_to_current_session():
+    from orb.cli.tui_repl import OrbReplTUI
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        def ws_connect(self, url: str, **_kwargs):
+            self.urls.append(url)
+
+            class _CM:
+                async def __aenter__(self):
+                    raise asyncio.CancelledError()
+
+                async def __aexit__(self, *_args):
+                    return None
+
+            return _CM()
+
+    tui = OrbReplTUI.__new__(OrbReplTUI)
+    tui._server_scheme = "http"
+    tui._server_host = "127.0.0.1"
+    tui._server_port = 1337
+    tui.session_id = "sid-123"
+    tui._http_session = _FakeSession()
+
+    with pytest.raises(asyncio.CancelledError):
+        await tui._start_ws_client()
+
+    assert tui._http_session.urls == [
+        "ws://127.0.0.1:1337/api/v1/ws?session_id=sid-123"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ws_client_defers_when_session_id_missing():
+    from orb.cli.tui_repl import OrbReplTUI
+
+    class _FakeSession:
+        def ws_connect(self, *_args, **_kwargs):
+            raise AssertionError("must not connect without a session_id")
+
+    tui = OrbReplTUI.__new__(OrbReplTUI)
+    tui._server_scheme = "http"
+    tui._server_host = "127.0.0.1"
+    tui._server_port = 1337
+    tui.session_id = ""
+    tui._http_session = _FakeSession()
+    tui._emit_whisper = MagicMock()
+
+    task = asyncio.create_task(tui._start_ws_client())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    tui._emit_whisper.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_attach_to_session_cancels_old_ws_before_init_dispatch():
+    tui = _make_tui()
+    order: list[str] = []
+    old_task = MagicMock()
+    old_task.cancel = MagicMock(side_effect=lambda: order.append("cancel"))
+    tui._ws_task = old_task
+    tui._restart_ws_client = MagicMock(side_effect=lambda: order.append("restart"))
+    tui._handle_init = MagicMock(side_effect=lambda _payload: order.append("init"))
+    tui._http_session = _FakeHttpSession(_FakeResponse(200, {
+        "ok": True,
+        "data": {"session_id": "new-sid", "agents": []},
+    }))
+
+    await tui._attach_to_session("new-sid")
+
+    assert order == ["cancel", "init", "restart"]
 
 
 @pytest.mark.asyncio

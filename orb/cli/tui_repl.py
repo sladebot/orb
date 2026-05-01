@@ -25,7 +25,7 @@ import re
 from collections import deque
 from time import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -1005,6 +1005,7 @@ class OrbReplTUI(App[None]):
         self.session_id: str = session_id or ""
         self.workdir: str = ""
         self.topology: str = topology
+        self.entry_agent: str = ""
         # Session-level lock surfaced via the init event's ``session`` block.
         # Populated once the server has pinned the topology + per-agent models
         # for this session (after the first run's planning stage). While this
@@ -1043,6 +1044,7 @@ class OrbReplTUI(App[None]):
         self._rendered_turns: deque[str] = deque(maxlen=2048)
         self._http_session: Any = None
         self._ws_task: asyncio.Task | None = None
+        self._ws_deferred_notice_shown: bool = False
         # Approval flow (task #10). ``pending_writes`` is keyed by the
         # server-minted ``request_id`` and carries the body we need at
         # resolve-time (path, agent, content, old_content) plus the
@@ -1139,8 +1141,16 @@ class OrbReplTUI(App[None]):
     async def _start_ws_client(self) -> None:
         import aiohttp
         ws_scheme = "wss" if self._server_scheme == "https" else "ws"
-        url = f"{ws_scheme}://{self._server_host}:{self._server_port}/api/v1/ws"
         while True:
+            if not self.session_id:
+                if not getattr(self, "_ws_deferred_notice_shown", False):
+                    self._emit_whisper("system", "[#f3afa7]no session — websocket attach deferred[/]")
+                    self._ws_deferred_notice_shown = True
+                await asyncio.sleep(1)
+                continue
+            self._ws_deferred_notice_shown = False
+            url = f"{ws_scheme}://{self._server_host}:{self._server_port}/api/v1/ws"
+            url += "?" + urlencode({"session_id": self.session_id})
             try:
                 async with self._http_session.ws_connect(url, heartbeat=30) as ws:
                     async for msg in ws:
@@ -1154,6 +1164,16 @@ class OrbReplTUI(App[None]):
             except Exception as exc:  # noqa: BLE001
                 logger.debug("WS lost: %s", exc)
             await asyncio.sleep(1)
+
+    def _restart_ws_client(self) -> None:
+        if getattr(self, "_ws_task", None) is not None:
+            self._ws_task.cancel()
+        self._ws_task = asyncio.create_task(self._start_ws_client())
+
+    def _cancel_ws_client(self) -> None:
+        if getattr(self, "_ws_task", None) is not None:
+            self._ws_task.cancel()
+            self._ws_task = None
 
     # ── Server event dispatch ─────────────────────────────────────────────
 
@@ -1220,8 +1240,11 @@ class OrbReplTUI(App[None]):
         self.workdir = data.get("workdir") or self.workdir
         self.run_state = str(data.get("run_state") or "idle")
         topo = ((data.get("plan") or {}).get("topology") or {}).get("id")
+        entry_agent = ((data.get("plan") or {}).get("topology") or {}).get("entry_agent")
         if topo:
             self.topology = TOPOLOGY_LABELS.get(topo, topo)
+        if entry_agent:
+            self.entry_agent = str(entry_agent)
         # Hydrate session-level lock from the init event's ``session`` block.
         # Emitted by ``DashboardState.to_init_event`` + extended in
         # ``GraphRuntime._dashboard_snapshot_payload`` — see the dashboard
@@ -1331,6 +1354,16 @@ class OrbReplTUI(App[None]):
             for m in (data.get("messages") or [])[-12:]:
                 self._render_message(m)
         self._refresh_chrome()
+
+    def _default_inject_target(self) -> str:
+        entry_agent = getattr(self, "entry_agent", "")
+        if entry_agent and entry_agent in self.agents:
+            return entry_agent
+        if "coordinator" in self.agents:
+            return "coordinator"
+        if self.agent_order:
+            return self.agent_order[0]
+        return "coordinator"
 
     def _handle_message(self, data: dict) -> None:
         # Streaming finalization path (task #13): if we've been streaming
@@ -1516,11 +1549,13 @@ class OrbReplTUI(App[None]):
         # mutate it in place to ``applied`` instead of mounting a second
         # block. The pending entry was keyed by ``request_id`` at pending-time
         # so we match by path here.
-        match_req: str | None = None
-        for req_id, entry in self.pending_writes.items():
-            if entry.get("path") == path:
-                match_req = req_id
-                break
+        request_id = str(data.get("request_id") or "")
+        match_req: str | None = request_id if request_id in self.pending_writes else None
+        if match_req is None:
+            for req_id, entry in self.pending_writes.items():
+                if entry.get("path") == path:
+                    match_req = req_id
+                    break
         if match_req is not None:
             entry = self.pending_writes.pop(match_req)
             block = entry.get("block")
@@ -1773,7 +1808,7 @@ class OrbReplTUI(App[None]):
         try:
             async with self._http_session.post(
                 inject_url,
-                json={"to": "coordinator", "message": text},
+                json={"to": self._default_inject_target(), "message": text},
             ) as resp:
                 body_text = await resp.text()
                 if resp.status >= 400:
@@ -1827,8 +1862,7 @@ class OrbReplTUI(App[None]):
                 self._emit_turn(
                     "system",
                     f"[#f3afa7]topology is pinned to[/] [#c4ced9]{self.locked_topology}[/] "
-                    f"[#f3afa7]for this session — start[/] [#94bfff]/new[/] "
-                    f"[#f3afa7]to change it[/]",
+                    f"[#f3afa7]for this session. Start a new session to change it.[/]",
                 )
             elif self.locked_topology and new == self.locked_topology:
                 # No-op — matches the lock. Confirm so the user has feedback.
@@ -1923,8 +1957,12 @@ class OrbReplTUI(App[None]):
             return
         payload.setdefault("type", "init")
         payload.setdefault("session_id", session_id)
-        self.session_id = session_id
+        self._cancel_ws_client()
         self._handle_init(payload)
+        # Unit tests may stub _handle_init; real dispatch sets this from payload.
+        if not self.session_id:
+            self.session_id = session_id
+        self._restart_ws_client()
 
     def action_show_help(self) -> None:
         self._emit_turn(

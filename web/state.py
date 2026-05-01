@@ -90,6 +90,7 @@ class DashboardState:
     topology_id: str = ""
     topology_label: str = ""
     topology_description: str = ""
+    topology_entry_agent: str = ""
     agent_complexity: dict[str, int] = field(default_factory=dict)
     agent_models: dict[str, str] = field(default_factory=dict)
     agent_neighbors: dict[str, list[str]] = field(default_factory=dict)
@@ -141,6 +142,7 @@ class DashboardState:
         self.topology_id = ""
         self.topology_label = ""
         self.topology_description = ""
+        self.topology_entry_agent = ""
         self.agent_complexity = {}
         self.agent_models = {}
         self.agent_neighbors = {}
@@ -204,6 +206,7 @@ class DashboardState:
                     "id": self.topology_id,
                     "label": self.topology_label,
                     "description": self.topology_description,
+                    "entry_agent": self.topology_entry_agent,
                 },
                 "agent_complexity": self.agent_complexity,
                 "agent_models": self.agent_models,

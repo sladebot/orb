@@ -59,6 +59,7 @@ class DashboardBridge:
         topology_id: str,
         topology_label: str,
         topology_description: str,
+        topology_entry_agent: str = "",
         agent_complexity: dict[str, int] | None = None,
         agent_models: dict[str, str] | None = None,
         agent_positions: dict[str, str] | None = None,
@@ -68,6 +69,7 @@ class DashboardBridge:
         self.state.topology_id = topology_id
         self.state.topology_label = topology_label
         self.state.topology_description = topology_description
+        self.state.topology_entry_agent = topology_entry_agent
         self.state.agent_complexity = dict(agent_complexity or {})
         self.state.agent_models = dict(agent_models or {})
         self.state.agent_positions = dict(agent_positions or {})

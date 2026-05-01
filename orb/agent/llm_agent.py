@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -96,9 +97,9 @@ class LLMAgent(AgentNode):
         # touching the sandbox; ``approved=False`` skips the disk write
         # entirely and ``effective_content`` lets the user edit before
         # commit. Signature: ``(agent_id, path, proposed_content,
-        # old_content) -> Awaitable[tuple[bool, str]]``.
+        # old_content) -> Awaitable[tuple[bool, str] | tuple[bool, str, str]]``.
         self._on_write_request: Optional[
-            Callable[[str, str, str, str], Awaitable[tuple[bool, str]]]
+            Callable[[str, str, str, str], Awaitable[tuple[bool, str] | tuple[bool, str, str]]]
         ] = None
         # Per-token streaming hook. When set by the runtime (only on
         # sessions with ``streaming_enabled=True``), the agent builds an
@@ -670,10 +671,13 @@ class LLMAgent(AgentNode):
         # opted-in sessions (``ConversationSession.approval_required``).
         # Skip when the hook is unset so the default path stays a single
         # sandbox call.
+        approval_request_id = ""
         if self._on_write_request is not None:
-            approved, effective = await self._on_write_request(
+            approval_result = await self._on_write_request(
                 self.node_id, path, content, old_content
             )
+            approved, effective = approval_result[:2]
+            approval_request_id = approval_result[2] if len(approval_result) > 2 else ""
             if not approved:
                 # The Anthropic API requires every ``tool_use`` block to
                 # be paired with a matching ``tool_result`` in history,
@@ -700,7 +704,20 @@ class LLMAgent(AgentNode):
             action="write",
         )
         if self._on_file_write:
-            self._on_file_write(self.node_id, path, content, old_content)
+            sig = inspect.signature(self._on_file_write)
+            params = list(sig.parameters.values())
+            accepts_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+            positional = [
+                p for p in params
+                if p.kind in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                }
+            ]
+            if accepts_varargs or len(positional) >= 5:
+                self._on_file_write(self.node_id, path, content, old_content, approval_request_id)
+            else:
+                self._on_file_write(self.node_id, path, content, old_content)
 
     async def _handle_read_file(self, tool_id: str, input_data: dict) -> None:
         path = input_data.get("path", "").strip()

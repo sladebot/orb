@@ -305,6 +305,7 @@ class GraphRuntime:
         self.state.topology_id = tid
         self.state.topology_label = label
         self.state.topology_description = description
+        self.state.topology_entry_agent = topo.entry_agent
         self.state.agent_positions = positions
         self.state.agent_models = dict(locked_models)
         self.state.agent_complexity = {
@@ -348,20 +349,20 @@ class GraphRuntime:
 
     # ── Pre-write staging / approval pipeline ────────────────────────
 
-    async def request_write_approval(
+    async def request_write_approval_with_id(
         self,
         agent_id: str,
         path: str,
         content: str,
         old_content: str,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, str]:
         """Stage an agent's proposed file write and wait for the user.
 
         Allocates a fresh ``request_id``, broadcasts ``file_write_pending``
         on the session WebSocket so the TUI/dashboard can render the
         diff, and awaits the future the matching call to
         :meth:`resolve_approval` will resolve.
-        Returns ``(approved, effective_content)``.
+        Returns ``(approved, effective_content, request_id)``.
 
         Callers (the LLMAgent ``_on_write_request`` hook) treat
         ``approved=False`` as "skip the sandbox write" and a non-empty
@@ -398,6 +399,19 @@ class GraphRuntime:
             # if the future was set by ``_reject_all_pending_approvals``
             # we still want to clean up.
             self._pending_approvals.pop(request_id, None)
+        return approved, effective, request_id
+
+    async def request_write_approval(
+        self,
+        agent_id: str,
+        path: str,
+        content: str,
+        old_content: str,
+    ) -> tuple[bool, str]:
+        """Backward-compatible approval hook returning only decision/content."""
+        approved, effective, _request_id = await self.request_write_approval_with_id(
+            agent_id, path, content, old_content
+        )
         return approved, effective
 
     async def resolve_approval(
@@ -1082,7 +1096,7 @@ class GraphRuntime:
         snapshot_topology = snapshot_plan.get("topology") or {}
         merged_topology = dict(snapshot_topology)
         merged_topology.update(live_topology)
-        for key in ("id", "label", "description"):
+        for key in ("id", "label", "description", "entry_agent"):
             if live_topology.get(key) not in ("", None):
                 merged_topology[key] = live_topology[key]
             elif key in snapshot_topology:
@@ -2657,6 +2671,7 @@ class GraphRuntime:
             topology_id=topology,
             topology_label=topology_label,
             topology_description=topology_description,
+            topology_entry_agent=initial_target,
             agent_complexity=agent_complexity,
             agent_models={aid: cfg.model_id for aid, cfg in agent_model_map.items()},
             agent_positions=agent_positions,
@@ -2750,7 +2765,7 @@ class GraphRuntime:
                 agent._on_message_delta = _make_delta_cb(aid)
 
         def _make_file_write_cb(aid: str):
-            def cb(_, path: str, content: str, old_content: str = "") -> None:
+            def cb(_, path: str, content: str, old_content: str = "", request_id: str = "") -> None:
                 self._persist_dashboard_file_change(
                     path=path,
                     agent=aid,
@@ -2763,6 +2778,7 @@ class GraphRuntime:
                     "path": path,
                     "content": content,
                     "old_content": old_content,
+                    "request_id": request_id,
                 })))
             return cb
 
@@ -2775,7 +2791,7 @@ class GraphRuntime:
         # directly without a hook detour.
         if getattr(self._conversation_session, "approval_required", False):
             for agent in orchestrator.agents.values():
-                agent._on_write_request = self.request_write_approval
+                agent._on_write_request = self.request_write_approval_with_id
 
         # Wire GraphRAG subgraph stores if the topology defines clusters
         from orb.topologies import get_loader
