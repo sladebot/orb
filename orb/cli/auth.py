@@ -679,8 +679,19 @@ def _configured_provider_status_models(
     fallback: list[str],
 ) -> list[str]:
     entry = ((cfg.get("providers") or {}).get(provider) or {})
-    defaults = entry.get("default_models") if isinstance(entry, dict) else None
+    catalog = entry.get("catalog") if isinstance(entry, dict) else None
     models = []
+    if isinstance(catalog, list):
+        for item in catalog:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            if model_id and model_id not in models:
+                models.append(model_id)
+    if models:
+        return models
+
+    defaults = entry.get("default_models") if isinstance(entry, dict) else None
     if isinstance(defaults, dict):
         for tier in tiers:
             model_id = str(defaults.get(tier) or "").strip()

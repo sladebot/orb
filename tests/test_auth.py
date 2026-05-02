@@ -168,3 +168,28 @@ def test_auth_status_refreshes_expired_openai_oauth(tmp_path, monkeypatch, capsy
     assert "OAuth token  user@example.test  (expires in" in out
     assert "expired" not in out
     assert "gpt-5.5" in out
+
+
+def test_configured_provider_status_models_prefers_catalog():
+    cfg = {
+        "providers": {
+            "anthropic": {
+                "catalog": [
+                    {"id": "claude-sonnet-4-5-20250929"},
+                    {"id": "claude-haiku-4-5-20251001"},
+                    {"id": "claude-sonnet-4-5-20250929"},
+                ],
+                "default_models": {
+                    "cloud_lite": "claude-haiku-4-5-20251001",
+                    "cloud_fast": "claude-sonnet-4-20250514",
+                },
+            },
+        },
+    }
+
+    assert auth._configured_provider_status_models(
+        cfg,
+        "anthropic",
+        ["cloud_lite", "cloud_fast"],
+        ["fallback"],
+    ) == ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
