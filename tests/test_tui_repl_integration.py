@@ -14,6 +14,7 @@ will propagate out of the pause/exit and fail the test.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -35,9 +36,10 @@ from orb.cli.tui_repl import (
 
 
 class _FakeResp:
-    def __init__(self, status: int = 200, text: str = "") -> None:
+    def __init__(self, status: int = 200, text: str = "", json_data: Any | None = None) -> None:
         self.status = status
         self._text = text
+        self._json_data = json_data
         self._data = text.encode() if text else b""
 
     async def read(self) -> bytes:
@@ -46,26 +48,35 @@ class _FakeResp:
     async def text(self) -> str:
         return self._text
 
+    async def json(self) -> Any:
+        return self._json_data if self._json_data is not None else {}
+
     async def __aenter__(self) -> "_FakeResp":
         return self
 
     async def __aexit__(self, *args: Any) -> bool:
         return False
 
-
 class _FakeSession:
-    """Records every POST for later assertion; quacks like aiohttp.ClientSession."""
+    """Records HTTP calls for later assertion; quacks like aiohttp.ClientSession."""
 
-    def __init__(self) -> None:
+    def __init__(self, get_json: dict[str, Any] | None = None) -> None:
         self.posts: list[dict[str, Any]] = []
+        self.gets: list[dict[str, Any]] = []
+        self.get_json = get_json or {}
         self.closed = False
 
     def post(self, url: str, **kwargs: Any) -> _FakeResp:  # sync call returning async CM
         self.posts.append({"url": url, **kwargs})
         return _FakeResp()
 
+    def get(self, url: str, **kwargs: Any) -> _FakeResp:
+        self.gets.append({"url": url, **kwargs})
+        return _FakeResp(json_data=self.get_json)
+
     async def close(self) -> None:
         self.closed = True
+
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -100,6 +111,68 @@ def _render_plain(widget: Any) -> str:
     if plain is not None:
         return plain
     return str(rendered)
+
+
+def test_turn_escapes_bracketed_and_malformed_user_content():
+    turn = Turn("user", 0.0, "literal [red]danger[/]\nmalformed [/red]")
+
+    plain = _render_plain(turn)
+
+    assert "literal [red]danger[/]" in plain
+    assert "malformed [/red]" in plain
+
+
+def test_tool_block_escapes_dynamic_label_meta_body_and_paths():
+    block = ToolBlock(
+        glyph="✎",
+        label="write src/[weird].py",
+        meta="literal [red]danger[/]",
+        pill="pending [ok]",
+        body="malformed [/red]\nsrc/[weird].py",
+        agent="coder",
+        accept=["y/accept [all]"],
+    )
+
+    plain = _render_plain(block)
+
+    assert "write src/[weird].py" in plain
+    assert "literal [red]danger[/]" in plain
+    assert "pending [ok]" in plain
+    assert "malformed [/red]" in plain
+
+
+def test_status_and_rail_escape_runtime_brackets_in_paths_and_plan_titles():
+    state = SimpleNamespace(
+        workdir="/tmp/[project]",
+        topology="solo",
+        live_text="literal [red]danger[/]",
+        session_id="sid-[abc]",
+        plan_items=[("now", "implement [bracketed] plan"), ("todo", "malformed [/red]")],
+        elapsed=1.2,
+        message_count=3,
+        budget_remaining=197,
+        branch="feature/[weird]",
+        agent_order=["coder"],
+        agents={"coder": {"role": "coder", "status": "running", "model": "sonnet"}},
+        graph_rows=["node [red]danger[/]"],
+        file_changes={"src/[weird].py": {"added": 1, "removed": 0}},
+        file_changes_truncated_count=0,
+        scope_paths=["src/[weird].py"],
+        _topology_label=lambda value: value,
+    )
+
+    strip = StatusStrip(state)
+    strip.refresh_content()
+    rail = ContextRail(state)
+    rail.refresh_content()
+
+    strip_plain = _render_plain(strip)
+    rail_plain = _render_plain(rail)
+    assert "/tmp/[project]" in strip_plain
+    assert "literal [red]danger[/]" in strip_plain
+    assert "implement [bracketed] plan" in rail_plain
+    assert "malformed [/red]" in rail_plain
+    assert "src/[weird].py" in rail_plain
 
 
 # ── Test: full event flow ────────────────────────────────────────────
@@ -273,6 +346,59 @@ async def test_plain_enter_submits_like_ctrl_enter():
 
 
 @pytest.mark.asyncio
+async def test_slash_topology_accepts_ids_discovered_from_daemon():
+    """/topology should accept custom topology ids from /api/v1/topologies."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession(get_json={
+            "topologies": [
+                {"id": "solo", "label": "solo"},
+                {"id": "graph-swarm", "label": "Graph Swarm"},
+            ],
+        })
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        await app._run_slash_command("/topology graph-swarm")
+        await pilot.pause()
+
+        assert app._topology == "graph-swarm"
+        assert app.topology == "graph-swarm"
+        assert any(g["url"].endswith("/api/v1/topologies") for g in fake.gets)
+
+
+@pytest.mark.asyncio
+async def test_slash_topology_invalid_message_lists_discovered_ids():
+    """Invalid /topology feedback should include daemon-discovered ids."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        fake = _FakeSession(get_json={
+            "topologies": [
+                {"id": "triad", "label": "triad"},
+                {"id": "graph-swarm", "label": "Graph Swarm"},
+            ],
+        })
+        app._http_session = fake
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        await app._run_slash_command("/topology nope")
+        await pilot.pause()
+
+        rendered = "\n".join(_render_plain(turn) for turn in app.query(Turn))
+        assert "unknown topology: 'nope'" in rendered
+        assert "graph-swarm" in rendered
+        assert "triad" in rendered
+        assert "[#f3afa7]" not in rendered
+        assert "[#8796a7]" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_composer_send_starts_run_when_session_is_idle():
     """Ctrl+Enter on an idle session must POST to ``/runs`` to start one.
 
@@ -412,6 +538,110 @@ async def test_missing_and_unexpected_fields_do_not_crash():
         })
         await pilot.pause()
         assert app.message_count == 7
+
+
+# ── Test: Rich/Textual markup escaping for dynamic content ────────────
+
+
+@pytest.mark.asyncio
+async def test_dynamic_user_message_with_brackets_renders_plainly():
+    """Raw user content with Rich markup-looking brackets must render as
+    literal text, not style markup or parser input."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        app._handle_server_event({
+            "type": "message",
+            "from": "user",
+            "content": "literal [red]danger[/] should stay raw",
+        })
+        await pilot.pause()
+
+        text = _render_stream_plain(app)
+        assert "literal [red]danger[/] should stay raw" in text
+
+
+@pytest.mark.asyncio
+async def test_dynamic_malformed_closing_tag_does_not_crash_render():
+    """A malformed raw closing tag used to raise Rich MarkupError when
+    interpolated into Textual markup."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        app._handle_server_event({
+            "type": "message",
+            "from": "coder",
+            "content": "malformed closer [/red] stays visible",
+            "model": "sonnet",
+        })
+        await pilot.pause()
+
+        assert "malformed closer [/red] stays visible" in _render_stream_plain(app)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_file_path_with_brackets_renders_plainly():
+    """File paths like src/[weird].py must not be parsed as tags in the
+    ToolBlock meta or CHANGES rail."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        app._handle_server_event({
+            "type": "file_write",
+            "agent": "coder",
+            "path": "src/[weird].py",
+            "old_content": "",
+            "content": "print('x')\n",
+        })
+        await pilot.pause()
+
+        stream_text = _render_stream_plain(app)
+        rail_text = _render_plain(app.query_one(ContextRail))
+        assert "src/[weird].py" in stream_text
+        assert "src/[weird].py" in rail_text
+
+
+@pytest.mark.asyncio
+async def test_dynamic_plan_title_with_brackets_renders_plainly():
+    """Plan titles/details are runtime-provided and may contain brackets."""
+    app = OrbReplTUI(server_host="127.0.0.1", server_port=1337)
+    async with app.run_test(size=(140, 44)) as pilot:
+        real = app._http_session
+        app._http_session = _FakeSession()
+        if real is not None:
+            await real.close()
+        await pilot.pause()
+
+        app._handle_server_event(_init_payload())
+        app._handle_server_event({
+            "type": "plan_step",
+            "title": "fix [parser] edge",
+            "detail": "handle src/[weird].py and [/red] literally",
+        })
+        await pilot.pause()
+
+        text = _render_stream_plain(app)
+        rail_text = _render_plain(app.query_one(ContextRail))
+        assert "fix [parser] edge" in rail_text
+        assert "handle src/[weird].py and [/red] literally" in text
 
 
 # ── Test: widget render contents ─────────────────────────────────────
@@ -664,11 +894,12 @@ async def test_live_status_bar_updates_on_agent_activity():
 
 
 def _render_stream_plain(app: OrbReplTUI) -> str:
-    """Flatten every ``Turn`` body in the stream into a searchable string."""
+    """Flatten renderable stream entries into a searchable string."""
     stream = app.query_one(ReplStream)
     parts: list[str] = []
-    for turn in stream.query(Turn):
-        parts.append(_render_plain(turn))
+    for widget in stream.children:
+        if isinstance(widget, (Turn, ToolBlock)):
+            parts.append(_render_plain(widget))
     return "\n".join(parts)
 
 
@@ -869,7 +1100,7 @@ async def test_slash_stop_emits_whisper_when_no_session():
 
 @pytest.mark.asyncio
 async def test_session_switch_clears_streaming_state():
-    """Resuming a different session (``init`` with a new ``session_id``)
+    """Attaching to a different session via its fetched ``init`` state
     must drop ``_streaming_turns`` along with the existing approval
     state. Otherwise a stale ``(chain_id, from)`` from session A could
     capture deltas in session B.
@@ -894,8 +1125,10 @@ async def test_session_switch_clears_streaming_state():
         await pilot.pause()
         assert ("chain-Y", "coder") in app._streaming_turns
 
-        # Switch to session B.
-        app._handle_server_event({**_init_payload(), "session_id": "sid-B"})
+        # Switch to session B via the explicit attach path. Foreign WS init
+        # broadcasts are ignored by ``_handle_server_event`` so they cannot
+        # silently rebind a TUI attached to a different session.
+        app._handle_init({**_init_payload(), "session_id": "sid-B"})
         await pilot.pause()
 
         assert app._streaming_turns == {}, (

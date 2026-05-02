@@ -13,7 +13,7 @@ We call the runtime names here.
 from __future__ import annotations
 
 import warnings
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -37,6 +37,9 @@ def _make_tui():
     t.workdir = ""
     t.topology = "auto"
     t.entry_agent = ""
+    t._server_scheme = "http"
+    t._server_host = "127.0.0.1"
+    t._server_port = 1337
     t.live_text = ""
     # Approval-flow state (task #10). Seeded on every TUI instance whether
     # approvals are enabled or not so the handlers can poke at these
@@ -650,6 +653,34 @@ def test_on_file_write_without_pending_renders_as_before():
     tui._emit_block.assert_called_once()
 
 
+# ── approval flow: approve-all action ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_action_approve_all_posts_approval_for_every_current_pending_write():
+    """Pressing ``a`` should resolve all writes that are already pending,
+    not just the oldest one, while still latching auto-approve for future
+    pending writes in the session.
+    """
+    tui = _make_tui()
+    tui.pending_writes = {
+        "req-1": {"path": "src/a.py", "agent": "coder"},
+        "req-2": {"path": "src/b.py", "agent": "tester"},
+        "req-3": {"path": "src/c.py", "agent": "reviewer"},
+    }
+    tui._post_approval = AsyncMock()
+
+    await tui.action_approve_all()
+
+    assert tui.approve_all is True
+    assert tui._post_approval.await_args_list == [
+        (("req-1", "approve"),),
+        (("req-2", "approve"),),
+        (("req-3", "approve"),),
+    ]
+    tui._emit_whisper.assert_called_once()
+
+
 # ── ToolBlock post-hoc updates ───────────────────────────────────────
 
 
@@ -1043,6 +1074,68 @@ def test_handle_init_records_streaming_enabled_flag():
         "agents": [],
     })
     assert tui.streaming_enabled is True
+
+
+def test_handle_server_event_ignores_events_from_other_sessions():
+    """A TUI attached to session A must not be mutated by session B broadcasts."""
+    tui = _make_tui()
+    tui.session_id = "session-a"
+    tui.agents = {"coder": {"role": "coder", "status": "idle", "model": ""}}
+    tui.agent_order = ["coder"]
+
+    tui._handle_server_event({
+        "type": "agent_status",
+        "session_id": "session-b",
+        "agent": "coder",
+        "status": "running",
+    })
+    tui._handle_server_event({
+        "type": "message",
+        "session_id": "session-b",
+        "from": "coder",
+        "content": "wrong-session content",
+    })
+    tui._handle_server_event({
+        "type": "init",
+        "session_id": "session-b",
+        "workdir": "/wrong/session",
+        "agents": [],
+    })
+
+    assert tui.agents["coder"]["status"] == "idle"
+    assert tui.session_id == "session-a"
+    assert tui.workdir == ""
+    assert tui.message_count == 0
+    tui._emit_turn.assert_not_called()
+
+
+def test_handle_server_event_accepts_current_session_events():
+    tui = _make_tui()
+    tui.session_id = "session-a"
+    tui.agents = {"coder": {"role": "coder", "status": "idle", "model": ""}}
+    tui.agent_order = ["coder"]
+
+    tui._handle_server_event({
+        "type": "agent_status",
+        "session_id": "session-a",
+        "agent": "coder",
+        "status": "running",
+    })
+
+    assert tui.agents["coder"]["status"] == "running"
+
+
+def test_ws_url_includes_current_session_id_query():
+    tui = _make_tui()
+    tui.session_id = "sid with/slash"
+
+    assert tui._ws_url() == "ws://127.0.0.1:1337/api/v1/ws?session_id=sid+with%2Fslash"
+
+
+def test_ws_url_omits_session_query_until_session_exists():
+    tui = _make_tui()
+
+    assert tui._ws_url() == "ws://127.0.0.1:1337/api/v1/ws"
 
 
 def test_tool_block_set_status_updates_rendered_pill():

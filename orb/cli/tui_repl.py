@@ -33,6 +33,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, Static, TextArea
+from rich.markup import escape as _rich_markup_escape
 
 # Slash command catalog surfaced by the palette peek + /help.
 SLASH_COMMANDS: list[tuple[str, str]] = [
@@ -40,6 +41,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/clear", "clear the stream"),
     ("/stop", "stop the current run"),
     ("/resume", "pick a prior session"),
+    ("/new", "start a fresh session"),
     ("/topology", "switch routing topology"),
     ("/quit", "exit the TUI"),
 ]
@@ -84,6 +86,11 @@ SCOPE_MAX = 8
 # entry (LRU by insertion order). ``file_changes_truncated_count`` surfaces
 # the total number evicted so the rail can show "… N more hidden".
 MAX_FILE_CHANGES = 200
+
+
+def _tui_escape(value: Any) -> str:
+    """Escape runtime/user text before interpolating into Textual markup."""
+    return _rich_markup_escape(str(value))
 
 
 def _plan_progress(items: list[tuple[str, str]]) -> tuple[int, int, str]:
@@ -132,7 +139,7 @@ def _render_topology_graph(state: "OrbReplTUI") -> list[str]:
         color = _status_color(aid)
         return [
             f"   [{color}]┌────────┐[/]",
-            f"   [{color}]│  {aid[:6]:<6}│[/]",
+            f"   [{color}]│  {_tui_escape(aid[:6].ljust(6))}│[/]",
             f"   [{color}]└────────┘[/]",
         ]
     if topo == "triad":
@@ -159,11 +166,11 @@ def _render_topology_graph(state: "OrbReplTUI") -> list[str]:
     # Fallback: use graph_rows from init, else list agents vertically.
     rows = getattr(state, "graph_rows", None) or []
     if rows:
-        return [f"[#6b7685]{str(r)}[/]" for r in rows]
+        return [f"[#6b7685]{_tui_escape(r)}[/]" for r in rows]
     out = []
     for aid in state.agent_order:
         color = _status_color(aid)
-        out.append(f"[{color}]● {aid}[/]")
+        out.append(f"[{color}]● {_tui_escape(aid)}[/]")
     if not out:
         out = ["[#6b7685](no topology)[/]"]
     return out
@@ -287,13 +294,13 @@ class StatusStrip(Static):
 
     def refresh_content(self) -> None:
         s = self.state
-        wd = s.workdir or "—"
-        topo = s.topology or "—"
-        live = s.live_text or "idle"
-        sid = (s.session_id or "")[:8] or "—"
+        wd = _tui_escape(s.workdir or "—")
+        topo = _tui_escape(s._topology_label(s.topology) if s.topology else "—")
+        live = _tui_escape(s.live_text or "idle")
+        sid = _tui_escape((s.session_id or "")[:8] or "—")
         # Derive plan N/M progress + meter bar from plan_items.
         done, total, meter = _plan_progress(s.plan_items)
-        branch = getattr(s, "branch", "") or f"orb/s{sid}"
+        branch = _tui_escape(getattr(s, "branch", "") or f"orb/s{sid}")
         # Row 1: brand / workdir / branch / topology / live pill
         row1 = (
             f"[bold #94bfff]ORB[/] · [#c4ced9]{wd}[/] · "
@@ -302,7 +309,7 @@ class StatusStrip(Static):
             f"[#86d8ab]●[/] [#c4ced9]{live}[/]"
         )
         # Row 2: plan meter + burn metrics + session id.
-        burn = f"{s.elapsed:.1f}s · {s.message_count} tok · {s.budget_remaining} left"
+        burn = _tui_escape(f"{s.elapsed:.1f}s · {s.message_count} tok · {s.budget_remaining} left")
         plan_str = f"[#8796a7]plan[/] [bold #c4ced9]{done}/{total}[/] [#94bfff]{meter}[/]"
         row2 = (
             f"{plan_str}   [#8796a7]{burn}[/] · "
@@ -328,9 +335,9 @@ class ContextRail(Static):
                 continue
             color = AGENT_STYLE.get(aid) or AGENT_STYLE.get(info.get("role", "").lower()) or "#c4ced9"
             status = str(info.get("status") or "idle")
-            meta = STATUS_META.get(status, status)
+            meta = _tui_escape(STATUS_META.get(status, status))
             dot = "●" if status in ("running", "waiting") else ("✓" if status == "completed" else "○")
-            label = AGENT_LABELS.get(aid, aid.title())
+            label = _tui_escape(AGENT_LABELS.get(aid, aid.title()))
             if status in ("running", "waiting"):
                 # Current agent: accent marker + subtle background tint.
                 lines.append(
@@ -353,11 +360,11 @@ class ContextRail(Static):
         if s.plan_items:
             for kind, text in s.plan_items:
                 if kind == "done":
-                    lines.append(f"[#86d8ab]✓[/] [#8796a7]{text}[/]")
+                    lines.append(f"[#86d8ab]✓[/] [#8796a7]{_tui_escape(text)}[/]")
                 elif kind == "now":
-                    lines.append(f"[#94bfff]●[/] [#c4ced9]{text}[/]")
+                    lines.append(f"[#94bfff]●[/] [#c4ced9]{_tui_escape(text)}[/]")
                 else:
-                    lines.append(f"[#6b7685]○ {text}[/]")
+                    lines.append(f"[#6b7685]○ {_tui_escape(text)}[/]")
         else:
             lines.append("[#6b7685](no plan yet)[/]")
         lines.append("")
@@ -372,7 +379,7 @@ class ContextRail(Static):
                 if rem:
                     stat += f" [#f3afa7]−{rem}[/]"
                 short = path if len(path) <= 22 else "…" + path[-21:]
-                lines.append(f"[#c4ced9]{short}[/]  {stat}")
+                lines.append(f"[#c4ced9]{_tui_escape(short)}[/]  {stat}")
             truncated = getattr(s, "file_changes_truncated_count", 0) or 0
             if truncated:
                 lines.append(f"[#6b7685]… {truncated} older hidden[/]")
@@ -386,7 +393,7 @@ class ContextRail(Static):
         if scope_paths:
             for path in scope_paths:
                 short = path if len(path) <= 22 else "…" + path[-21:]
-                lines.append(f"[#94bfff]@[/] [#c4ced9]{short}[/]")
+                lines.append(f"[#94bfff]@[/] [#c4ced9]{_tui_escape(short)}[/]")
         lines.append("[#6b7685]+ add with @[/]")
 
         self.update("\n".join(lines))
@@ -429,7 +436,15 @@ class Turn(Static):
     # win. 50ms is the sweet spot per the post-streaming review.
     _STREAM_FLUSH_MS = 50
 
-    def __init__(self, speaker: str, elapsed: float, body: str, *, model: str = "") -> None:
+    def __init__(
+        self,
+        speaker: str,
+        elapsed: float,
+        body: str,
+        *,
+        model: str = "",
+        body_markup: bool = False,
+    ) -> None:
         super().__init__()
         # Persist the constructor inputs so streaming deltas (task #13)
         # can mutate the body in place via ``append`` / ``set_body``
@@ -444,6 +459,7 @@ class Turn(Static):
         # kept for backward compatibility — readers see the joined
         # string, writers reset the list. See the property below.
         self._body_chunks: list[str] = [body] if body else []
+        self._body_markup = body_markup
         self.model = (model or "").strip()
         # Debounce state for streaming renders. ``_pending_flush`` is
         # the active timer handle (None when no flush is scheduled).
@@ -490,16 +506,18 @@ class Turn(Static):
         for i in range(rows):
             lane_text, lane_color, lane_bold = (lane_cells[i] if i < len(lane_cells) else ("", "", False))
             body_line = body_lines[i] if i < len(body_lines) else ""
-            # Truncate lane text to fit.
+            body_markup = body_line if self._body_markup else _tui_escape(body_line)
+            # Truncate lane text, then escape dynamic lane/body text before
+            # putting it into the surrounding Rich markup.
             cell = lane_text[: self._LANE_WIDTH]
-            cell_padded = cell.ljust(self._LANE_WIDTH)
+            cell_padded = _tui_escape(cell.ljust(self._LANE_WIDTH))
             if lane_text:
                 style = f"bold {lane_color}" if lane_bold else lane_color
                 lane_markup = f"[{style}]{cell_padded}[/]"
             else:
                 lane_markup = cell_padded
             sep = f"[{color}]│[/]"
-            out.append(f"{lane_markup} {sep} [#c4ced9]{body_line}[/]")
+            out.append(f"{lane_markup} {sep} [#c4ced9]{body_markup}[/]")
 
         self.update("\n".join(out))
 
@@ -564,7 +582,7 @@ class Turn(Static):
             self._dirty = False
             self._rebuild_turn_markup()
 
-    def set_body(self, body: str, *, model: str | None = None) -> None:
+    def set_body(self, body: str, *, model: str | None = None, body_markup: bool | None = None) -> None:
         """Replace the body wholesale and re-render.
 
         Used when the terminal ``message`` event closes a streaming
@@ -585,6 +603,8 @@ class Turn(Static):
             self._pending_flush = None
         if model is not None:
             self.model = (model or "").strip()
+        if body_markup is not None:
+            self._body_markup = body_markup
         self._rebuild_turn_markup()
 
 
@@ -597,15 +617,17 @@ class Whisper(Static):
     doesn't need to read word-for-word the way they read messages.
     """
 
-    def __init__(self, speaker: str, elapsed: float, body: str) -> None:
+    def __init__(self, speaker: str, elapsed: float, body: str, *, body_markup: bool = False) -> None:
         super().__init__()
         color = AGENT_STYLE.get(speaker, "#8796a7")
         label = AGENT_LABELS.get(speaker, speaker or "?")
         ts = _fmt_timestamp(elapsed)
+        rendered_body = body if body_markup else _tui_escape(body)
+        rendered_label = _tui_escape(label)
         # Indent slightly so the whisper sits visually under the
         # preceding turn. Compact, one line, muted body.
         self.update(
-            f"  [{color}]·[/] [#6b7685]{ts}[/] [#6b7685]{label}[/]  [#8796a7]{body}[/]"
+            f"  [{color}]·[/] [#6b7685]{ts}[/] [#6b7685]{rendered_label}[/]  [#8796a7]{rendered_body}[/]"
         )
         self.add_class("whisper")
 
@@ -662,18 +684,20 @@ class ToolBlock(Static):
         pill_color = self._PILL_COLOR.get(self._pill_kind, "#8796a7")
         bar_color = AGENT_STYLE.get(self._agent, "#3a4552")
 
-        head = f"[#c4ced9]{self._glyph}[/] [bold #ecf1f6]{self._label}[/]"
+        head = f"[#c4ced9]{_tui_escape(self._glyph)}[/] [bold #ecf1f6]{_tui_escape(self._label)}[/]"
         if self._meta:
-            head += f"  [#6b7685]{self._meta}[/]"
+            head += f"  [#6b7685]{_tui_escape(self._meta)}[/]"
         if self._pill:
             # Wrap the pill in U+2595 ▕ / U+258F ▏ so it reads like a bracketed
             # capsule without confusing Textual's markup parser with literal
             # square-brackets inside a tag.
-            head += f"  [{pill_color}]▕ {self._pill} ▏[/]"
+            head += f"  [{pill_color}]▕ {_tui_escape(self._pill)} ▏[/]"
 
         raw_lines = [head]
         if self._body:
-            raw_lines.extend(self._body.split("\n"))
+            raw_lines.extend(
+                f"[#8796a7]{_tui_escape(line)}[/]" for line in self._body.split("\n")
+            )
 
         # Prefix every line with an agent-colored thick vertical bar so
         # the block visually hangs off its speaker's color.
@@ -696,7 +720,7 @@ class ToolBlock(Static):
                     tone = "#f3afa7"
                 elif low_lbl.startswith("edit"):
                     tone = "#f0c982"
-                chip = f"[bold {tone}]{key}[/][#6b7685]/[/][#c4ced9]{lbl}[/]"
+                chip = f"[bold {tone}]{_tui_escape(key)}[/][#6b7685]/[/][#c4ced9]{_tui_escape(lbl)}[/]"
                 chips.append(chip)
             accept_row = f"{prefix}[#6b7685]apply?[/]  " + "  ".join(chips)
             lines.append(accept_row)
@@ -731,7 +755,7 @@ class Milestone(Static):
         core = f" step {step} · {label} "
         filler = max(4, width - len(core) - 4)
         text = (
-            f"[#6b7685]── {core}[/]"
+            f"[#6b7685]── {_tui_escape(core)}[/]"
             f"[#3a4552]{'─' * filler}[/]"
         )
         self.update(text)
@@ -783,11 +807,11 @@ class LiveStatusBar(Static):
             who = who.strip()
             color = AGENT_STYLE.get(who.lower(), "#94bfff")
             self.update(
-                f"[{color}]{glyph}[/] [bold {color}]{who}[/] [#8796a7]· {rest.strip()}[/]"
-                f"[#6b7685]{dur}[/]"
+                f"[{color}]{glyph}[/] [bold {color}]{_tui_escape(who)}[/] [#8796a7]· {_tui_escape(rest.strip())}[/]"
+                f"[#6b7685]{_tui_escape(dur)}[/]"
             )
         else:
-            self.update(f"[#6b7685]{glyph}[/] [#8796a7]{text}[/][#6b7685]{dur}[/]")
+            self.update(f"[#6b7685]{glyph}[/] [#8796a7]{_tui_escape(text)}[/][#6b7685]{_tui_escape(dur)}[/]")
 
 
 class SlashPalette(Static):
@@ -886,8 +910,11 @@ class ResumeSessionScreen(Screen):
                 meta.append(topo)
             if turns:
                 meta.append(f"{turns} turn" + ("" if turns == 1 else "s"))
-            meta_str = f"  [dim]({', '.join(meta)})[/dim]" if meta else ""
-            lines.append(f"[dim]{i}[/dim]  {workdir}  [dim]{sid}…[/dim]{active}{meta_str}")
+            meta_str = f"  [dim]({_tui_escape(', '.join(meta))})[/dim]" if meta else ""
+            lines.append(
+                f"[dim]{i}[/dim]  {_tui_escape(workdir)}  "
+                f"[dim]{_tui_escape(sid)}…[/dim]{active}{meta_str}"
+            )
         box.update("\n".join(lines))
 
     async def action_pick(self, index: int) -> None:
@@ -1006,6 +1033,10 @@ class OrbReplTUI(App[None]):
         self.workdir: str = ""
         self.topology: str = topology
         self.entry_agent: str = ""
+        # Topology ids accepted by ``/topology``. Seed from bundled labels so
+        # the TUI remains useful before the daemon answers, then hydrate from
+        # ``GET /api/v1/topologies`` so custom runtime topologies work too.
+        self.available_topology_labels: dict[str, str] = dict(TOPOLOGY_LABELS)
         # Session-level lock surfaced via the init event's ``session`` block.
         # Populated once the server has pinned the topology + per-agent models
         # for this session (after the first run's planning stage). While this
@@ -1106,6 +1137,7 @@ class OrbReplTUI(App[None]):
         import aiohttp
         self._http_session = aiohttp.ClientSession()
         self._ws_task = asyncio.create_task(self._start_ws_client())
+        asyncio.create_task(self._hydrate_topologies())
         self._refresh_chrome()
         # Tick the live bar's elapsed counter while an activity is in-flight.
         self.set_interval(0.5, self._tick_live_bar)
@@ -1138,19 +1170,37 @@ class OrbReplTUI(App[None]):
 
     # ── WebSocket client ─────────────────────────────────────────────────
 
+    def _ws_url(self) -> str:
+        """Return the WebSocket URL scoped to the currently attached session."""
+        ws_scheme = "wss" if self._server_scheme == "https" else "ws"
+        base = f"{ws_scheme}://{self._server_host}:{self._server_port}/api/v1/ws"
+        if not self.session_id:
+            return base
+        return f"{base}?{urlencode({'session_id': self.session_id})}"
+
+    def _restart_ws_client(self) -> None:
+        """Reconnect so the daemon-side WS subscription follows ``session_id``."""
+        if self._http_session is None:
+            return
+        if self._ws_task is not None and not self._ws_task.done():
+            self._ws_task.cancel()
+        self._ws_task = asyncio.create_task(self._start_ws_client())
+
     async def _start_ws_client(self) -> None:
         import aiohttp
-        ws_scheme = "wss" if self._server_scheme == "https" else "ws"
         while True:
             if not self.session_id:
                 if not getattr(self, "_ws_deferred_notice_shown", False):
-                    self._emit_whisper("system", "[#f3afa7]no session — websocket attach deferred[/]")
+                    self._emit_whisper(
+                        "system",
+                        "[#f3afa7]no session — websocket attach deferred[/]",
+                        body_markup=True,
+                    )
                     self._ws_deferred_notice_shown = True
                 await asyncio.sleep(1)
                 continue
             self._ws_deferred_notice_shown = False
-            url = f"{ws_scheme}://{self._server_host}:{self._server_port}/api/v1/ws"
-            url += "?" + urlencode({"session_id": self.session_id})
+            url = self._ws_url()
             try:
                 async with self._http_session.ws_connect(url, heartbeat=30) as ws:
                     async for msg in ws:
@@ -1165,11 +1215,6 @@ class OrbReplTUI(App[None]):
                 logger.debug("WS lost: %s", exc)
             await asyncio.sleep(1)
 
-    def _restart_ws_client(self) -> None:
-        if getattr(self, "_ws_task", None) is not None:
-            self._ws_task.cancel()
-        self._ws_task = asyncio.create_task(self._start_ws_client())
-
     def _cancel_ws_client(self) -> None:
         if getattr(self, "_ws_task", None) is not None:
             self._ws_task.cancel()
@@ -1179,6 +1224,14 @@ class OrbReplTUI(App[None]):
 
     def _handle_server_event(self, data: dict) -> None:
         t = data.get("type")
+        event_session_id = str(data.get("session_id") or "")
+        if event_session_id and self.session_id and event_session_id != self.session_id:
+            logger.debug(
+                "Ignoring WS event for session %s while attached to %s",
+                event_session_id,
+                self.session_id,
+            )
+            return
         if t == "init":
             self._handle_init(data)
         elif t == "message":
@@ -1201,6 +1254,8 @@ class OrbReplTUI(App[None]):
             self._handle_file_write_rejected(data)
         elif t == "plan_step":
             self._handle_plan_step(data)
+        elif t == "topologies_reloaded":
+            asyncio.create_task(self._hydrate_topologies())
         elif t == "stats":
             self.message_count = int(data.get("message_count") or self.message_count)
             self.elapsed = float(data.get("elapsed") or self.elapsed)
@@ -1221,10 +1276,10 @@ class OrbReplTUI(App[None]):
                     reason = str(data.get("reason") or data.get("error") or "")
                     msg = "[#f3afa7]✗ run errored[/]"
                     if reason:
-                        msg += f"\n[#c4ced9]{reason[:400]}[/]"
-                    self._emit_turn("system", msg)
+                        msg += f"\n[#c4ced9]{_tui_escape(reason[:400])}[/]"
+                    self._emit_turn("system", msg, body_markup=True)
                 elif to_state == "stopping":
-                    self._emit_turn("system", "[#f0c982]… stopping[/]")
+                    self._emit_turn("system", "[#f0c982]… stopping[/]", body_markup=True)
                 self._refresh_chrome()
 
     def _handle_init(self, data: dict) -> None:
@@ -1242,7 +1297,7 @@ class OrbReplTUI(App[None]):
         topo = ((data.get("plan") or {}).get("topology") or {}).get("id")
         entry_agent = ((data.get("plan") or {}).get("topology") or {}).get("entry_agent")
         if topo:
-            self.topology = TOPOLOGY_LABELS.get(topo, topo)
+            self.topology = str(topo)
         if entry_agent:
             self.entry_agent = str(entry_agent)
         # Hydrate session-level lock from the init event's ``session`` block.
@@ -1349,7 +1404,8 @@ class OrbReplTUI(App[None]):
             stream.remove_children()
             self._emit_turn(
                 "system",
-                f"session started · workdir [#c4ced9]{self.workdir or '—'}[/] · topology [#c4ced9]{self.topology}[/]",
+                f"session started · workdir [#c4ced9]{_tui_escape(self.workdir or '—')}[/] · topology [#c4ced9]{_tui_escape(self.topology)}[/]",
+                body_markup=True,
             )
             for m in (data.get("messages") or [])[-12:]:
                 self._render_message(m)
@@ -1398,11 +1454,14 @@ class OrbReplTUI(App[None]):
     def _handle_message_delta(self, data: dict) -> None:
         """Render a streamed token chunk into the active Turn.
 
-        Contract (from task #12): one stream per ``chain_id``; ``index``
-        is monotonic from 0; the terminal ``message`` event closes the
-        stream. We don't gate on ``index`` here — the WS preserves
-        order, and even if it didn't, dropped/reordered chunks are
-        reconciled when the final ``message`` resets the body wholesale.
+        Contract (from task #12/#13): one stream per ``chain_id``;
+        ``index`` is monotonic from 0; the terminal ``message`` event
+        closes the stream by popping active tracking and tombstoning the
+        (chain_id, from) pair. We don't gate on ``index`` here — the WS
+        preserves order, and the final ``message`` deliberately does not
+        replace the accumulated streamed body because its content is the
+        routed ``send_message`` payload, which may be semantically
+        different or truncated.
         """
         chain_id = str(data.get("chain_id") or "")
         delta = data.get("delta") or ""
@@ -1461,7 +1520,7 @@ class OrbReplTUI(App[None]):
         if prev and prev != status and status in {"running", "completed", "error", "errored"}:
             glyph = "●" if status == "running" else "✓" if status == "completed" else "✗"
             tone = "#94bfff" if status == "running" else "#86d8ab" if status == "completed" else "#f3afa7"
-            self._emit_whisper(aid, f"[{tone}]{glyph}[/] {status}")
+            self._emit_whisper(aid, f"[{tone}]{glyph}[/] {_tui_escape(status)}", body_markup=True)
         # Keep the LiveStatusBar pill fresh so a newly-running agent
         # surfaces before the next activity event.
         if status == "running":
@@ -1478,7 +1537,7 @@ class OrbReplTUI(App[None]):
             prompt = full or activity.replace("⏳ Waiting for user:", "").strip()
             self.live_text = f"{AGENT_LABELS.get(aid, aid)} is waiting"
             self._live_started = time()
-            self._emit_turn(aid, f"[#f0c982]? {prompt}[/]")
+            self._emit_turn(aid, f"[#f0c982]? {_tui_escape(prompt)}[/]", body_markup=True)
         elif activity:
             # Show the activity inline so users see intermediate progress
             # (classifier calls, reads, retries) — not just the final run
@@ -1506,7 +1565,11 @@ class OrbReplTUI(App[None]):
         locked = str(data.get("locked_topology") or "").strip()
         if locked:
             self.locked_topology = locked
-        self._emit_turn(agent, f"[#86d8ab]✓ run complete · {elapsed:.1f}s[/]\n{result[:800]}")
+        self._emit_turn(
+            agent,
+            f"[#86d8ab]✓ run complete · {elapsed:.1f}s[/]\n{_tui_escape(result[:800])}",
+            body_markup=True,
+        )
         # Run is over — drop any streaming bookkeeping that didn't get
         # closed by a terminal ``message`` event (a crashed agent, a WS
         # drop right at the end, etc.). Without this, ``_streaming_turns``
@@ -1566,7 +1629,7 @@ class OrbReplTUI(App[None]):
                     logger.debug("set_status on resolved block failed", exc_info=True)
             return
         # Non-approval path — render as before.
-        block_body = f"[#6b7685]wrote {len(new_lines)} lines · {len(new)} bytes[/]"
+        block_body = f"wrote {len(new_lines)} lines · {len(new)} bytes"
         self._emit_block(
             agent,
             glyph="±",
@@ -1602,7 +1665,7 @@ class OrbReplTUI(App[None]):
         if self.approve_all:
             self._schedule_approval_post(request_id, "approve")
             return
-        body = f"[#6b7685]awaiting user · {len((data.get('content') or '').splitlines())} lines staged[/]"
+        body = f"awaiting user · {len((data.get('content') or '').splitlines())} lines staged"
         accept = ["y/accept", "a/accept all", "e/edit", "n/reject"]
         block = self._emit_block(
             agent,
@@ -1664,22 +1727,26 @@ class OrbReplTUI(App[None]):
         self._live_started = time()
         self._refresh_chrome()
         if detail:
-            self._emit_turn("system", f"[#94bfff]plan[/] · {title} — {detail}")
+            self._emit_turn(
+                "system",
+                f"[#94bfff]plan[/] · {_tui_escape(title)} — {_tui_escape(detail)}",
+                body_markup=True,
+            )
 
     # ── Turn / block emission ────────────────────────────────────────────
 
-    def _emit_whisper(self, speaker: str, body: str) -> None:
+    def _emit_whisper(self, speaker: str, body: str, *, body_markup: bool = False) -> None:
         """Mount a compact internal-event entry. See ``Whisper``."""
         try:
             stream = self.query_one(ReplStream)
         except Exception:  # noqa: BLE001
             return
-        stream.mount(Whisper(speaker, self.elapsed, body))
+        stream.mount(Whisper(speaker, self.elapsed, body, body_markup=body_markup))
         stream.scroll_end(animate=False)
 
-    def _emit_turn(self, speaker: str, body: str, *, model: str = "") -> None:
+    def _emit_turn(self, speaker: str, body: str, *, model: str = "", body_markup: bool = False) -> None:
         stream = self.query_one(ReplStream)
-        stream.mount(Turn(speaker, self.elapsed, body, model=model))
+        stream.mount(Turn(speaker, self.elapsed, body, model=model, body_markup=body_markup))
         stream.scroll_end(animate=False)
 
     def _emit_block(
@@ -1702,7 +1769,11 @@ class OrbReplTUI(App[None]):
         """
         stream = self.query_one(ReplStream)
         color = AGENT_STYLE.get(agent, "#8796a7")
-        head = Static(f"[{color}]◆[/] [bold {color}]{AGENT_LABELS.get(agent, agent)}[/]  [#6b7685]{_fmt_timestamp(self.elapsed)}[/]", classes="turn")
+        head = Static(
+            f"[{color}]◆[/] [bold {color}]{_tui_escape(AGENT_LABELS.get(agent, agent))}[/]  "
+            f"[#6b7685]{_fmt_timestamp(self.elapsed)}[/]",
+            classes="turn",
+        )
         stream.mount(head)
         block = ToolBlock(
             glyph=glyph,
@@ -1769,7 +1840,9 @@ class OrbReplTUI(App[None]):
             await self._run_slash_command(text)
             return
         if not self.session_id:
-            self._emit_turn("system", "[#f3afa7]no session — reconnect to the daemon first[/]")
+            self._emit_turn(
+                "system", "[#f3afa7]no session — reconnect to the daemon first[/]", body_markup=True
+            )
             return
         self._emit_turn("user", text)
         # If no run is in flight, start one. Inject only works while the
@@ -1793,7 +1866,11 @@ class OrbReplTUI(App[None]):
                 async with self._http_session.post(start_url, json=payload) as resp:
                     body_text = await resp.text()
                     if resp.status >= 400:
-                        self._emit_turn("system", f"[#f3afa7]start_run failed ({resp.status}): {body_text[:200]}[/]")
+                        self._emit_turn(
+                            "system",
+                            f"[#f3afa7]start_run failed ({resp.status}): {_tui_escape(body_text[:200])}[/]",
+                            body_markup=True,
+                        )
                         return
                 # Optimistic: flip to 'planning' so subsequent submits inject
                 # instead of double-starting. The server will broadcast the
@@ -1801,7 +1878,11 @@ class OrbReplTUI(App[None]):
                 self.run_state = "planning"
                 self._refresh_chrome()
             except Exception as exc:  # noqa: BLE001
-                self._emit_turn("system", f"[#f3afa7]start_run send failed: {exc}[/]")
+                self._emit_turn(
+                    "system",
+                    f"[#f3afa7]start_run send failed: {_tui_escape(str(exc))}[/]",
+                    body_markup=True,
+                )
             return
         # Run is in-flight — inject into the active run.
         inject_url = self._session_url("/runs/inject")
@@ -1812,9 +1893,15 @@ class OrbReplTUI(App[None]):
             ) as resp:
                 body_text = await resp.text()
                 if resp.status >= 400:
-                    self._emit_turn("system", f"[#f3afa7]inject failed ({resp.status}): {body_text[:200]}[/]")
+                    self._emit_turn(
+                        "system",
+                        f"[#f3afa7]inject failed ({resp.status}): {_tui_escape(body_text[:200])}[/]",
+                        body_markup=True,
+                    )
         except Exception as exc:  # noqa: BLE001
-            self._emit_turn("system", f"[#f3afa7]send failed: {exc}[/]")
+            self._emit_turn(
+                "system", f"[#f3afa7]send failed: {_tui_escape(str(exc))}[/]", body_markup=True
+            )
 
     async def _run_slash_command(self, text: str) -> None:
         """Handle inline slash commands. Parity with Claude-Code ergonomics."""
@@ -1829,8 +1916,10 @@ class OrbReplTUI(App[None]):
                 "  [#94bfff]/clear[/]    clear stream\n"
                 "  [#94bfff]/stop[/]     stop current run\n"
                 "  [#94bfff]/resume[/]   pick a prior session (same as ^r)\n"
+                "  [#94bfff]/new[/] [topology]   start a fresh session\n"
                 "  [#94bfff]/topology[/] <id>   change topology for new runs\n"
                 "  [#94bfff]/quit[/]     exit",
+                body_markup=True,
             )
         elif cmd == "clear":
             self.query_one(ReplStream).remove_children()
@@ -1841,17 +1930,23 @@ class OrbReplTUI(App[None]):
             # the chunk (or raising if the widget got fully GC'd).
             self._streaming_turns.clear()
             self._finalized_streams.clear()
-            self._emit_turn("system", "[#8796a7]stream cleared[/]")
+            self._emit_turn("system", "[#8796a7]stream cleared[/]", body_markup=True)
         elif cmd in {"stop", "cancel"}:
             await self.action_cancel_run()
         elif cmd == "resume":
             await self.action_resume_session()
+        elif cmd == "new":
+            await self._create_fresh_session(arg.strip().lower())
         elif cmd == "topology":
+            await self._hydrate_topologies()
             new = arg.strip().lower()
-            if new not in TOPOLOGY_LABELS:
+            valid_topologies = self._valid_topology_ids()
+            if new not in self.available_topology_labels:
                 self._emit_turn(
                     "system",
-                    f"[#f3afa7]unknown topology: {new!r}[/]\n[#8796a7]valid:[/] {', '.join(TOPOLOGY_LABELS)}",
+                    f"[#f3afa7]unknown topology: {_tui_escape(repr(new))}[/]\n"
+                    f"[#8796a7]valid:[/] {_tui_escape(', '.join(valid_topologies))}",
+                    body_markup=True,
                 )
             elif self.locked_topology and new != self.locked_topology:
                 # Session is pinned — the daemon would reuse ``locked_topology``
@@ -1861,27 +1956,112 @@ class OrbReplTUI(App[None]):
                 # ``_applySessionLock`` in ``web/static/app.js``.
                 self._emit_turn(
                     "system",
-                    f"[#f3afa7]topology is pinned to[/] [#c4ced9]{self.locked_topology}[/] "
-                    f"[#f3afa7]for this session. Start a new session to change it.[/]",
+                    f"[#f3afa7]topology is pinned to[/] [#c4ced9]{_tui_escape(self.locked_topology)}[/] "
+                    f"[#f3afa7]for this session — start[/] [#94bfff]/new {_tui_escape(new)}[/] "
+                    f"[#f3afa7]to change it[/]",
+                    body_markup=True,
                 )
             elif self.locked_topology and new == self.locked_topology:
                 # No-op — matches the lock. Confirm so the user has feedback.
                 self._topology = new
+                self.topology = new
                 self._emit_turn(
                     "system",
-                    f"[#8796a7]topology already pinned to[/] [#c4ced9]{new}[/] "
+                    f"[#8796a7]topology already pinned to[/] [#c4ced9]{_tui_escape(new)}[/] "
                     f"[#6b7685](session lock matches)[/]",
+                    body_markup=True,
                 )
             else:
                 self._topology = new
+                self.topology = new
                 self._emit_turn(
                     "system",
-                    f"[#8796a7]topology set to[/] [#c4ced9]{new}[/] [#6b7685](applies to the next run)[/]",
+                    f"[#8796a7]topology set to[/] [#c4ced9]{_tui_escape(new)}[/] [#6b7685](applies to the next run)[/]",
+                    body_markup=True,
                 )
         elif cmd in {"quit", "exit"}:
             self.call_after_refresh(self.action_quit)
         else:
-            self._emit_turn("system", f"[#f3afa7]unknown command:[/] /{cmd}")
+            self._emit_turn(
+                "system", f"[#f3afa7]unknown command:[/] /{_tui_escape(cmd)}", body_markup=True
+            )
+
+    async def _create_fresh_session(self, requested_topology: str = "") -> None:
+        """Create a new daemon session and attach the TUI to it.
+
+        ``/new`` preserves the current workdir, topology/model pins, and
+        approval mode. ``/new <topology>`` lets users escape a pinned session
+        directly into a fresh session with the requested topology.
+        """
+        topology = requested_topology or self._topology or self.topology or "auto"
+        topology = topology.strip().lower() or "auto"
+        if self._http_session is None:
+            self._emit_turn(
+                "system", "[#f3afa7]/new failed:[/] HTTP client is not ready yet", body_markup=True
+            )
+            return
+        await self._hydrate_topologies()
+        valid_topologies = ["auto", *self._valid_topology_ids()]
+        if topology not in valid_topologies:
+            self._emit_turn(
+                "system",
+                f"[#f3afa7]unknown topology: {_tui_escape(repr(topology))}[/]\n"
+                f"[#8796a7]valid:[/] {_tui_escape(', '.join(valid_topologies))}",
+                body_markup=True,
+            )
+            return
+
+        base = f"{self._server_scheme}://{self._server_host}:{self._server_port}"
+        post_body: dict[str, Any] = {}
+        if self.workdir:
+            post_body["workdir"] = self.workdir
+        if topology and topology != "auto":
+            post_body["topology"] = topology
+        if self.locked_agent_models:
+            post_body["agent_models"] = dict(self.locked_agent_models)
+        if self.approval_required:
+            post_body["approval_required"] = True
+
+        try:
+            async with self._http_session.post(f"{base}/api/v1/sessions", json=post_body) as resp:
+                status = resp.status
+                try:
+                    body = await resp.json()
+                except Exception:  # noqa: BLE001
+                    body_text = await resp.text()
+                    body = {"ok": False, "error": body_text[:200]}
+        except Exception as exc:  # noqa: BLE001
+            self._emit_turn(
+                "system", f"[#f3afa7]/new failed:[/] {_tui_escape(str(exc))}", body_markup=True
+            )
+            return
+
+        if status >= 400 or not isinstance(body, dict) or not body.get("ok"):
+            err_msg = ""
+            if isinstance(body, dict):
+                err_msg = str(body.get("error") or body.get("code") or body)
+            self._emit_turn(
+                "system",
+                f"[#f3afa7]/new failed ({status}):[/] {_tui_escape(err_msg[:200])}",
+                body_markup=True,
+            )
+            return
+
+        data = body.get("data") or {}
+        new_session_id = str(data.get("session_id") or "")
+        if not new_session_id:
+            self._emit_turn(
+                "system", "[#f3afa7]/new failed:[/] response did not include a session_id", body_markup=True
+            )
+            return
+
+        self._topology = topology
+        await self._attach_to_session(new_session_id)
+        self._emit_turn(
+            "system",
+            f"[#8796a7]new session attached:[/] [#c4ced9]{_tui_escape(new_session_id[:8])}[/]",
+            body_markup=True,
+        )
 
     def action_cancel_input(self) -> None:
         ta = self.query_one("#query-input", TextArea)
@@ -1892,7 +2072,9 @@ class OrbReplTUI(App[None]):
 
     async def action_cancel_run(self) -> None:
         if not self.session_id:
-            self._emit_whisper("system", "[#f3afa7]no active session — nothing to stop[/]")
+            self._emit_whisper(
+                "system", "[#f3afa7]no active session — nothing to stop[/]", body_markup=True
+            )
             return
         try:
             async with self._http_session.post(self._session_url("/runs/stop")) as resp:
@@ -1900,12 +2082,15 @@ class OrbReplTUI(App[None]):
                 if resp.status >= 400:
                     self._emit_whisper(
                         "system",
-                        f"[#f3afa7]/stop failed ({resp.status})[/] {body_text[:160]}",
+                        f"[#f3afa7]/stop failed ({resp.status})[/] {_tui_escape(body_text[:160])}",
+                        body_markup=True,
                     )
                     return
-            self._emit_whisper("system", "[#8796a7]stop requested[/]")
+            self._emit_whisper("system", "[#8796a7]stop requested[/]", body_markup=True)
         except Exception as exc:  # noqa: BLE001
-            self._emit_whisper("system", f"[#f3afa7]/stop error:[/] {exc}")
+            self._emit_whisper(
+                "system", f"[#f3afa7]/stop error:[/] {_tui_escape(str(exc))}", body_markup=True
+            )
 
     async def action_resume_session(self) -> None:
         """Open the session picker — lists known sessions from the daemon."""
@@ -1968,6 +2153,7 @@ class OrbReplTUI(App[None]):
         self._emit_turn(
             "system",
             "[#8796a7]keys:[/] ^↵ send · esc cancel input · ^k stop · ^r resume · ^c quit · ? help",
+            body_markup=True,
         )
 
     # ── Approval actions (task #10) ──────────────────────────────────────
@@ -2016,15 +2202,16 @@ class OrbReplTUI(App[None]):
         await self._post_approval(req_id, "reject")
 
     async def action_approve_all(self) -> None:
-        """Latch auto-approve for the session + approve the oldest pending."""
+        """Latch auto-approve for the session + approve all current pending writes."""
         self.approve_all = True
         self._emit_whisper(
             "system",
             "[#f0c982]auto-approving subsequent writes for this session[/]",
+            body_markup=True,
         )
-        pair = self._oldest_pending()
-        if pair is not None:
-            req_id, _ = pair
+        # Approvals are best-effort and ordered: if one POST fails, the
+        # still-pending write remains visible and subsequent writes continue.
+        for req_id in list(self.pending_writes.keys()):
             await self._post_approval(req_id, "approve")
 
     async def action_edit_pending_write(self) -> None:
@@ -2069,13 +2256,18 @@ class OrbReplTUI(App[None]):
             if getattr(result, "returncode", 1) != 0:
                 self._emit_whisper(
                     "system", "[#f3afa7]editor exited non-zero — keeping the write pending[/]",
+                    body_markup=True,
                 )
                 return
             try:
                 with open(tmp_path, "r", encoding="utf-8") as rfh:
                     edited = rfh.read()
             except OSError as exc:
-                self._emit_whisper("system", f"[#f3afa7]could not read edited file: {exc}[/]")
+                self._emit_whisper(
+                    "system",
+                    f"[#f3afa7]could not read edited file: {_tui_escape(str(exc))}[/]",
+                    body_markup=True,
+                )
                 return
         finally:
             try:
@@ -2107,10 +2299,15 @@ class OrbReplTUI(App[None]):
                 if resp.status >= 400:
                     self._emit_whisper(
                         "system",
-                        f"[#f3afa7]approval {action} failed ({resp.status}): {text[:200]}[/]",
+                        f"[#f3afa7]approval {_tui_escape(action)} failed ({resp.status}): {_tui_escape(text[:200])}[/]",
+                        body_markup=True,
                     )
         except Exception as exc:  # noqa: BLE001
-            self._emit_whisper("system", f"[#f3afa7]approval {action} send failed: {exc}[/]")
+            self._emit_whisper(
+                "system",
+                f"[#f3afa7]approval {_tui_escape(action)} send failed: {_tui_escape(str(exc))}[/]",
+                body_markup=True,
+            )
 
     def _schedule_approval_post(
         self,
@@ -2142,6 +2339,46 @@ class OrbReplTUI(App[None]):
             logger.debug("no running loop for approval POST; deferring", exc_info=True)
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _topologies_url(self) -> str:
+        base = f"{self._server_scheme}://{self._server_host}:{self._server_port}"
+        return f"{base}/api/v1/topologies"
+
+    def _valid_topology_ids(self) -> list[str]:
+        return sorted(self.available_topology_labels)
+
+    def _topology_label(self, topology_id: str) -> str:
+        return self.available_topology_labels.get(topology_id) or TOPOLOGY_LABELS.get(topology_id, topology_id)
+
+    async def _hydrate_topologies(self) -> None:
+        """Refresh topology ids from the daemon, keeping bundled fallbacks."""
+        if self._http_session is None:
+            return
+        try:
+            async with self._http_session.get(self._topologies_url()) as resp:
+                if getattr(resp, "status", 200) >= 400:
+                    return
+                body = await resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to hydrate topologies: %s", exc)
+            return
+        if not isinstance(body, dict):
+            return
+        entries = body.get("topologies")
+        if entries is None and isinstance(body.get("data"), dict):
+            entries = body["data"].get("topologies")
+        if not isinstance(entries, list):
+            return
+        hydrated = dict(TOPOLOGY_LABELS)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            tid = str(entry.get("id") or "").strip().lower()
+            if not tid:
+                continue
+            label = str(entry.get("label") or "").strip() or TOPOLOGY_LABELS.get(tid, tid)
+            hydrated[tid] = label
+        self.available_topology_labels = hydrated
 
     def _session_url(self, suffix: str) -> str:
         base = f"{self._server_scheme}://{self._server_host}:{self._server_port}"
