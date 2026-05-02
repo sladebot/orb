@@ -596,7 +596,7 @@ class GraphRuntime:
                 ANTHROPIC_SONNET_MODEL,
                 ANTHROPIC_OPUS_MODEL,
             ],
-            "openai-codex": ["gpt-5.4-mini", "gpt-5.4"],
+            "openai-codex": ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"],
             "ollama": ["qwen3.5:9b", "qwen3.5:27b"],
             "vmlx": [],
             "omlx": [],
@@ -722,34 +722,20 @@ class GraphRuntime:
         status: dict[str, str] = {}
         updated = False
 
-        # Static catalog — always succeeds because it's hardcoded.
-        OPENAI_CODEX_CATALOG: list[dict] = [
-            {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini", "local": False},
-            {"id": "gpt-5.4",      "label": "GPT-5.4",      "local": False},
-        ]
-        OPENAI_CODEX_DEFAULTS: dict[str, str] = {
-            "cloud_lite":   "gpt-5.4-mini",
-            "cloud_fast":   "gpt-5.4-mini",
-            "cloud_strong": "gpt-5.4",
-        }
-
-        fetchers: list[tuple[str, Any, list[dict] | None, dict[str, str] | None]] = [
-            ("anthropic",    self._fetch_anthropic_catalog, None,                 None),
-            ("openai-codex", None,                          OPENAI_CODEX_CATALOG, OPENAI_CODEX_DEFAULTS),
-            ("ollama",       self._fetch_ollama_catalog,    None,                 None),
-            ("vmlx",         self._fetch_vmlx_catalog,      None,                 None),
-            ("omlx",         self._fetch_omlx_catalog,      None,                 None),
+        fetchers: list[tuple[str, Any]] = [
+            ("anthropic",    self._fetch_anthropic_catalog),
+            ("openai-codex", self._fetch_openai_codex_catalog),
+            ("ollama",       self._fetch_ollama_catalog),
+            ("vmlx",         self._fetch_vmlx_catalog),
+            ("omlx",         self._fetch_omlx_catalog),
         ]
 
-        for name, fetcher, static_catalog, static_defaults in fetchers:
+        for name, fetcher in fetchers:
             if name not in self._all_providers:
                 status[name] = "skipped:not-registered"
                 continue
 
-            if static_catalog is not None:
-                catalog, defaults = static_catalog, static_defaults or {}
-            else:
-                catalog, defaults = await fetcher()
+            catalog, defaults = await fetcher()
 
             if not catalog:
                 status[name] = "skipped:empty"
@@ -772,6 +758,106 @@ class GraphRuntime:
             save_config(cfg)
 
         return status
+
+    async def _fetch_openai_codex_catalog(self) -> tuple[list[dict], dict[str, str]]:
+        """Fetch OpenAI models for Orb's OpenAI provider.
+
+        API-key auth can use the official `/v1/models` endpoint. ChatGPT
+        OAuth does not expose a documented Codex model-list endpoint, so for
+        that mode we validate known public model aliases against the same
+        Codex endpoint used at runtime and persist only models that work.
+        """
+        from orb.cli.auth import get_openai_api_key, get_openai_oauth_token
+
+        oauth_token = get_openai_oauth_token()
+        if oauth_token:
+            return await self._fetch_openai_codex_oauth_catalog(oauth_token)
+
+        api_key = get_openai_api_key() or os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            return await self._fetch_openai_api_catalog(api_key)
+
+        return [], {}
+
+    async def _fetch_openai_api_catalog(self, api_key: str) -> tuple[list[dict], dict[str, str]]:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=15.0,
+                )
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+        except Exception as exc:
+            logger.warning("Failed to refresh OpenAI model catalog: %s", exc)
+            return [], {}
+
+        ids = sorted({
+            str(item.get("id") or "").strip()
+            for item in data
+            if self._is_orb_openai_model(str(item.get("id") or "").strip())
+        })
+        catalog = [{"id": model_id, "label": self._openai_label_for_model(model_id), "local": False} for model_id in ids]
+        return catalog, self._openai_defaults_for_catalog(catalog)
+
+    async def _fetch_openai_codex_oauth_catalog(self, token: str) -> tuple[list[dict], dict[str, str]]:
+        from orb.llm.codex import OpenAICodexProvider
+        from orb.llm.types import CompletionRequest, ModelConfig, ModelTier
+
+        candidates = ("gpt-5.5", "gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano")
+        provider = OpenAICodexProvider(token)
+        catalog: list[dict] = []
+        try:
+            for model_id in candidates:
+                try:
+                    await provider.complete(
+                        CompletionRequest(
+                            messages=[{"role": "user", "content": "ping"}],
+                            model_config=ModelConfig(
+                                tier=ModelTier.CLOUD_FAST,
+                                model_id=model_id,
+                                provider="openai-codex",
+                                max_tokens=1,
+                                temperature=0,
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    logger.info("OpenAI Codex OAuth model %s unavailable: %s", model_id, exc)
+                    continue
+                catalog.append({"id": model_id, "label": self._openai_label_for_model(model_id), "local": False})
+        finally:
+            await provider.close()
+
+        return catalog, self._openai_defaults_for_catalog(catalog)
+
+    @staticmethod
+    def _is_orb_openai_model(model_id: str) -> bool:
+        if not model_id:
+            return False
+        if re.search(r"-\d{4}-\d{2}-\d{2}$", model_id):
+            return False
+        return bool(re.match(r"^(gpt-5(?:\.\d+)?(?:-(?:mini|nano|pro|codex))?|gpt-4\.1(?:-(?:mini|nano))?)$", model_id))
+
+    @staticmethod
+    def _openai_label_for_model(model_id: str) -> str:
+        return model_id.replace("-", " ").replace("gpt", "GPT").title().replace("Gpt", "GPT")
+
+    def _openai_defaults_for_catalog(self, catalog: list[dict]) -> dict[str, str]:
+        if not catalog:
+            return {}
+        ids = [str(item.get("id") or "") for item in catalog if item.get("id")]
+        lite = self._pick_catalog_model(catalog, "mini", ids[0])
+        if lite == ids[0]:
+            lite = self._pick_catalog_model(catalog, "nano", ids[0])
+        fast = self._pick_catalog_model(catalog, "gpt-5.5", ids[-1])
+        strong = self._pick_catalog_model(catalog, "gpt-5.5", fast)
+        return {
+            "cloud_lite": lite,
+            "cloud_fast": fast,
+            "cloud_strong": strong,
+        }
 
     async def _fetch_anthropic_catalog(self) -> tuple[list[dict], dict[str, str]]:
         from orb.cli.auth import _anthropic_headers, get_anthropic_key
@@ -2263,7 +2349,7 @@ class GraphRuntime:
         if model_pin and model_pin != "auto":
             if "claude" in model_pin:
                 force_provider = "anthropic"
-            elif model_pin.startswith("gpt-5.4"):
+            elif model_pin.startswith("gpt-"):
                 force_provider = "openai-codex"
             elif "qwen" in model_pin or "llama" in model_pin:
                 force_provider = "ollama" if has_ollama else "omlx" if has_omlx else "vmlx" if has_vmlx else "ollama"

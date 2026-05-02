@@ -83,7 +83,87 @@ async def test_status_reports_unchanged_when_catalog_matches(isolated_config, mo
 
 
 @pytest.mark.asyncio
-async def test_openai_codex_static_catalog_still_runs(isolated_config, monkeypatch):
+async def test_openai_codex_refresh_uses_fetcher(isolated_config, monkeypatch):
     runtime = _make_runtime(["openai-codex"])
+    catalog = [{"id": "gpt-5.5", "label": "GPT-5.5", "local": False}]
+    defaults = {"cloud_lite": "gpt-5.5", "cloud_fast": "gpt-5.5", "cloud_strong": "gpt-5.5"}
+    fetcher = AsyncMock(return_value=(catalog, defaults))
+    monkeypatch.setattr(runtime, "_fetch_openai_codex_catalog", fetcher)
+
     status = await runtime.refresh_provider_catalogs()
-    assert status["openai-codex"].startswith("updated:") or status["openai-codex"].startswith("unchanged:")
+    assert status["openai-codex"] == "updated:1"
+    fetcher.assert_awaited_once()
+
+    saved = json.loads(isolated_config.read_text())
+    assert saved["providers"]["openai-codex"]["catalog"] == catalog
+
+
+@pytest.mark.asyncio
+async def test_openai_api_catalog_reads_v1_models(isolated_config, monkeypatch):
+    requested = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": [
+                    {"id": "gpt-5.5"},
+                    {"id": "gpt-5.4-mini"},
+                    {"id": "gpt-5.4-mini-2026-03-17"},
+                    {"id": "text-embedding-3-large"},
+                ]
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None, timeout=None):
+            requested["url"] = url
+            requested["headers"] = headers
+            requested["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+    runtime = _make_runtime(["openai-codex"])
+
+    catalog, defaults = await runtime._fetch_openai_api_catalog("sk-test")
+
+    assert requested["url"] == "https://api.openai.com/v1/models"
+    assert requested["headers"] == {"Authorization": "Bearer sk-test"}
+    assert catalog == [
+        {"id": "gpt-5.4-mini", "label": "GPT 5.4 Mini", "local": False},
+        {"id": "gpt-5.5", "label": "GPT 5.5", "local": False},
+    ]
+    assert defaults["cloud_fast"] == "gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_openai_oauth_catalog_validates_candidates(isolated_config, monkeypatch):
+    seen = []
+
+    class FakeProvider:
+        def __init__(self, token):
+            self.token = token
+
+        async def complete(self, request):
+            seen.append(request.model_config.model_id)
+            if request.model_config.model_id == "gpt-5.4-nano":
+                raise RuntimeError("unsupported")
+
+        async def close(self):
+            seen.append("closed")
+
+    monkeypatch.setattr("orb.llm.codex.OpenAICodexProvider", FakeProvider)
+    runtime = _make_runtime(["openai-codex"])
+
+    catalog, defaults = await runtime._fetch_openai_codex_oauth_catalog("oauth-token")
+
+    assert [item["id"] for item in catalog] == ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"]
+    assert defaults["cloud_strong"] == "gpt-5.5"
+    assert seen[-1] == "closed"

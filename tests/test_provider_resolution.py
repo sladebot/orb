@@ -15,6 +15,23 @@ def test_registry_uses_anthropic_setup_token_env(monkeypatch):
     assert registry._anthropic_api_key() == "sk-ant-oat01-from-env"
 
 
+def test_registry_uses_stored_openai_api_key_for_api_provider(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr("orb.cli.auth.get_openai_api_key", lambda: "sk-stored-openai")
+
+    assert registry._real_openai_api_key() == "sk-stored-openai"
+
+
+def test_registry_codex_token_does_not_return_api_key(monkeypatch):
+    monkeypatch.setattr("orb.cli.auth.get_openai_oauth_token", lambda: None)
+    monkeypatch.setattr(registry, "_real_openai_api_key", lambda: "sk-stored-openai")
+
+    provider = registry._codex_factory()
+
+    assert provider.__class__.__name__ == "OpenAIProvider"
+
+
 def test_registry_uses_ollama_keep_alive_from_config(monkeypatch):
     monkeypatch.delenv("OLLAMA_KEEP_ALIVE", raising=False)
     monkeypatch.setattr(

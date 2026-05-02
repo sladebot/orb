@@ -163,7 +163,9 @@ def _auth_status(provider: str, cfg: dict[str, Any] | None = None) -> str:
         return "authed" if auth_cli.get_anthropic_key() else "not authed"
     if provider == "openai-codex":
         creds = auth_cli.load_credentials("openai") or {}
-        return "authed" if (creds.get("api_key") or creds.get("access_token")) else "not authed"
+        if creds.get("api_key"):
+            return "authed"
+        return "authed" if auth_cli.get_openai_oauth_token() else "not authed"
     return "unknown"
 
 

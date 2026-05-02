@@ -215,6 +215,12 @@ def _real_openai_api_key() -> str | None:
     """Return a genuine OpenAI API key, ignoring Ollama-compat env vars."""
     key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
+        try:
+            from ..cli.auth import get_openai_api_key
+            key = get_openai_api_key() or ""
+        except Exception:
+            key = ""
+    if not key:
         return None
     base = os.environ.get("OPENAI_BASE_URL", "") or os.environ.get("OPENAI_API_BASE", "")
     # Only reject if the base URL points to a local Ollama shim
@@ -243,19 +249,23 @@ def _openai_factory() -> "LLMClient":
 def _codex_token() -> str | None:
     """Return the stored OAuth access token if available and not expired."""
     try:
-        from ..cli.auth import get_openai_token
-        return get_openai_token()
+        from ..cli.auth import get_openai_oauth_token
+        return get_openai_oauth_token()
     except Exception:
         return None
 
 
 def _codex_available() -> bool:
-    return bool(_codex_token())
+    return bool(_codex_token() or _real_openai_api_key())
 
 
 def _codex_factory() -> "LLMClient":
-    from .codex import OpenAICodexProvider
-    return OpenAICodexProvider(access_token=_codex_token())
+    token = _codex_token()
+    if token:
+        from .codex import OpenAICodexProvider
+        return OpenAICodexProvider(access_token=token)
+    from .openai import OpenAIProvider
+    return OpenAIProvider(api_key=_real_openai_api_key(), base_url="https://api.openai.com/v1")
 
 
 def _anthropic_api_key() -> str | None:

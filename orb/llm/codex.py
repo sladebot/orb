@@ -1,6 +1,6 @@
 """OpenAI Codex provider — ChatGPT subscription via chatgpt.com/backend-api.
 
-Uses the OAuth access token from ``orb auth openai`` and the gpt-5.4 model.
+Uses the OAuth access token from ``orb auth openai`` and the configured OpenAI model.
 This is free with a ChatGPT Plus/Pro subscription — no API credits needed.
 
 The Responses API streams SSE events; this provider collects them and assembles
@@ -14,7 +14,7 @@ from .client import LLMClient
 from .types import CompletionRequest, CompletionResponse, ToolCall
 
 _BASE_URL      = "https://chatgpt.com/backend-api"
-_DEFAULT_MODEL = "gpt-5.4"
+_DEFAULT_MODEL = "gpt-5.5"
 
 
 class OpenAICodexProvider(LLMClient):

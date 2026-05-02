@@ -190,6 +190,24 @@ def get_openai_token() -> str | None:
     return refreshed.get("access_token") if refreshed else None
 
 
+def get_openai_api_key() -> str | None:
+    """Return a stored OpenAI API key, if the user authenticated with one."""
+    creds = load_credentials("openai") or {}
+    key = str(creds.get("api_key") or "").strip()
+    return key or None
+
+
+def get_openai_oauth_token() -> str | None:
+    """Return a valid ChatGPT OAuth token, never an API key."""
+    creds = load_credentials("openai") or {}
+    if not creds.get("access_token"):
+        return None
+    if creds.get("expires_at", 0) > time.time() + 60:
+        return creds.get("access_token")
+    refreshed = refresh_openai_token(creds)
+    return refreshed.get("access_token") if refreshed else None
+
+
 def revoke_openai_token() -> None:
     existing: dict = {}
     if CREDS_PATH.exists():
@@ -433,12 +451,9 @@ async def _check_anthropic_model(key: str, model_id: str) -> bool:
         await provider.close()
 
 
-async def _check_anthropic_model_matrix(key: str) -> dict[str, bool]:
-    return {
-        ANTHROPIC_HAIKU_MODEL: await _check_anthropic_model(key, ANTHROPIC_HAIKU_MODEL),
-        ANTHROPIC_SONNET_MODEL: await _check_anthropic_model(key, ANTHROPIC_SONNET_MODEL),
-        ANTHROPIC_OPUS_MODEL: await _check_anthropic_model(key, ANTHROPIC_OPUS_MODEL),
-    }
+async def _check_anthropic_model_matrix(key: str, model_ids: list[str] | None = None) -> dict[str, bool]:
+    models = model_ids or [ANTHROPIC_HAIKU_MODEL, ANTHROPIC_SONNET_MODEL, ANTHROPIC_OPUS_MODEL]
+    return {model_id: await _check_anthropic_model(key, model_id) for model_id in models}
 
 
 async def _check_openai_key(key: str) -> bool:
@@ -520,8 +535,8 @@ async def _check_openai_oauth_model(token: str, model_id: str) -> bool:
         await provider.close()
 
 
-async def _check_ollama_models() -> dict[str, bool]:
-    models = ("qwen3.5:9b", "qwen3.5:27b")
+async def _check_ollama_models(model_ids: list[str] | None = None) -> dict[str, bool]:
+    models = model_ids or ["qwen3.5:9b", "qwen3.5:27b"]
     try:
         base_url = (
             os.environ.get("OLLAMA_BASE_URL", "")
@@ -543,6 +558,7 @@ async def _check_ollama_models() -> dict[str, bool]:
 async def auth_status() -> None:
     """Print current auth status for all providers, verifying each credential with a live API call."""
     import asyncio
+    from .config import load_config
 
     def _ok(connected: bool) -> str:
         return "CONNECTED" if connected else "FAILED (check key/network)"
@@ -559,12 +575,13 @@ async def auth_status() -> None:
         k = creds["api_key"]
         tasks["openai_key"] = (f"  openai     API key  (****{k[-4:]})", asyncio.create_task(_check_openai_key(k)))
     elif creds and creds.get("access_token"):
+        token = get_openai_oauth_token()
+        creds = load_credentials("openai") or creds
         exp       = creds.get("expires_at", 0)
         remaining = exp - time.time()
         email     = creds.get("email", "")
         who       = f"  {email}" if email else ""
-        if remaining > 60:
-            token = creds["access_token"]
+        if token and remaining > 60:
             tasks["openai_oauth"] = (f"  openai     OAuth token{who}  (expires in {int(remaining // 60)}m)", asyncio.create_task(_check_openai_oauth(token)))
         else:
             print(f"  openai     OAuth token expired{who}  — run: orb auth openai")
@@ -605,25 +622,70 @@ async def auth_status() -> None:
             connected = result if isinstance(result, bool) else False
             print(f"{label}  →  {_ok(connected)}")
 
+    cfg = load_config()
+
     if ant_key:
-        matrix = await _check_anthropic_model_matrix(ant_key)
+        anthropic_models = _configured_provider_status_models(
+            cfg,
+            "anthropic",
+            ["cloud_lite", "cloud_fast", "cloud_strong"],
+            [ANTHROPIC_HAIKU_MODEL, ANTHROPIC_SONNET_MODEL, ANTHROPIC_OPUS_MODEL],
+        )
+        matrix = await _check_anthropic_model_matrix(ant_key, anthropic_models)
         print("    models:")
-        for model_id in (ANTHROPIC_HAIKU_MODEL, ANTHROPIC_SONNET_MODEL, ANTHROPIC_OPUS_MODEL):
-            label = ANTHROPIC_MODEL_LABELS[model_id]
+        for model_id in anthropic_models:
+            label = ANTHROPIC_MODEL_LABELS.get(model_id, model_id)
             print(f"      anthropic  {label:<18} {model_id}  →  {_model_ok(matrix.get(model_id, False))}")
 
+    openai_models = _configured_provider_status_models(
+        cfg,
+        "openai-codex",
+        ["cloud_lite", "cloud_fast", "cloud_strong"],
+        ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"],
+    )
     if creds and creds.get("api_key"):
-        model_ok = await _check_openai_key_model(creds["api_key"], "gpt-5.4")
-        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+        print("    models:")
+        for model_id in openai_models:
+            model_ok = await _check_openai_key_model(creds["api_key"], model_id)
+            print(f"      openai     {model_id:<18} {model_id}  →  {_model_ok(model_ok)}")
     elif creds and creds.get("access_token") and (creds.get("expires_at", 0) - time.time()) > 60:
-        model_ok = await _check_openai_oauth_model(creds["access_token"], "gpt-5.4")
-        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+        print("    models:")
+        for model_id in openai_models:
+            model_ok = await _check_openai_oauth_model(creds["access_token"], model_id)
+            print(f"      openai     {model_id:<18} {model_id}  →  {_model_ok(model_ok)}")
     elif openai_key:
-        model_ok = await _check_openai_key_model(openai_key, "gpt-5.4")
-        print(f"    models:\n      openai     GPT-5.4            gpt-5.4  →  {_model_ok(model_ok)}")
+        print("    models:")
+        for model_id in openai_models:
+            model_ok = await _check_openai_key_model(openai_key, model_id)
+            print(f"      openai     {model_id:<18} {model_id}  →  {_model_ok(model_ok)}")
 
     if os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OPENAI_BASE_URL"):
-        matrix = await _check_ollama_models()
+        ollama_models = _configured_provider_status_models(
+            cfg,
+            "ollama",
+            ["local_small", "local_medium", "local_large"],
+            ["qwen3.5:9b", "qwen3.5:27b"],
+        )
+        matrix = await _check_ollama_models(ollama_models)
         print("    models:")
-        for model_id in ("qwen3.5:9b", "qwen3.5:27b"):
+        for model_id in ollama_models:
             print(f"      ollama     {model_id:<18} {model_id}  →  {_model_ok(matrix.get(model_id, False))}")
+
+
+def _configured_provider_status_models(
+    cfg: dict,
+    provider: str,
+    tiers: list[str],
+    fallback: list[str],
+) -> list[str]:
+    entry = ((cfg.get("providers") or {}).get(provider) or {})
+    defaults = entry.get("default_models") if isinstance(entry, dict) else None
+    models = []
+    if isinstance(defaults, dict):
+        for tier in tiers:
+            model_id = str(defaults.get(tier) or "").strip()
+            if model_id and model_id not in models:
+                models.append(model_id)
+    if models:
+        return models
+    return fallback

@@ -28,7 +28,7 @@ OLLAMA_PROVIDER = "ollama"
 VMLX_PROVIDER = "vmlx"
 OMLX_PROVIDER = "omlx"
 OPENAI_MINI_MODEL = "gpt-5.4-mini"
-OPENAI_STRONG_MODEL = "gpt-5.4"
+OPENAI_STRONG_MODEL = "gpt-5.5"
 
 ANTHROPIC_HAIKU_MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_SONNET_MODEL = "claude-sonnet-4-20250514"
@@ -69,10 +69,10 @@ ANTHROPIC_MODELS: dict[ModelTier, ModelConfig] = {
     for tier, model_id in ANTHROPIC_MODEL_TIERS.items()
 }
 
-# OpenAI Codex (ChatGPT subscription) — all tiers use gpt-5.4
+# OpenAI Codex / OpenAI cloud defaults.
 CODEX_MODELS: dict[ModelTier, ModelConfig] = {
     ModelTier.CLOUD_LITE:   ModelConfig(ModelTier.CLOUD_LITE,   OPENAI_MINI_MODEL, OPENAI_CODEX_PROVIDER),
-    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   OPENAI_MINI_MODEL, OPENAI_CODEX_PROVIDER),
+    ModelTier.CLOUD_FAST:   ModelConfig(ModelTier.CLOUD_FAST,   OPENAI_STRONG_MODEL, OPENAI_CODEX_PROVIDER),
     ModelTier.CLOUD_STRONG: ModelConfig(ModelTier.CLOUD_STRONG, OPENAI_STRONG_MODEL, OPENAI_CODEX_PROVIDER),
 }
 
