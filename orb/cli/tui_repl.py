@@ -35,6 +35,13 @@ from textual.screen import Screen
 from textual.widgets import Footer, Static, TextArea
 from rich.markup import escape as _rich_markup_escape
 
+from orb.cli.tui_theme import (
+    DEFAULT_TUI_THEME,
+    TuiTheme,
+    build_tui_css,
+    load_resolved_tui_theme,
+)
+
 # Slash command catalog surfaced by the palette peek + /help.
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "all commands"),
@@ -50,17 +57,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DASHBOARD_PORT = 1337
 
-# Design palette — matches orb-design-system/orb-tui/index.html tokens.
-AGENT_STYLE: dict[str, str] = {
-    "coordinator": "#94bfff",
-    "coder":       "#c4ced9",
-    "reviewer":    "#f0c982",
-    "reviewer_a":  "#f0c982",
-    "reviewer_b":  "#f5b56b",
-    "tester":      "#86d8ab",
-    "user":        "#94bfff",
-    "system":      "#8796a7",
-}
+# Design palette — resolved from orb.cli.tui_theme. The default built-in
+# preserves the original orb-design-system/orb-tui colors.
+AGENT_STYLE: dict[str, str] = dict(DEFAULT_TUI_THEME.agent)
 AGENT_LABELS: dict[str, str] = {
     "coordinator": "Coordinator",
     "coder":       "Coder",
@@ -91,6 +90,44 @@ MAX_FILE_CHANGES = 200
 def _tui_escape(value: Any) -> str:
     """Escape runtime/user text before interpolating into Textual markup."""
     return _rich_markup_escape(str(value))
+
+
+def _theme_for(state: Any | None = None) -> TuiTheme:
+    theme = getattr(state, "orb_theme", None)
+    return theme if isinstance(theme, TuiTheme) else DEFAULT_TUI_THEME
+
+
+def _color(state: Any | None, group: str, key: str, fallback: str = "#c4ced9") -> str:
+    return _theme_for(state).token(group, key, fallback)
+
+
+def _agent_color(state: Any | None, key: str, fallback_key: str | None = None) -> str:
+    theme = _theme_for(state)
+    if key in theme.agent:
+        return theme.agent[key]
+    if fallback_key and fallback_key in theme.agent:
+        return theme.agent[fallback_key]
+    return theme.text["secondary"]
+
+
+def _theme_markup_warnings(warnings: list[str], theme: TuiTheme = DEFAULT_TUI_THEME) -> str:
+    warn = theme.token("accent", "warn", DEFAULT_TUI_THEME.accent["warn"])
+    return "\n".join(f"[{warn}]{_tui_escape(warning)}[/]" for warning in warnings)
+
+
+def _rich_bg(value: str) -> str:
+    """Return a Rich/Textual background color tag value.
+
+    The default active token is stored as a validated hex color, but rendering
+    it as ``rgb(20,30,45)`` preserves the legacy markup expected by existing
+    tests and terminals.
+    """
+    if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        red = int(value[1:3], 16)
+        green = int(value[3:5], 16)
+        blue = int(value[5:7], 16)
+        return f"rgb({red},{green},{blue})"
+    return value
 
 
 def _plan_progress(items: list[tuple[str, str]]) -> tuple[int, int, str]:
@@ -125,14 +162,14 @@ def _render_topology_graph(state: "OrbReplTUI") -> list[str]:
     def _status_color(aid: str) -> str:
         info = agents.get(aid) or {}
         status = str(info.get("status") or "idle")
-        base = AGENT_STYLE.get(aid) or AGENT_STYLE.get(info.get("role", "").lower()) or "#c4ced9"
+        base = _agent_color(state, aid, info.get("role", "").lower())
         if status in ("running", "waiting"):
             return base
         if status == "completed":
-            return "#86d8ab"
+            return _color(state, "accent", "success")
         if status in ("error", "errored"):
-            return "#f3afa7"
-        return "#6b7685"
+            return _color(state, "accent", "error")
+        return _color(state, "text", "dim")
 
     if topo == "solo":
         aid = next(iter(state.agent_order), "agent")
@@ -147,7 +184,7 @@ def _render_topology_graph(state: "OrbReplTUI") -> list[str]:
         c_coder = _status_color("coder")
         c_rev = _status_color("reviewer")
         c_test = _status_color("tester")
-        dim = "#3a4552"
+        dim = _color(state, "border", "block")
         return [
             f"     [{c_coord}]┌───────────┐[/]",
             f"     [{c_coord}]│ coordntr  │[/]",
@@ -166,13 +203,13 @@ def _render_topology_graph(state: "OrbReplTUI") -> list[str]:
     # Fallback: use graph_rows from init, else list agents vertically.
     rows = getattr(state, "graph_rows", None) or []
     if rows:
-        return [f"[#6b7685]{_tui_escape(r)}[/]" for r in rows]
+        return [f"[{_color(state, 'text', 'dim')}]{_tui_escape(r)}[/]" for r in rows]
     out = []
     for aid in state.agent_order:
         color = _status_color(aid)
         out.append(f"[{color}]● {_tui_escape(aid)}[/]")
     if not out:
-        out = ["[#6b7685](no topology)[/]"]
+        out = [f"[{_color(state, 'text', 'dim')}](no topology)[/]"]
     return out
 
 
@@ -185,104 +222,7 @@ STATUS_META: dict[str, str] = {
 }
 
 # Textual CSS — 2-pane grid, dark palette, minimal chrome.
-CSS = """
-Screen { background: #0b1016; }
-
-#strip {
-    dock: top;
-    height: auto;
-    min-height: 1;
-    padding: 0 1;
-    color: #8796a7;
-    background: #141a22;
-}
-#main { layout: horizontal; }
-#rail {
-    width: 28;
-    min-width: 22;
-    padding: 0 1;
-    background: #0b1016;
-    border-right: solid #1b2330;
-}
-#repl-col { width: 1fr; layout: vertical; }
-#stream {
-    padding: 1 2 0 2;
-    overflow-y: auto;
-    height: 1fr;
-}
-#composer {
-    dock: bottom;
-    height: auto;
-    padding: 0 1;
-    border-top: solid #1b2330;
-    background: #0e141c;
-}
-#query-input {
-    height: 3;
-    border: round #3966a8;
-    background: #141a22;
-    padding: 0 1;
-    color: #ecf1f6;
-}
-#query-input:focus { border: round #94bfff; }
-.rail-section { margin-bottom: 1; }
-.rail-heading {
-    color: #6b7685;
-    text-style: bold;
-}
-.rail-line {
-    color: #c4ced9;
-}
-.turn {
-    margin: 1 0 0 0;
-}
-.turn-head { color: #8796a7; }
-.turn-body { color: #c4ced9; }
-.whisper {
-    color: #6b7685;
-    margin: 0;
-    padding: 0 2;
-}
-.block {
-    background: #0f141c;
-    border-left: thick #3a4552;
-    padding: 0 1;
-    margin: 1 0 0 2;
-    color: #c4ced9;
-}
-.block-hdr { color: #8796a7; }
-.block-ok  { color: #86d8ab; }
-.block-run { color: #94bfff; }
-.block-err { color: #f3afa7; }
-.composer-hint {
-    color: #6b7685;
-    padding: 0 1;
-}
-.milestone {
-    color: #6b7685;
-    margin: 1 0 0 0;
-    padding: 0 2;
-}
-#live-bar {
-    height: auto;
-    min-height: 1;
-    color: #8796a7;
-    padding: 0 1;
-}
-#slash-palette {
-    height: auto;
-    padding: 0 1;
-    background: #0e141b;
-    border: tall #1b2330;
-    color: #8796a7;
-}
-.hidden { display: none; }
-.block-accept {
-    color: #8796a7;
-    padding: 0 1;
-    margin: 0 0 0 2;
-}
-"""
+CSS = build_tui_css(DEFAULT_TUI_THEME)
 
 
 class StatusStrip(Static):
@@ -301,19 +241,23 @@ class StatusStrip(Static):
         # Derive plan N/M progress + meter bar from plan_items.
         done, total, meter = _plan_progress(s.plan_items)
         branch = _tui_escape(getattr(s, "branch", "") or f"orb/s{sid}")
+        primary = _color(s, "accent", "primary")
+        success = _color(s, "accent", "success")
+        secondary = _color(s, "text", "secondary")
+        muted = _color(s, "text", "muted")
         # Row 1: brand / workdir / branch / topology / live pill
         row1 = (
-            f"[bold #94bfff]ORB[/] · [#c4ced9]{wd}[/] · "
-            f"[#8796a7]branch[/] [#c4ced9]{branch}[/] · "
-            f"[#8796a7]topology[/] [#c4ced9]{topo}[/] · "
-            f"[#86d8ab]●[/] [#c4ced9]{live}[/]"
+            f"[bold {primary}]ORB[/] · [{secondary}]{wd}[/] · "
+            f"[{muted}]branch[/] [{secondary}]{branch}[/] · "
+            f"[{muted}]topology[/] [{secondary}]{topo}[/] · "
+            f"[{success}]●[/] [{secondary}]{live}[/]"
         )
         # Row 2: plan meter + burn metrics + session id.
         burn = _tui_escape(f"{s.elapsed:.1f}s · {s.message_count} tok · {s.budget_remaining} left")
-        plan_str = f"[#8796a7]plan[/] [bold #c4ced9]{done}/{total}[/] [#94bfff]{meter}[/]"
+        plan_str = f"[{muted}]plan[/] [bold {secondary}]{done}/{total}[/] [{primary}]{meter}[/]"
         row2 = (
-            f"{plan_str}   [#8796a7]{burn}[/] · "
-            f"[#8796a7]session[/] [#c4ced9]{sid}[/]"
+            f"{plan_str}   [{muted}]{burn}[/] · "
+            f"[{muted}]session[/] [{secondary}]{sid}[/]"
         )
         self.update(f"{row1}\n{row2}")
 
@@ -327,13 +271,20 @@ class ContextRail(Static):
 
     def refresh_content(self) -> None:
         s = self.state
+        dim = _color(s, "text", "dim")
+        muted = _color(s, "text", "muted")
+        secondary = _color(s, "text", "secondary")
+        primary = _color(s, "accent", "primary")
+        success = _color(s, "accent", "success")
+        error = _color(s, "accent", "error")
+        active_bg = _rich_bg(_color(s, "surface", "active"))
         lines: list[str] = []
-        lines.append("[bold #6b7685]AGENTS[/]  [dim]\\[1–5][/]")
+        lines.append(f"[bold {dim}]AGENTS[/]  [dim]\\[1–5][/]")
         for aid in s.agent_order:
             info = s.agents.get(aid)
             if not info:
                 continue
-            color = AGENT_STYLE.get(aid) or AGENT_STYLE.get(info.get("role", "").lower()) or "#c4ced9"
+            color = _agent_color(s, aid, info.get("role", "").lower())
             status = str(info.get("status") or "idle")
             meta = _tui_escape(STATUS_META.get(status, status))
             dot = "●" if status in ("running", "waiting") else ("✓" if status == "completed" else "○")
@@ -341,60 +292,60 @@ class ContextRail(Static):
             if status in ("running", "waiting"):
                 # Current agent: accent marker + subtle background tint.
                 lines.append(
-                    f"[on rgb(20,30,45)][{color}]▎{dot} {label}[/]  "
-                    f"[#6b7685]{meta}[/][/on rgb(20,30,45)]"
+                    f"[on {active_bg}][{color}]▎{dot} {label}[/]  "
+                    f"[{dim}]{meta}[/][/]"
                 )
             elif status == "completed":
-                lines.append(f"  [#86d8ab]{dot}[/] [#c4ced9]{label}[/]  [#6b7685]{meta}[/]")
+                lines.append(f"  [{success}]{dot}[/] [{secondary}]{label}[/]  [{dim}]{meta}[/]")
             else:
-                lines.append(f"  [#6b7685]{dot} {label}[/]  [#6b7685]{meta}[/]")
+                lines.append(f"  [{dim}]{dot} {label}[/]  [{dim}]{meta}[/]")
         lines.append("")
 
         # Topology — small ASCII graph (static layout for bundled topologies).
-        lines.append("[bold #6b7685]TOPOLOGY[/]  [dim]\\[g][/]")
+        lines.append(f"[bold {dim}]TOPOLOGY[/]  [dim]\\[g][/]")
         lines.extend(_render_topology_graph(s))
         lines.append("")
 
         # Plan — synthesized from plan_steps (done/now/todo) if present.
-        lines.append("[bold #6b7685]PLAN[/]  [dim]\\[p][/]")
+        lines.append(f"[bold {dim}]PLAN[/]  [dim]\\[p][/]")
         if s.plan_items:
             for kind, text in s.plan_items:
                 if kind == "done":
-                    lines.append(f"[#86d8ab]✓[/] [#8796a7]{_tui_escape(text)}[/]")
+                    lines.append(f"[{success}]✓[/] [{muted}]{_tui_escape(text)}[/]")
                 elif kind == "now":
-                    lines.append(f"[#94bfff]●[/] [#c4ced9]{_tui_escape(text)}[/]")
+                    lines.append(f"[{primary}]●[/] [{secondary}]{_tui_escape(text)}[/]")
                 else:
-                    lines.append(f"[#6b7685]○ {_tui_escape(text)}[/]")
+                    lines.append(f"[{dim}]○ {_tui_escape(text)}[/]")
         else:
-            lines.append("[#6b7685](no plan yet)[/]")
+            lines.append(f"[{dim}](no plan yet)[/]")
         lines.append("")
 
         # Changes
-        lines.append("[bold #6b7685]CHANGES[/]  [dim]\\[d][/]")
+        lines.append(f"[bold {dim}]CHANGES[/]  [dim]\\[d][/]")
         if s.file_changes:
             for path, fc in s.file_changes.items():
                 add = fc.get("added", 0)
                 rem = fc.get("removed", 0)
-                stat = f"[#86d8ab]+{add}[/]"
+                stat = f"[{success}]+{add}[/]"
                 if rem:
-                    stat += f" [#f3afa7]−{rem}[/]"
+                    stat += f" [{error}]−{rem}[/]"
                 short = path if len(path) <= 22 else "…" + path[-21:]
-                lines.append(f"[#c4ced9]{_tui_escape(short)}[/]  {stat}")
+                lines.append(f"[{secondary}]{_tui_escape(short)}[/]  {stat}")
             truncated = getattr(s, "file_changes_truncated_count", 0) or 0
             if truncated:
-                lines.append(f"[#6b7685]… {truncated} older hidden[/]")
+                lines.append(f"[{dim}]… {truncated} older hidden[/]")
         else:
-            lines.append("[#6b7685](no writes yet)[/]")
+            lines.append(f"[{dim}](no writes yet)[/]")
         lines.append("")
 
         # Scope — @-mentions the user has typed into the composer.
-        lines.append("[bold #6b7685]SCOPE[/]  [dim]\\[@][/]")
+        lines.append(f"[bold {dim}]SCOPE[/]  [dim]\\[@][/]")
         scope_paths = getattr(s, "scope_paths", None) or []
         if scope_paths:
             for path in scope_paths:
                 short = path if len(path) <= 22 else "…" + path[-21:]
-                lines.append(f"[#94bfff]@[/] [#c4ced9]{_tui_escape(short)}[/]")
-        lines.append("[#6b7685]+ add with @[/]")
+                lines.append(f"[{primary}]@[/] [{secondary}]{_tui_escape(short)}[/]")
+        lines.append(f"[{dim}]+ add with @[/]")
 
         self.update("\n".join(lines))
 
@@ -1015,6 +966,11 @@ class OrbReplTUI(App[None]):
         exit_after_run: bool = False,
         session_id: str = "",
     ) -> None:
+        resolved_theme = load_resolved_tui_theme()
+        self.orb_theme: TuiTheme = resolved_theme.theme
+        self.theme_name: str = resolved_theme.name
+        self.theme_warnings: list[str] = list(resolved_theme.warnings)
+        self.CSS = build_tui_css(self.orb_theme)
         super().__init__()
         self._server_scheme = server_scheme
         self._server_host = server_host
@@ -1139,6 +1095,8 @@ class OrbReplTUI(App[None]):
         self._ws_task = asyncio.create_task(self._start_ws_client())
         asyncio.create_task(self._hydrate_topologies())
         self._refresh_chrome()
+        if self.theme_warnings:
+            self._emit_turn("system", _theme_markup_warnings(self.theme_warnings, self.orb_theme), body_markup=True)
         # Tick the live bar's elapsed counter while an activity is in-flight.
         self.set_interval(0.5, self._tick_live_bar)
         self.query_one("#query-input", TextArea).focus()

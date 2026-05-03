@@ -76,6 +76,9 @@ function buildSplitDiffRows(ops) {
     return rows;
 }
 
+// Semantic theme-token follow-up: orb/cli/tui_theme.py now defines the TUI
+// palette as surface/border/text/accent/agent groups. Keep dashboard class
+// colors aligned with those names when browser CSS variables are extracted.
 const AGENT_CSS_CLASS = {
     coordinator: 'agent-coordinator',
     coder:       'agent-coder',
