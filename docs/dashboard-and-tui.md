@@ -61,6 +61,20 @@ By default, agent file writes pause for explicit user approval — the TUI promp
 
 Pass `--no-review` to `orb tui` to let agents write directly, or set `approval_required: false` when creating a session via the API.
 
+### TUI theme config
+
+The TUI resolves semantic color tokens from `~/.orb/config.json` under the `tui` key. The default is `orb-dark`, which preserves the current Material/Orb dark palette. `orb-high-contrast` is available as a built-in accessible alternate:
+
+```json
+{
+  "tui": {
+    "theme": "orb-high-contrast"
+  }
+}
+```
+
+Advanced users can override individual validated color tokens with `theme_overrides`; invalid theme names fall back to `orb-dark`, and invalid token values fall back per-token with a non-blocking TUI warning. Token groups are shared by name with dashboard semantics (`surface`, `border`, `text`, `accent`, `agent`), but this PR does not yet generate dashboard CSS variables from the Python theme module. Dashboard follow-up: move browser CSS/class colors to the same semantic token names so TUI and dashboard palettes can be generated from one source.
+
 ### Slash commands
 
 | Command | Effect |

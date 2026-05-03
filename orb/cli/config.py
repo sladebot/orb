@@ -13,6 +13,7 @@ CONFIG_PATH = Path.home() / ".orb" / "config.json"
 # are dormant until the provider is enabled.
 _DEFAULTS: dict[str, Any] = {
     "local_models": True,
+    "tui": {"theme": "orb-dark"},
     "providers": {
         "anthropic": {
             "enabled": False,
