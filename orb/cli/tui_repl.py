@@ -1993,7 +1993,22 @@ class OrbReplTUI(App[None]):
         approval mode. ``/new <topology>`` lets users escape a pinned session
         directly into a fresh session with the requested topology.
         """
-        topology = requested_topology or self._topology or self.topology or "auto"
+        if requested_topology:
+            topology = requested_topology
+        else:
+            # Preserve the currently active concrete topology when the TUI was
+            # launched with ``--topology auto`` but the daemon pinned the
+            # session to a real topology. This matters when carrying
+            # ``locked_agent_models`` into the fresh session: the API requires
+            # an explicit non-auto topology alongside per-agent model pins.
+            active_topology = (self.topology or "").strip().lower()
+            startup_topology = (self._topology or "").strip().lower()
+            locked_topology = (self.locked_topology or "").strip().lower()
+            topology = (
+                active_topology if active_topology and active_topology != "auto" else ""
+            ) or (
+                locked_topology if locked_topology and locked_topology != "auto" else ""
+            ) or startup_topology or active_topology or "auto"
         topology = topology.strip().lower() or "auto"
         if self._http_session is None:
             self._emit_turn(
@@ -2056,7 +2071,14 @@ class OrbReplTUI(App[None]):
             return
 
         self._topology = topology
-        await self._attach_to_session(new_session_id)
+        attached = await self._attach_to_session(new_session_id)
+        if not attached:
+            self._emit_turn(
+                "system",
+                f"[#f3afa7]/new failed:[/] could not attach to session {_tui_escape(new_session_id[:8])}",
+                body_markup=True,
+            )
+            return
         self._emit_turn(
             "system",
             f"[#8796a7]new session attached:[/] [#c4ced9]{_tui_escape(new_session_id[:8])}[/]",
@@ -2108,7 +2130,7 @@ class OrbReplTUI(App[None]):
             logger.warning("Failed to list known sessions: %s", exc)
         self.push_screen(ResumeSessionScreen(sessions))
 
-    async def _attach_to_session(self, session_id: str) -> None:
+    async def _attach_to_session(self, session_id: str) -> bool:
         """Switch the TUI's attached session.
 
         Fetches ``/api/v1/sessions/{sid}/state`` and dispatches the
@@ -2119,10 +2141,13 @@ class OrbReplTUI(App[None]):
         Refuses error envelopes (non-200 or ``ok: false``) without
         mutating ``session_id`` — otherwise a stale id from the
         picker would silently route every subsequent inject/run
-        to a session that no longer exists.
+        to a session that no longer exists. Returns whether the
+        requested session is attached after the method completes.
         """
-        if not session_id or session_id == self.session_id:
-            return
+        if not session_id:
+            return False
+        if session_id == self.session_id:
+            return True
         try:
             url = f"{self._server_scheme}://{self._server_host}:{self._server_port}/api/v1/sessions/{session_id}/state"
             async with self._http_session.get(url) as resp:
@@ -2130,16 +2155,16 @@ class OrbReplTUI(App[None]):
                 body = await resp.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to fetch session state for %s: %s", session_id, exc)
-            return
+            return False
         if status != 200 or not isinstance(body, dict) or body.get("ok") is False:
             logger.warning(
                 "Refusing to attach to session %s: status=%s body=%s",
                 session_id, status, body,
             )
-            return
+            return False
         payload = body.get("data") if "data" in body else body
         if not isinstance(payload, dict):
-            return
+            return False
         payload.setdefault("type", "init")
         payload.setdefault("session_id", session_id)
         self._cancel_ws_client()
@@ -2147,7 +2172,15 @@ class OrbReplTUI(App[None]):
         # Unit tests may stub _handle_init; real dispatch sets this from payload.
         if not self.session_id:
             self.session_id = session_id
+        if self.session_id != session_id:
+            logger.warning(
+                "Attach to session %s did not update active session_id (current=%s)",
+                session_id,
+                self.session_id,
+            )
+            return False
         self._restart_ws_client()
+        return True
 
     def action_show_help(self) -> None:
         self._emit_turn(

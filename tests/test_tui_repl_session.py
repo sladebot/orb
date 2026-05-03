@@ -15,7 +15,6 @@ These tests cover:
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -328,7 +327,7 @@ async def test_new_slash_command_creates_fresh_session_and_attaches():
     tui.approval_required = True
     tui.streaming_enabled = True
     tui._emit_turn = MagicMock()
-    tui._attach_to_session = AsyncMock()
+    tui._attach_to_session = AsyncMock(return_value=True)
     tui._http_session = _FakePostHttpSession(_FakeResponse(201, {
         "ok": True,
         "code": "SESSION_CREATED",
@@ -349,6 +348,66 @@ async def test_new_slash_command_creates_fresh_session_and_attaches():
         )
     ]
     tui._attach_to_session.assert_awaited_once_with("fresh-sid")
+    assert "new session attached" in tui._emit_turn.call_args[0][1]
+
+
+@pytest.mark.asyncio
+async def test_new_slash_command_defaults_to_active_concrete_topology_for_agent_models():
+    tui = _make_tui()
+    tui.workdir = "/tmp/project"
+    tui._topology = "auto"
+    tui.topology = "triad"
+    tui.locked_topology = "triad"
+    tui.locked_agent_models = {"coder": "gpt-4.1"}
+    tui.approval_required = False
+    tui.streaming_enabled = True
+    tui._emit_turn = MagicMock()
+    tui._attach_to_session = AsyncMock(return_value=True)
+    tui._http_session = _FakePostHttpSession(_FakeResponse(201, {
+        "ok": True,
+        "code": "SESSION_CREATED",
+        "data": {"session_id": "fresh-sid"},
+    }))
+
+    await tui._run_slash_command("/new")
+
+    assert tui._http_session.post_calls == [
+        (
+            "http://127.0.0.1:1337/api/v1/sessions",
+            {
+                "workdir": "/tmp/project",
+                "topology": "triad",
+                "agent_models": {"coder": "gpt-4.1"},
+            },
+        )
+    ]
+    tui._attach_to_session.assert_awaited_once_with("fresh-sid")
+
+
+@pytest.mark.asyncio
+async def test_new_slash_command_reports_success_only_when_attach_succeeds():
+    tui = _make_tui()
+    tui.workdir = "/tmp/project"
+    tui._topology = "triad"
+    tui.topology = "triad"
+    tui.locked_topology = None
+    tui.locked_agent_models = {}
+    tui.approval_required = False
+    tui.streaming_enabled = True
+    tui._emit_turn = MagicMock()
+    tui._attach_to_session = AsyncMock(return_value=False)
+    tui._http_session = _FakePostHttpSession(_FakeResponse(201, {
+        "ok": True,
+        "code": "SESSION_CREATED",
+        "data": {"session_id": "fresh-sid"},
+    }))
+
+    await tui._run_slash_command("/new")
+
+    tui._attach_to_session.assert_awaited_once_with("fresh-sid")
+    emitted = [call.args[1] for call in tui._emit_turn.call_args_list]
+    assert not any("new session attached" in message for message in emitted)
+    assert any("/new failed" in message and "could not attach" in message for message in emitted)
 
 
 @pytest.mark.asyncio
