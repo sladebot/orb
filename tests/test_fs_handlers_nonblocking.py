@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -50,11 +51,22 @@ async def test_fs_list_does_not_block_event_loop(client, tmp_path):
         (workdir / f"sub{i}").mkdir()
 
     real_iterdir = Path.iterdir
+    lock = threading.Lock()
+    active_iterdir = 0
+    max_active_iterdir = 0
 
     def slow_iterdir(self):
+        nonlocal active_iterdir, max_active_iterdir
         # Only slow the target directory to keep the test deterministic.
         if str(self) == str(workdir):
-            time.sleep(0.2)
+            with lock:
+                active_iterdir += 1
+                max_active_iterdir = max(max_active_iterdir, active_iterdir)
+            try:
+                time.sleep(0.05)
+            finally:
+                with lock:
+                    active_iterdir -= 1
         return real_iterdir(self)
 
     with patch.object(Path, "iterdir", slow_iterdir):
@@ -66,8 +78,9 @@ async def test_fs_list_does_not_block_event_loop(client, tmp_path):
         elapsed = time.monotonic() - start
 
     assert all(r.status == 200 for r in results)
-    # Serial ~0.4s, parallel ~0.2s. Generous threshold to avoid flakes.
-    assert elapsed < 0.35, f"fs_list blocked the event loop: elapsed={elapsed:.3f}s"
+    assert max_active_iterdir >= 2, (
+        f"fs_list did not overlap directory iteration; elapsed={elapsed:.3f}s"
+    )
 
 
 async def test_fs_dir_does_not_block_event_loop(client, tmp_path):
@@ -78,10 +91,21 @@ async def test_fs_dir_does_not_block_event_loop(client, tmp_path):
     (workdir / "b.py").write_text("")
 
     real_iterdir = Path.iterdir
+    lock = threading.Lock()
+    active_iterdir = 0
+    max_active_iterdir = 0
 
     def slow_iterdir(self):
+        nonlocal active_iterdir, max_active_iterdir
         if str(self) == str(workdir):
-            time.sleep(0.2)
+            with lock:
+                active_iterdir += 1
+                max_active_iterdir = max(max_active_iterdir, active_iterdir)
+            try:
+                time.sleep(0.05)
+            finally:
+                with lock:
+                    active_iterdir -= 1
         return real_iterdir(self)
 
     with patch.object(Path, "iterdir", slow_iterdir):
@@ -93,7 +117,9 @@ async def test_fs_dir_does_not_block_event_loop(client, tmp_path):
         elapsed = time.monotonic() - start
 
     assert all(r.status == 200 for r in results)
-    assert elapsed < 0.35, f"fs_dir blocked the event loop: elapsed={elapsed:.3f}s"
+    assert max_active_iterdir >= 2, (
+        f"fs_dir did not overlap directory iteration; elapsed={elapsed:.3f}s"
+    )
 
 
 async def test_fs_read_does_not_block_event_loop(client, tmp_path):
@@ -104,10 +130,21 @@ async def test_fs_read_does_not_block_event_loop(client, tmp_path):
     target.write_text("hello world")
 
     real_read_text = Path.read_text
+    lock = threading.Lock()
+    active_reads = 0
+    max_active_reads = 0
 
     def slow_read_text(self, *a, **kw):
+        nonlocal active_reads, max_active_reads
         if self.name == "note.txt":
-            time.sleep(0.2)
+            with lock:
+                active_reads += 1
+                max_active_reads = max(max_active_reads, active_reads)
+            try:
+                time.sleep(0.05)
+            finally:
+                with lock:
+                    active_reads -= 1
         return real_read_text(self, *a, **kw)
 
     with patch.object(Path, "read_text", slow_read_text):
@@ -125,7 +162,9 @@ async def test_fs_read_does_not_block_event_loop(client, tmp_path):
         elapsed = time.monotonic() - start
 
     assert all(r.status == 200 for r in results)
-    assert elapsed < 0.35, f"fs_read blocked the event loop: elapsed={elapsed:.3f}s"
+    assert max_active_reads >= 2, (
+        f"fs_read did not overlap file reads; elapsed={elapsed:.3f}s"
+    )
 
 
 async def test_fs_files_walk_fallback_does_not_block_event_loop(client, tmp_path):
@@ -144,10 +183,21 @@ async def test_fs_files_walk_fallback_does_not_block_event_loop(client, tmp_path
     assert reg.status == 201, await reg.text()
 
     real_walk = os.walk
+    lock = threading.Lock()
+    active_walks = 0
+    max_active_walks = 0
 
     def slow_walk(p, *a, **kw):
+        nonlocal active_walks, max_active_walks
         if str(p) == str(workdir):
-            time.sleep(0.2)
+            with lock:
+                active_walks += 1
+                max_active_walks = max(max_active_walks, active_walks)
+            try:
+                time.sleep(0.05)
+            finally:
+                with lock:
+                    active_walks -= 1
         return real_walk(p, *a, **kw)
 
     with patch.object(os, "walk", slow_walk):
@@ -161,7 +211,9 @@ async def test_fs_files_walk_fallback_does_not_block_event_loop(client, tmp_path
     assert all(r.status == 200 for r in results), [
         (r.status, await r.text()) for r in results
     ]
-    assert elapsed < 0.35, f"fs_files blocked the event loop: elapsed={elapsed:.3f}s"
+    assert max_active_walks >= 2, (
+        f"fs_files did not overlap os.walk fallback; elapsed={elapsed:.3f}s"
+    )
 
 
 async def test_git_pr_url_does_not_block_event_loop(client, tmp_path):
@@ -183,12 +235,39 @@ async def test_git_pr_url_does_not_block_event_loop(client, tmp_path):
         cwd=str(workdir), check=True, timeout=10,
     )
 
-    real_run = subprocess.run
+    lock = threading.Lock()
+    active_by_cmd: dict[tuple[str, ...], int] = {}
+    max_active_by_cmd: dict[tuple[str, ...], int] = {}
 
     def slow_run(args, *a, **kw):
         if isinstance(args, (list, tuple)) and args and args[0] == "git":
-            time.sleep(0.15)
-        return real_run(args, *a, **kw)
+            cmd = list(args[1:])
+            key = tuple(cmd)
+            with lock:
+                active_by_cmd[key] = active_by_cmd.get(key, 0) + 1
+                max_active_by_cmd[key] = max(
+                    max_active_by_cmd.get(key, 0),
+                    active_by_cmd[key],
+                )
+            try:
+                time.sleep(0.05)
+                if cmd == ["rev-parse", "--is-inside-work-tree"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+                if cmd == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="feature/pr-url\n", stderr="")
+                if cmd == ["remote", "get-url", "origin"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="git@github.com:acme/demo.git\n", stderr="")
+                if cmd == ["status", "--porcelain"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                if cmd == ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="0 0\n", stderr="")
+                if cmd == ["symbolic-ref", "refs/remotes/origin/HEAD"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="refs/remotes/origin/master\n", stderr="")
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected git command")
+            finally:
+                with lock:
+                    active_by_cmd[key] -= 1
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     with patch.object(subprocess, "run", slow_run):
         start = time.monotonic()
@@ -201,10 +280,12 @@ async def test_git_pr_url_does_not_block_event_loop(client, tmp_path):
     assert all(r.status == 200 for r in results), [
         (r.status, await r.text()) for r in results
     ]
-    # _git_status_async (5 git calls) is already offloaded → ~750ms overlap.
-    # The symbolic-ref call at line 697 is the raw sync one — unwrapped it
-    # serializes across the two requests (2×150ms extra on the loop) so
-    # the post-_git_status tail adds ~300ms sequentially. When wrapped in
-    # to_thread the two symbolic-ref calls overlap instead, adding only
-    # ~150ms. Measured: ≈1.04s wrapped, ≈1.21s raw. 1.15 cleanly separates.
-    assert elapsed < 1.15, f"git_pr_url blocked the event loop: elapsed={elapsed:.3f}s"
+    # The git calls are fully faked so the assertion is not coupled to local
+    # git startup cost on slower CI/macOS runners. In particular, both PR URL
+    # requests should run their symbolic-ref lookup in worker threads; if that
+    # call regresses to inline event-loop subprocess.run, max concurrency for
+    # this command stays at 1.
+    symbolic_ref_key = ("symbolic-ref", "refs/remotes/origin/HEAD")
+    assert max_active_by_cmd.get(symbolic_ref_key, 0) >= 2, (
+        f"git_pr_url symbolic-ref did not overlap; elapsed={elapsed:.3f}s"
+    )

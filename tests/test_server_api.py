@@ -241,34 +241,45 @@ class TestServerAPI:
 
     async def test_index_handler_does_not_block_event_loop(self, client):
         """Index handler must offload file I/O; a slow stat() must not starve other requests."""
+        import threading
         import time as _time
         from pathlib import Path as _Path
         from unittest.mock import patch
 
         real_stat = _Path.stat
+        lock = threading.Lock()
+        active_stats = 0
+        max_active_stats = 0
 
         def slow_stat(self, *args, **kwargs):
+            nonlocal active_stats, max_active_stats
             # Only slow down the files touched by the index handler.
             if self.name in ("style.css", "graph.js", "app.js", "index.html"):
-                _time.sleep(0.2)
+                with lock:
+                    active_stats += 1
+                    max_active_stats = max(max_active_stats, active_stats)
+                try:
+                    _time.sleep(0.05)
+                finally:
+                    with lock:
+                        active_stats -= 1
             return real_stat(self, *args, **kwargs)
 
         with patch.object(_Path, "stat", slow_stat):
             start = _time.monotonic()
-            # Two parallel index requests. Each has 4 × 200ms of stat work.
-            # If stats block the event loop, the second request is serialized
-            # after the first → ~1.6s. With asyncio.to_thread the threads run
-            # side-by-side → ~0.8s.
             results = await asyncio.gather(client.get("/"), client.get("/"))
             elapsed = _time.monotonic() - start
 
         assert all(r.status == 200 for r in results)
-        assert elapsed < 1.3, f"event loop blocked: elapsed={elapsed:.3f}s"
+        assert max_active_stats >= 2, (
+            f"index handler did not overlap file stat calls; elapsed={elapsed:.3f}s"
+        )
 
     async def test_git_status_does_not_block_event_loop(self, client, tmp_path):
         """/api/v1/git/status shells out to git N times; must not stall the loop."""
         import time as _time
         import subprocess as _sub
+        import threading
         from unittest.mock import patch
 
         workdir = tmp_path / "repo"
@@ -279,12 +290,34 @@ class TestServerAPI:
         _sub.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                   "commit", "--allow-empty", "-m", "x", "-q"],
                  cwd=str(workdir), check=True, timeout=10)
-        real_run = _sub.run
+        lock = threading.Lock()
+        active_git_calls = 0
+        max_active_git_calls = 0
 
         def slow_run(args, *a, **kw):
+            nonlocal active_git_calls, max_active_git_calls
             if isinstance(args, (list, tuple)) and args and args[0] == "git":
-                _time.sleep(0.15)
-            return real_run(args, *a, **kw)
+                with lock:
+                    active_git_calls += 1
+                    max_active_git_calls = max(max_active_git_calls, active_git_calls)
+                try:
+                    _time.sleep(0.05)
+                    cmd = list(args[1:])
+                    if cmd == ["rev-parse", "--is-inside-work-tree"]:
+                        return _sub.CompletedProcess(args, 0, stdout="true\n", stderr="")
+                    if cmd == ["rev-parse", "--abbrev-ref", "HEAD"]:
+                        return _sub.CompletedProcess(args, 0, stdout="feature/git-status\n", stderr="")
+                    if cmd == ["remote", "get-url", "origin"]:
+                        return _sub.CompletedProcess(args, 0, stdout="git@github.com:acme/demo.git\n", stderr="")
+                    if cmd == ["status", "--porcelain"]:
+                        return _sub.CompletedProcess(args, 0, stdout=" M web/server.py\n", stderr="")
+                    if cmd == ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]:
+                        return _sub.CompletedProcess(args, 0, stdout="1 2\n", stderr="")
+                    return _sub.CompletedProcess(args, 1, stdout="", stderr="unexpected git command")
+                finally:
+                    with lock:
+                        active_git_calls -= 1
+            return _sub.CompletedProcess(args, 0, stdout="", stderr="")
 
         with patch.object(_sub, "run", slow_run):
             start = _time.monotonic()
@@ -294,11 +327,15 @@ class TestServerAPI:
             )
             elapsed = _time.monotonic() - start
 
-        # Each request makes 5 git calls × 150ms = 750ms. If sync subprocess
-        # blocks the event loop, the second request serializes → ~1500ms.
-        # With asyncio.to_thread the two requests overlap → ~750ms.
+        # The git calls are fully faked so the assertion is not coupled to
+        # local git process startup cost on slower CI/macOS runners. If the
+        # handler runs git inline on the event loop, no two git calls can be
+        # active at once; offloading with asyncio.to_thread lets parallel
+        # requests overlap in the thread pool.
         assert all(r.status == 200 for r in results)
-        assert elapsed < 1.2, f"git_status blocked the event loop: elapsed={elapsed:.3f}s"
+        assert max_active_git_calls >= 2, (
+            f"git_status did not overlap git calls; elapsed={elapsed:.3f}s"
+        )
 
     async def test_trace_admin_endpoints_return_session_and_run_data(self, client):
         sid = await self._default_session_id(client)
