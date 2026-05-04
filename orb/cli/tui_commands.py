@@ -9,10 +9,7 @@ current topological state of the session.
 
 import logging
 import sys
-from typing import Optional
-
-from orb.cli.config import SessionState, TopologyConfig
-from orb.topology import SessionState
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +31,7 @@ class SlashCommand:
         slash: str,
         handler,
         description: str,
-        state: Optional[TopologyConfig] = None,
+        state: Optional[Any] = None,
         is_disabled=None,
     ) -> None:
         self.slash = slash
@@ -58,7 +55,23 @@ def _register(cmd: SlashCommand) -> None:
     COMMAND_REGISTRY.append(cmd)
 
 
-# Register all slash commands here...
+# Default command catalog. Handlers default to a no-op since dispatch
+# currently happens in tui_repl's legacy slash handler — the registry
+# is consulted by the palette/peek for display only.
+def _noop(*_a, **_kw) -> None:
+    return None
+
+
+for _slash, _desc in (
+    ("/help", "show all commands"),
+    ("/clear", "clear the stream"),
+    ("/stop", "stop the current run"),
+    ("/resume", "pick a prior session"),
+    ("/new", "start a fresh session"),
+    ("/topology", "switch routing topology"),
+    ("/quit", "exit the TUI"),
+):
+    _register(SlashCommand(_slash, _noop, _desc))
 
 
 def fuzzy_filter(query: str) -> list[SlashCommand]:

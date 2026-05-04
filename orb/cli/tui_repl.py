@@ -51,7 +51,7 @@ _SLASH_COMMANDS_LEGACY: list[tuple[str, str]] = [
 ]
 
 # Import the canonical registry (single source of truth for help, palette, execution).
-from orb.cli.tui_commands import COMMAND_MAP, COMMAND_REGISTRY, SlashCommand, fuzzy_filter, fuzzy_filter
+from orb.cli.tui_commands import COMMAND_MAP, COMMAND_REGISTRY, SlashCommand, fuzzy_filter
 
 logger = logging.getLogger(__name__)
 
@@ -984,6 +984,7 @@ class SlashPalette(Static):
     def __init__(self) -> None:
         super().__init__(id="slash-palette")
         self.add_class("hidden")
+        self.state: Any = None
 
     def refresh_for(self, text: str) -> None:
         if not text.startswith("/"):
@@ -1206,13 +1207,13 @@ class ComposerTextArea(TextArea):
             return
         await super()._on_key(event)
 
-    def _on_focus(self) -> None:
+    def _on_focus(self, event) -> None:  # type: ignore[override]
         """Track focus for keyboard shortcuts (Tab for path completion)."""
-        super()._on_focus()
+        super()._on_focus(event)
 
-    async def _on_blur(self) -> None:
+    def _on_blur(self, event) -> None:  # type: ignore[override]
         """Hide autocomplete palettes when focus leaves composer."""
-        await super()._on_blur()
+        super()._on_blur(event)
         try:
             path_palette = self.app.query_one(PathAutocomplete)  # type: ignore[attr-defined]
             path_palette.add_class("hidden")

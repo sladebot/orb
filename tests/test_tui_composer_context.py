@@ -15,7 +15,6 @@ from orb.cli.tui_repl import (
     _render_scope_chips,
     _scan_workdir_paths,
     _extract_autocomplete_query,
-    _track_scope_mentions_tested,  # exported for test use
     _tui_escape,
 )
 
@@ -99,7 +98,7 @@ class TestTrackScopeMentions:
 
     def test_scope_max_capping(self) -> None:
         """Should cap at SCOPE_MAX."""
-        texts = "@" + "x" * i for i in range(20)
+        texts = ["@" + "x" * i for i in range(20)]
         all_text = " ".join(texts)
         result = _track_scope_mentions_tested(all_text, "", [])
         assert len(result) <= SCOPE_MAX
