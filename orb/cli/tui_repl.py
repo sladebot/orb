@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from collections import deque
 from time import time
 from typing import Any
 from urllib.parse import urlencode, urlparse
+from pathlib import Path
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -36,8 +38,10 @@ from textual.widgets import Footer, Static, TextArea
 from rich.markup import escape as _rich_markup_escape
 
 # Slash command catalog surfaced by the palette peek + /help.
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "all commands"),
+# Deprecated — use COMMAND_REGISTRY / COMMAND_MAP from tui_commands.
+# Kept for SlashPalette prefix-matching (it compares tuples).
+_SLASH_COMMANDS_LEGACY: list[tuple[str, str]] = [
+    ("/help", "show all commands"),
     ("/clear", "clear the stream"),
     ("/stop", "stop the current run"),
     ("/resume", "pick a prior session"),
@@ -45,6 +49,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/topology", "switch routing topology"),
     ("/quit", "exit the TUI"),
 ]
+
+# Import the canonical registry (single source of truth for help, palette, execution).
+from orb.cli.tui_commands import COMMAND_MAP, COMMAND_REGISTRY, SlashCommand
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,14 @@ TOPOLOGY_LABELS: dict[str, str] = {
 SCOPE_RE = re.compile(r"@([\w./\-]+)")
 SCOPE_MAX = 8
 
+# Regex for extracting an in-progress @path fragment ending at cursor position.
+# Matches @ followed by word chars, slashes, dots, hyphens — exactly what the
+# user has typed so far (no trailing space or closing paren).
+SCOPE_FRAGMENT_RE = re.compile(r"@([\w./\-]+)$")
+
+# Max autocomplete results before truncating (prevents flooding terminal).
+_AUTOCOMPLETE_MAX_RESULTS = 30
+
 # Parity with ``web.state.MAX_FILE_CHANGES``. The dict is path-keyed so
 # rewrites collide in-place; distinct paths past this cap evict the oldest
 # entry (LRU by insertion order). ``file_changes_truncated_count`` surfaces
@@ -91,6 +106,107 @@ MAX_FILE_CHANGES = 200
 def _tui_escape(value: Any) -> str:
     """Escape runtime/user text before interpolating into Textual markup."""
     return _rich_markup_escape(str(value))
+
+
+def _scan_workdir_paths(workdir: str, prefix: str) -> list[str]:
+    """Scan the workdir for paths matching a prefix (non-blocking).
+
+    Returns up to ``_AUTOCOMPLETE_MAX_RESULTS`` path entries that either
+    start with ``prefix`` or contain it as a substring.  Only file and
+    directory names are returned (no symlinks to follow), and we cap the
+    walk depth at 3 levels to avoid blocking on large repos.
+
+    This is intentionally synchronous — the calling code should only call
+    it from the main thread during a Textual event loop tick, so brief
+    pauses (< 50 ms on typical projects) are acceptable.
+    """
+    if not workdir or not os.path.isdir(workdir):
+        return []
+
+    prefix_lower = prefix.lower()
+    results: list[str] = []
+    seen: set[str] = set()
+
+    def _walk(directory: str, depth: int = 0) -> None:
+        if depth > 3:  # Cap recursion depth
+            return
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except (PermissionError, OSError):
+            return
+
+        for entry in entries:
+            name = entry.name
+            # Skip hidden files/directories (performance)
+            if name.startswith(".") and name != ".hidden":
+                continue
+
+            rel = entry.path[len(workdir) + 1:] if entry.path.startswith(workdir) else name
+
+            if name.lower().startswith(prefix_lower) or prefix_lower in name.lower():
+                if rel not in seen:
+                    seen.add(rel)
+                    results.append(rel)
+                    if len(results) >= _AUTOCOMPLETE_MAX_RESULTS:
+                        return
+
+            if entry.is_dir(follow_symlinks=False):
+                _walk(entry.path, depth + 1)
+
+            if len(results) >= _AUTOCOMPLETE_MAX_RESULTS:
+                return
+
+    _walk(workdir)
+    return results
+
+
+def _extract_autocomplete_query(text: str, cursor_col: int) -> tuple[str | None, int | None]:
+    """Extract the @path fragment under the cursor for autocomplete.
+
+    Returns (fragment, fragment_start_col) if the cursor is within an
+    active @path mention, otherwise (None, None).
+    """
+    if cursor_col < 0 or cursor_col > len(text):
+        return None, None
+
+    # Look at text before cursor for an in-progress @path fragment
+    before_cursor = text[:cursor_col] if cursor_col <= len(text) else text
+
+    # Find the last @ that could start a path mention
+    at_idx = before_cursor.rfind("@")
+    if at_idx < 0:
+        return None, None
+
+    # Check there's no space between @ and cursor (the fragment)
+    fragment_part = before_cursor[at_idx + 1:]
+
+    # If the fragment part ends with space or paren, it's not in-progress
+    if fragment_part and (fragment_part[-1] == " " or fragment_part[-1] == ")"):
+        return None, None
+
+    # Use the regex to extract the path fragment
+    match = SCOPE_FRAGMENT_RE.search(fragment_part)
+    if not match:
+        return None, None
+
+    fragment = match.group(1)
+    # Fragment start is right after the @
+    fragment_start = at_idx + 1
+
+    return fragment, fragment_start
+
+
+def _render_scope_chips(scope_paths: list[str], max_length: int = 22) -> list[str]:
+    """Render scope mention chips for display in the composer area.
+
+    Returns a list of Textual-markup strings, one per scope path,
+    suitable for inline display above or within the composer.
+    """
+    chips: list[str] = []
+    for path in scope_paths:
+        short = path if len(path) <= max_length else "…" + path[-(max_length - 1):]
+        chips.append(f"[#94bfff][@]{_tui_escape(short)}[/@] ")
+    return chips
 
 
 def _plan_progress(items: list[tuple[str, str]]) -> tuple[int, int, str]:
@@ -275,6 +391,19 @@ Screen { background: #0b1016; }
     background: #0e141b;
     border: tall #1b2330;
     color: #8796a7;
+}
+#path-autocomplete {
+    height: auto;
+    padding: 0 1;
+    background: #0e141b;
+    border: tall #1b2330;
+    color: #94bfff;
+}
+#scope-chips {
+    height: 1;
+    padding: 0 1;
+    background: transparent;
+    color: #94bfff;
 }
 .hidden { display: none; }
 .block-accept {
@@ -814,6 +943,37 @@ class LiveStatusBar(Static):
             self.update(f"[#6b7685]{glyph}[/] [#8796a7]{_tui_escape(text)}[/][#6b7685]{_tui_escape(dur)}[/]")
 
 
+
+
+class ScopeChips(Static):
+    """Inline chips above the composer showing active @-mentions.
+
+    Updates whenever the composer text changes, displaying active scope
+    paths as small, dismissible chips.
+    """
+
+    DEFAULT_CSS = """
+    #scope-chips {
+        height: 1;
+        padding: 0 1;
+        background: transparent;
+        color: #94bfff;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="scope-chips")
+
+    def refresh_for(self, scope_paths: list[str]) -> None:
+        """Update the chips display from current scope_paths."""
+        if not scope_paths:
+            self.update("")
+            return
+        chips = _render_scope_chips(scope_paths)
+        self.update("".join(chips))
+
+
+class SlashPalette(Static):
 class SlashPalette(Static):
     """Peek palette above the composer listing slash commands.
 
@@ -831,23 +991,91 @@ class SlashPalette(Static):
             self.add_class("hidden")
             return
         query = text.split()[0].lower() if text.strip() else "/"
-        # Exact-match first (so full ``/help`` highlights just /help);
-        # otherwise prefix-match.
-        exact = [cmd for cmd in SLASH_COMMANDS if cmd[0] == query]
-        if exact:
-            matches = exact
-        else:
-            matches = [cmd for cmd in SLASH_COMMANDS if cmd[0].startswith(query)]
+        # Use COMMAND_REGISTRY: fuzzy/prefix match + disabled flags.
+        matches = fuzzy_filter(query.lstrip("/"))
         if not matches:
-            matches = list(SLASH_COMMANDS)
+            matches = list(COMMAND_REGISTRY)
+        # Exclude disabled commands from the palette (unless query
+        # exactly matches their slash — then show them as disabled so
+        # the user sees the reason).
+        def _is_disabled(cmd: SlashCommand) -> bool:
+            return cmd.is_disabled(self.state)[0]
+
+        visible = [m for m in matches if not _is_disabled(m)]
+        disabled = [m for m in matches if _is_disabled(m)] if query.lstrip("/").lower() in {c.slash for c in matches} else []
+        rows = (visible or matches) + disabled
 
         lines: list[str] = []
-        for cmd, desc in matches:
-            highlight = (cmd == query) or (len(matches) == 1)
-            if highlight:
-                lines.append(f"[bold #94bfff]{cmd:<12}[/] [#c4ced9]{desc}[/]")
+        for cmd in rows:
+            is_dis, reason = cmd.is_disabled(self.state)
+            if is_dis:
+                lines.append(f"[dim #6b7685]{cmd.slash:<12}[/] [{cmd.slash}><{reason}[/]  ([dim]disabled[/])")
+            elif cmd.slash == query:
+                lines.append(f"[bold #94bfff]{cmd.slash:<12}[/] [#c4ced9]{cmd.description}[/]")
             else:
-                lines.append(f"[#94bfff]{cmd:<12}[/] [#6b7685]{desc}[/]")
+                lines.append(f"[#94bfff]{cmd.slash:<12}[/] [#6b7685]{cmd.description}[/]")
+        self.update("\n".join(lines))
+        self.remove_class("hidden")
+
+
+class PathAutocomplete(Static):
+    """Peek palette below the composer listing ``@path`` matches.
+
+    Hidden by default via the ``hidden`` CSS class; shown when the
+    composer text contains an in-progress ``@path`` fragment under the
+    cursor. The currently-matched path is highlighted.
+
+    Designed to mirror ``SlashPalette`` semantics but for scope paths
+    rather than slash commands: it reads ``self.state.scope_paths``
+    and filters by the partial fragment extracted from the text under
+    the cursor.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="path-autocomplete")
+        self.add_class("hidden")
+
+    def refresh_for(self, text: str, cursor_col: int) -> None:
+        """Update the autocomplete popup based on text under cursor.
+
+        Looks for an in-progress ``@path`` fragment ending at (or just
+        before) the cursor column. Matches against ``scope_paths`` and
+        shows prefix + substring matches (sorted by relevance).
+        """
+        # Only visible when the composer text is within cursor bounds.
+        # Find the ``@...`` fragment ending at or just before cursor_col.
+        before_cursor = text[:cursor_col] if cursor_col <= len(text) else text
+        # Work backwards from cursor_col to find ``@`` boundary.
+        at_idx = before_cursor.rfind("@")
+        if at_idx < 0:
+            self.add_class("hidden")
+            return
+        # Find the start of the fragment (after the last space).
+        fragment_start = max(at_idx + 1, before_cursor.rfind(" ", at_idx) + 1)
+        fragment = before_cursor[fragment_start:]
+        if not fragment:
+            self.add_class("hidden")
+            return
+        # Also check that we're not inside another token (e.g. ``@path)``
+        if fragment.endswith(")"):
+            self.add_class("hidden")
+            return
+        # Case-insensitive prefix + substring match against scope_paths.
+        frag_lower = fragment.lower()
+        matches: list[str] = []
+        for sp in getattr(self.state, "scope_paths", []):
+            sp_lower = sp.lower()
+            if sp_lower.startswith(frag_lower) or frag_lower in sp_lower:
+                matches.append(sp)
+        if not matches:
+            self.add_class("hidden")
+            return
+        lines: list[str] = []
+        for sp in matches:
+            if sp.lower().startswith(frag_lower):
+                lines.append(f"[bold #94bfff]{_tui_escape(sp):<20}[/]")
+            else:
+                lines.append(f"  [#6b7685]{_tui_escape(sp):<20}[/]")
         self.update("\n".join(lines))
         self.remove_class("hidden")
 
@@ -979,6 +1207,19 @@ class ComposerTextArea(TextArea):
             return
         await super()._on_key(event)
 
+    def _on_focus(self) -> None:
+        """Track focus for keyboard shortcuts (Tab for path completion)."""
+        super()._on_focus()
+
+    async def _on_blur(self) -> None:
+        """Hide autocomplete palettes when focus leaves composer."""
+        await super()._on_blur()
+        try:
+            path_palette = self.app.query_one(PathAutocomplete)  # type: ignore[attr-defined]
+            path_palette.add_class("hidden")
+        except Exception:  # noqa: BLE001
+            pass
+
 
 class OrbReplTUI(App[None]):
     """Daemon-backed REPL TUI matching the orb-design-system/orb-tui design."""
@@ -992,6 +1233,7 @@ class OrbReplTUI(App[None]):
         Binding("ctrl+k", "cancel_run", "Stop", show=True),
         Binding("tab", "focus_input", "Focus", show=False),
         Binding("question_mark", "show_help", "?"),
+        Binding("ctrl+p", "show_command_palette", "Commands", show=False),
         # Approval-flow bindings (task #10). These single letters would
         # normally collide with typing in the composer — ``check_action``
         # below disables them whenever ``pending_writes`` is empty so a
@@ -1124,11 +1366,12 @@ class OrbReplTUI(App[None]):
                 with Vertical(id="composer"):
                     yield LiveStatusBar(self)
                     yield SlashPalette()
+                    yield PathAutocomplete()
                     ta = ComposerTextArea(id="query-input")
                     ta.show_line_numbers = False
                     yield ta
                     yield Static(
-                        "[#6b7685]↵ send · /help[/]",
+                        "[#6b7685]↵ send · /help · Tab scope[/]",
                         classes="composer-hint",
                     )
         yield Footer()
@@ -1154,13 +1397,34 @@ class OrbReplTUI(App[None]):
 
     @on(TextArea.Changed, "#query-input")
     def _on_composer_changed(self, event: TextArea.Changed) -> None:
-        """Toggle the slash-palette peek as the user types in the composer."""
+        """Toggle the slash-palette and path-autocomplete peeks as the user types."""
+        text = (event.text_area.text or "")
+        cursor_col = 0
+        try:
+            cursor_col = event.text_area.cursor_location.column if hasattr(event.text_area, "cursor_location") else 0
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Refresh slash palette (slash commands).
         try:
             palette = self.query_one(SlashPalette)
+            palette.refresh_for(text)
         except Exception:  # noqa: BLE001
-            return
-        text = (event.text_area.text or "")
-        palette.refresh_for(text)
+            pass
+
+        # Refresh path autocomplete (@ path mentions).
+        try:
+            path_palette = self.query_one(PathAutocomplete)
+            path_palette.refresh_for(text, cursor_col)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Refresh scope chips display above composer.
+        try:
+            chips_widget = self.query_one("#scope-chips", ScopeChips)
+            chips_widget.refresh_for(getattr(self, "scope_paths", []) or [])
+        except Exception:  # noqa: BLE001
+            pass
 
     async def on_unmount(self) -> None:
         if self._ws_task is not None:
@@ -1802,10 +2066,28 @@ class OrbReplTUI(App[None]):
         Order-preserving dedup — once a path is in ``scope_paths`` it
         stays at its earliest position, so users don't see their rail
         re-order as they type. Capped at :data:`SCOPE_MAX` entries.
+
+        In addition to the regex-based extraction, this method also
+        scans the workdir for paths matching the ``@`` fragment to
+        suggest real filesystem paths for scope selection.
         """
+        # Extract all @path mentions using the existing regex.
         for match in SCOPE_RE.findall(text or ""):
             if match and match not in self.scope_paths:
                 self.scope_paths.append(match)
+
+        # Scan workdir for additional context paths matching any @fragment.
+        workdir = getattr(self, "workdir", "") or ""
+        if workdir and os.path.isdir(workdir):
+            for match in SCOPE_FRAGMENT_RE.findall(text or ""):
+                if match and match not in self.scope_paths:
+                    # Quick scan: if the fragment matches an actual path, add it.
+                    candidates = _scan_workdir_paths(workdir, match)
+                    for c in candidates[:5]:  # Only add first 5 candidates
+                        if c not in self.scope_paths:
+                            self.scope_paths.append(c)
+                            break  # Add first match only per fragment
+
         if len(self.scope_paths) > SCOPE_MAX:
             # Keep the most recent ones when we overflow.
             self.scope_paths = self.scope_paths[-SCOPE_MAX:]
