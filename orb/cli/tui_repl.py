@@ -51,7 +51,7 @@ _SLASH_COMMANDS_LEGACY: list[tuple[str, str]] = [
 ]
 
 # Import the canonical registry (single source of truth for help, palette, execution).
-from orb.cli.tui_commands import COMMAND_MAP, COMMAND_REGISTRY, SlashCommand
+from orb.cli.tui_commands import COMMAND_MAP, COMMAND_REGISTRY, SlashCommand, fuzzy_filter, fuzzy_filter
 
 logger = logging.getLogger(__name__)
 
@@ -973,7 +973,6 @@ class ScopeChips(Static):
         self.update("".join(chips))
 
 
-class SlashPalette(Static):
 class SlashPalette(Static):
     """Peek palette above the composer listing slash commands.
 
