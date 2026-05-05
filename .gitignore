@@ -1,6 +1,7 @@
 **/__pycache__/
 **/*.pyc
 orb.egg-info/
+orb_agents.egg-info/
 .env
 build/
 .DS_Store
@@ -20,6 +21,7 @@ node_modules/
 
 # Stray node / npm scratch that crept into working tree
 .npm/
+Library/
 tmp/
 
 # Design-bundle reference (fetched from claude.ai/design) — not code
