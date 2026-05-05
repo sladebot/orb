@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect } from 'vitest';
-import { safeParseWsMessage, describeHttpError, buildSplitDiffRows } from '../../static/app.js';
+import { safeParseWsMessage, describeHttpError, buildSplitDiffRows, buildSessionCreateBody } from '../../static/app.js';
 
 describe('describeHttpError', () => {
     it('does not echo raw response body into the user-facing message', () => {
@@ -95,6 +95,42 @@ describe('buildSplitDiffRows', () => {
     it('returns [] for empty or missing ops', () => {
         expect(buildSplitDiffRows([])).toEqual([]);
         expect(buildSplitDiffRows(undefined)).toEqual([]);
+    });
+});
+
+describe('buildSessionCreateBody', () => {
+    it('pins the selected global model for explicit solo sessions', () => {
+        expect(buildSessionCreateBody({
+            workdir: '/tmp/project',
+            sessionConfig: { topology: 'solo', agentModels: {} },
+            selectedModel: 'claude-3-5-sonnet-latest',
+        })).toEqual({
+            workdir: '/tmp/project',
+            topology: 'solo',
+            model: 'claude-3-5-sonnet-latest',
+            agent_models: { solo: 'claude-3-5-sonnet-latest' },
+        });
+    });
+
+    it('keeps per-agent picks and model pin together for explicit multi-agent sessions', () => {
+        expect(buildSessionCreateBody({
+            sessionConfig: {
+                topology: 'triad',
+                agentModels: { coder: 'claude-3-opus-latest' },
+            },
+            selectedModel: 'claude-3-5-sonnet-latest',
+        })).toEqual({
+            topology: 'triad',
+            model: 'claude-3-5-sonnet-latest',
+            agent_models: { coder: 'claude-3-opus-latest' },
+        });
+    });
+
+    it('does not send a model pin when topology selection is auto', () => {
+        expect(buildSessionCreateBody({
+            sessionConfig: { topology: 'auto', agentModels: { solo: 'ignored' } },
+            selectedModel: 'claude-3-5-sonnet-latest',
+        })).toEqual({});
     });
 });
 

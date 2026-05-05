@@ -165,12 +165,22 @@ class RuntimeManager:
         if topology and topology != "auto":
             from orb.topologies import normalize_topology_id, get_loader
             normalized = normalize_topology_id(topology)
-            if normalized in get_loader().list_ids():
+            loader = get_loader()
+            topo = loader.get(normalized)
+            if topo is not None:
                 runtime._conversation_session.locked_topology = normalized  # noqa: SLF001
-                if agent_models:
-                    runtime._conversation_session.locked_agent_models = {  # noqa: SLF001
-                        str(r): str(m) for r, m in agent_models.items() if r and m
-                    }
+                locked_agent_models = {
+                    str(r): str(m) for r, m in (agent_models or {}).items() if r and m
+                }
+                if model_pin and model_pin != "auto" and not locked_agent_models and len(topo.agents) == 1:
+                    # A singleton topology has no per-node ambiguity. Treat
+                    # the session-level model picker as the sole agent's exact
+                    # model so creation-time Solo sessions do not fall through
+                    # to heuristic auto-selection on the first run.
+                    sole_agent_id = next(iter(topo.agents))
+                    locked_agent_models[sole_agent_id] = str(model_pin)
+                if locked_agent_models:
+                    runtime._conversation_session.locked_agent_models = locked_agent_models  # noqa: SLF001
                 if model_pin and model_pin != "auto":
                     runtime._conversation_session.locked_model_pin = model_pin  # noqa: SLF001
                 # Paint the topology up-front on the dashboard state so the

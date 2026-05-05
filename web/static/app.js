@@ -23,6 +23,33 @@ function describeHttpError(status, body) {
     return status ? `HTTP ${status}: non-JSON response` : 'non-JSON response';
 }
 
+function buildSessionCreateBody({ workdir = '', sessionConfig = {}, selectedModel = 'auto' } = {}) {
+    const body = {};
+    const normalizedWorkdir = String(workdir || '').trim();
+    if (normalizedWorkdir) body.workdir = normalizedWorkdir;
+
+    const topology = String(sessionConfig?.topology || '').trim();
+    if (!topology || topology === 'auto') return body;
+
+    body.topology = topology;
+    const modelPin = String(selectedModel || '').trim();
+    if (modelPin && modelPin !== 'auto') body.model = modelPin;
+
+    const picks = sessionConfig?.agentModels || {};
+    const agentModels = {};
+    for (const [role, model] of Object.entries(picks)) {
+        const cleanRole = String(role || '').trim();
+        const cleanModel = String(model || '').trim();
+        if (cleanRole && cleanModel) agentModels[cleanRole] = cleanModel;
+    }
+    if (topology === 'solo' && modelPin && modelPin !== 'auto' && !agentModels.solo) {
+        agentModels.solo = modelPin;
+    }
+    if (Object.keys(agentModels).length) body.agent_models = agentModels;
+
+    return body;
+}
+
 /**
  * Turn a list of LCS-style diff ops into paired rows for a side-by-side
  * split view. Consecutive `remove` + `add` blocks get zipped together so
@@ -1047,14 +1074,11 @@ class Dashboard {
             // the graph — first chat message goes straight to the pinned
             // coordinator, no classifier pass. Only `auto` defers that
             // decision to the first query.
-            const createBody = {};
-            if (workdir) createBody.workdir = workdir;
-            const scTopology = (this._sessionConfig || {}).topology;
-            if (scTopology && scTopology !== 'auto') {
-                createBody.topology = scTopology;
-                const picks = (this._sessionConfig || {}).agentModels || {};
-                if (Object.keys(picks).length) createBody.agent_models = picks;
-            }
+            const createBody = buildSessionCreateBody({
+                workdir,
+                sessionConfig: this._sessionConfig,
+                selectedModel: this._selectedModel,
+            });
             const res = await fetch('/api/v1/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -4677,7 +4701,7 @@ class Dashboard {
 
 // Expose helpers for unit tests (Node/Vitest). No-op in the browser.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { safeParseWsMessage, describeHttpError, buildSplitDiffRows };
+    module.exports = { safeParseWsMessage, describeHttpError, buildSplitDiffRows, buildSessionCreateBody };
 }
 
 // Initialize on load

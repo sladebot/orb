@@ -6,6 +6,8 @@ coordinator — just a capable worker with filesystem access.
 """
 from __future__ import annotations
 
+from orb.llm.types import ANTHROPIC_SONNET_MODEL
+from orb.runtime.manager import RuntimeManager
 from orb.topologies import create_orchestrator, get_loader
 
 
@@ -65,3 +67,26 @@ def test_create_orchestrator_builds_single_agent_solo(tmp_path):
     # The sandbox must be anchored to the provided workdir, not process CWD.
     sole = next(iter(orchestrator.agents.values()))
     assert sole.config.enable_filesystem is True
+
+
+def test_solo_session_creation_model_pin_locks_the_sole_agent(tmp_path):
+    """Creation-time Solo model picker must become a per-agent lock.
+
+    The dashboard creates an explicit topology session before the first run.
+    For a singleton topology, a session-level model pin has only one possible
+    destination, so storing it on locked_agent_models prevents the first run
+    from falling back to heuristic auto-selection.
+    """
+    manager = RuntimeManager()
+    runtime = manager.create_session(
+        workdir=str(tmp_path),
+        topology="solo",
+        model_pin=ANTHROPIC_SONNET_MODEL,
+    )
+
+    session = runtime._conversation_session  # noqa: SLF001
+    assert session.locked_topology == "solo"
+    assert session.locked_model_pin == ANTHROPIC_SONNET_MODEL
+    assert session.locked_agent_models == {"solo": ANTHROPIC_SONNET_MODEL}
+    assert runtime.state.agent_models == {"solo": ANTHROPIC_SONNET_MODEL}
+    assert runtime.state.agents["solo"].model == ANTHROPIC_SONNET_MODEL
