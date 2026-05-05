@@ -55,7 +55,7 @@ If a daemon dies mid-run, the resurrected session's dashboard state is **sanitiz
 orb sessions list
 orb sessions show <prefix>
 orb sessions rm <prefix>
-orb sessions prune --older-than 7d
+orb sessions prune --yes
 ```
 
 ## Run lifecycle

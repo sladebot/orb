@@ -88,7 +88,7 @@ Local-only — pick `vmlx`, `omlx`, or `ollama` when prompted by onboard:
 ```bash
 orb onboard
 orb daemon start
-orb tui --topology auto
+orb tui
 ```
 
 Cloud-only — onboard collects auth in the same flow:

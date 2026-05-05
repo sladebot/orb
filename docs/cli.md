@@ -51,7 +51,9 @@ orb --help
 orb sessions list                    # active + on-disk
 orb sessions show <prefix>
 orb sessions rm <prefix>
-orb sessions prune --older-than 7d
+orb sessions prune --yes             # remove terminal sessions without prompting
+orb sessions prune --all --yes        # include in-flight sessions
+orb sessions prune --keep-disk --yes  # keep on-disk transcripts
 ```
 
 ## Traces
