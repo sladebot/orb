@@ -2,10 +2,9 @@
 
 Everything under ``/api/v1/sessions/{session_id}/...`` routes to a
 specific :class:`~orb.runtime.graph_runtime.GraphRuntime` registered in
-the :class:`~orb.runtime.manager.RuntimeManager`. The old top-level
-``/api/*`` routes continue to work against a default session for the
-dashboard + TUI during the transition; v1 is the surface external
-harnesses (hermes, openclaw, etc.) should target.
+the :class:`~orb.runtime.manager.RuntimeManager`. The top-level
+``/api/*`` control routes have been removed; v1 is the control surface
+used by the dashboard, TUI, and external harnesses.
 
 Every v1 response uses the standard envelope:
 
@@ -32,6 +31,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MAX_JSON_BODY_BYTES = 1024 * 1024
+
 
 # ── Envelope helpers ─────────────────────────────────────────────────────
 
@@ -48,6 +49,25 @@ def err(code: str, message: str, *, status: int = 400) -> web.Response:
         {"ok": False, "code": code, "error": message},
         status=status,
     )
+
+
+async def json_body(request: web.Request, *, empty_ok: bool = False) -> tuple[dict | None, web.Response | None]:
+    """Read a JSON object request body with consistent v1 error envelopes."""
+    try:
+        body = await request.json()
+    except web.HTTPRequestEntityTooLarge:
+        return None, err(
+            "REQUEST_TOO_LARGE",
+            f"JSON request body exceeds {MAX_JSON_BODY_BYTES} bytes",
+            status=413,
+        )
+    except (JSONDecodeError, UnicodeDecodeError, ValueError):
+        if empty_ok:
+            return {}, None
+        return None, err("INVALID_BODY", "Request body must be a JSON object", status=400)
+    if not isinstance(body, dict):
+        return None, err("INVALID_BODY", "Request body must be a JSON object", status=400)
+    return body, None
 
 
 # ── Session lookup ───────────────────────────────────────────────────────
@@ -97,12 +117,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
     # ---- Sessions ----
 
     async def create_session(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            body = {}
-        if not isinstance(body, dict):
-            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        body, body_error = await json_body(request, empty_ok=True)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         workdir = (body.get("workdir") or "").strip() or None
         if workdir:
             path = Path(workdir).expanduser()
@@ -212,10 +230,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         runtime = _get_session(manager, session_id)
         if runtime is None:
             return err("SESSION_NOT_FOUND", f"No session with id {session_id!r}", status=404)
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        body, body_error = await json_body(request)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         query = (body.get("query") or "").strip()
         if not query:
             return err("QUERY_EMPTY", "query must not be empty", status=400)
@@ -292,10 +310,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         runtime = _get_session(manager, session_id)
         if runtime is None:
             return err("SESSION_NOT_FOUND", f"No session with id {session_id!r}", status=404)
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        body, body_error = await json_body(request)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         target = (body.get("to") or "").strip()
         message = (body.get("message") or "").strip()
         if not message:
@@ -327,12 +345,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
         runtime = _get_session(manager, session_id)
         if runtime is None:
             return err("SESSION_NOT_FOUND", f"No session with id {session_id!r}", status=404)
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
-        if not isinstance(body, dict):
-            return err("INVALID_BODY", "Request body must be a JSON object", status=400)
+        body, body_error = await json_body(request)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         action = (body.get("action") or "").strip()
         if action not in ("approve", "reject"):
             return err(
@@ -788,10 +804,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
 
     async def git_init(request: web.Request) -> web.Response:
         import subprocess
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            return err("INVALID_BODY", "Invalid JSON body", status=400)
+        body, body_error = await json_body(request)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         raw = (body.get("path") or "").strip()
         if not raw:
             return err("INVALID_PATH", "path is required", status=400)
@@ -812,10 +828,10 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
 
     async def git_pr_url(request: web.Request) -> web.Response:
         import subprocess
-        try:
-            body = await request.json()
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            return err("INVALID_BODY", "Invalid JSON body", status=400)
+        body, body_error = await json_body(request)
+        if body_error is not None:
+            return body_error
+        assert body is not None
         raw = (body.get("path") or "").strip()
         if not raw:
             return err("INVALID_PATH", "path is required", status=400)

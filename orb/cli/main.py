@@ -34,6 +34,7 @@ LOG_FILE = os.path.join(os.path.expanduser("~"), ".orb", "run.log")
 # the authoritative path is ``orb_paths.daemon_state_file()``.
 DAEMON_STATE_FILE = str(orb_paths.daemon_state_file())
 DEFAULT_DAEMON_PORT = 1337
+DEFAULT_DAEMON_HOST = "127.0.0.1"
 DEFAULT_CONNECT_URL = f"http://127.0.0.1:{DEFAULT_DAEMON_PORT}"
 _LEVEL_COLORS = {
     "DEBUG":    "\033[2m",       # dim
@@ -442,7 +443,7 @@ def parse_args() -> argparse.Namespace:
     dashboard_parser = subparsers.add_parser("dashboard", help="Open the dashboard for a running Orb daemon")
     dashboard_parser.add_argument("query", nargs="?", help="Optional task query to start on the connected daemon")
     dashboard_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
-    dashboard_parser.add_argument("--workdir", type=str, default=None, help="Scope the session to this folder (calls /api/session/new with the path)")
+    dashboard_parser.add_argument("--workdir", type=str, default=None, help="Scope the dashboard session to this folder")
     dashboard_parser.add_argument(
         "--agent-model",
         action="append",
@@ -452,7 +453,7 @@ def parse_args() -> argparse.Namespace:
     )
     dashboard_parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     daemon_common = argparse.ArgumentParser(add_help=False)
-    daemon_common.add_argument("--host", default="0.0.0.0", help="Daemon bind host (default: 0.0.0.0 — listens on all interfaces; pass --host 127.0.0.1 for localhost-only)")
+    daemon_common.add_argument("--host", default=DEFAULT_DAEMON_HOST, help="Daemon bind host (default: 127.0.0.1; pass --host 0.0.0.0 to listen on all interfaces)")
     daemon_common.add_argument("--port", type=int, default=None, help="Daemon bind port")
     daemon_common.add_argument("--workdir", type=str, help="Daemon workspace directory")
     daemon_common.add_argument(
@@ -468,7 +469,7 @@ def parse_args() -> argparse.Namespace:
         help="Use only cloud models in the daemon",
     )
     daemon_parser = subparsers.add_parser("daemon", help="Run Orb backend daemon with API, WebSocket, and dashboard")
-    daemon_parser.add_argument("--host", default="0.0.0.0", help="Daemon bind host (default: 0.0.0.0 — listens on all interfaces; use --host 127.0.0.1 for localhost-only)")
+    daemon_parser.add_argument("--host", default=DEFAULT_DAEMON_HOST, help="Daemon bind host (default: 127.0.0.1; pass --host 0.0.0.0 to listen on all interfaces)")
     daemon_parser.add_argument("--port", type=int, default=DEFAULT_DAEMON_PORT, help=f"Daemon bind port (default: {DEFAULT_DAEMON_PORT})")
     daemon_parser.add_argument("--workdir", type=str, help="Daemon workspace directory (default: create a fresh /tmp/orb-daemon-* dir each start)")
     daemon_sub = daemon_parser.add_subparsers(dest="daemon_action")
@@ -904,11 +905,11 @@ def _find_listening_pid(port: int) -> int | None:
 def _port_looks_like_orb_daemon(host: str, port: int) -> bool:
     probe_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
     try:
-        with urlopen(f"http://{probe_host}:{port}/api/state", timeout=0.75) as resp:
+        with urlopen(f"http://{probe_host}:{port}/api/v1/health", timeout=0.75) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except (OSError, URLError, ValueError, json.JSONDecodeError):
         return False
-    return body.get("type") == "init"
+    return body.get("ok") is True and body.get("code") == "HEALTHY"
 
 
 def _start_managed_daemon(
@@ -1158,7 +1159,7 @@ async def async_main() -> None:
             return
         if daemon_action == "restart":
             await _stop_managed_daemon(args.port or DEFAULT_DAEMON_PORT)
-            host = args.host or "0.0.0.0"
+            host = args.host or DEFAULT_DAEMON_HOST
             port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
@@ -1172,7 +1173,7 @@ async def async_main() -> None:
             print(f"  Workspace: {info['workdir']}")
             return
         if daemon_action == "start":
-            host = args.host or "0.0.0.0"
+            host = args.host or DEFAULT_DAEMON_HOST
             port = args.port or DEFAULT_DAEMON_PORT
             info = _start_managed_daemon(
                 host,
@@ -1189,7 +1190,7 @@ async def async_main() -> None:
         from web.server import DashboardServer
         from web.state import DashboardState
 
-        daemon_host = args.host or "0.0.0.0"
+        daemon_host = args.host or DEFAULT_DAEMON_HOST
         daemon_port = args.port or DEFAULT_DAEMON_PORT
         daemon_workdir = _resolve_daemon_workdir(getattr(args, "workdir", None))
         # No process-level chdir — each Session owns its workdir and the
@@ -1325,32 +1326,52 @@ async def async_main() -> None:
         # See ``_DEFAULT_TOPOLOGY_PICK`` for the picked default.
 
         async with aiohttp.ClientSession() as session:
-            # Scope the session to a workdir first, if requested.
-            if getattr(args, "workdir", None):
-                workdir = str(Path(args.workdir).expanduser().resolve())
-                async with session.post(f"{base}/api/session/new", json={"workdir": workdir}) as resp:
+            session_id: str | None = None
+            if getattr(args, "workdir", None) or args.query or agent_model_pins:
+                create_body: dict = {}
+                if args.query or agent_model_pins:
+                    create_body["topology"] = _DEFAULT_TOPOLOGY_PICK
+                if agent_model_pins:
+                    create_body["agent_models"] = agent_model_pins
+                # Scope the session to a workdir first, if requested.
+                workdir = None
+                if getattr(args, "workdir", None):
+                    workdir = str(Path(args.workdir).expanduser().resolve())
+                    create_body["workdir"] = workdir
+                async with session.post(f"{base}/api/v1/sessions", json=create_body) as resp:
                     payload = await resp.json()
                     if not payload.get("ok"):
-                        print_error(payload.get("error", "Failed to create workdir-scoped session"))
+                        print_error(payload.get("error", "Failed to create dashboard session"))
                         sys.exit(1)
+                    data = payload.get("data") or {}
+                    session_id = str(data.get("session_id") or "") or None
+                if workdir:
                     print(f"  Session scoped to: {workdir}")
 
             if args.query:
+                if not session_id:
+                    print_error("Failed to create dashboard session")
+                    sys.exit(1)
                 start_body: dict = {
                     "query": args.query,
                     "topology": _DEFAULT_TOPOLOGY_PICK,
                 }
                 if agent_model_pins:
                     start_body["agent_models"] = agent_model_pins
-                async with session.post(f"{base}/api/start", json=start_body) as resp:
+                async with session.post(f"{base}/api/v1/sessions/{session_id}/runs", json=start_body) as resp:
                     payload = await resp.json()
                     if not payload.get("ok"):
                         print_error(payload.get("error", "Failed to start run"))
                         sys.exit(1)
                     print("  Started run on daemon.")
+
+        dashboard_url = base
+        if session_id:
+            separator = "&" if "?" in base else "?"
+            dashboard_url = f"{base}{separator}session={session_id}"
         if not args.no_open:
-            webbrowser.open(base)
-        print(f"  Open dashboard at {base}")
+            webbrowser.open(dashboard_url)
+        print(f"  Open dashboard at {dashboard_url}")
         return
 
     trace = args.trace and not args.no_trace

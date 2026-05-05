@@ -16,6 +16,7 @@ import pytest
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from web.api_v1 import MAX_JSON_BODY_BYTES
 from web.server import DashboardServer
 from web.state import DashboardState
 
@@ -63,7 +64,19 @@ class TestSessionLifecycle:
         assert data["ok"] is True
         assert data["code"] == "SESSION_CREATED"
         assert data["data"]["workdir"] == workdir
-        assert data["data"]["run_state"] == "idle"
+
+    async def test_oversized_json_returns_v1_error_envelope(self, client):
+        test_client, _ = client
+        body = json.dumps({"query": "x" * MAX_JSON_BODY_BYTES})
+        resp = await test_client.post(
+            "/api/v1/sessions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status == 413
+        data = await resp.json()
+        assert data["ok"] is False
+        assert data["code"] == "REQUEST_TOO_LARGE"
 
     async def test_create_session_rejects_invalid_workdir(self, client):
         test_client, _ = client

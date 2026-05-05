@@ -342,7 +342,10 @@ async def test_async_main_dashboard_connect_starts_remote_run():
     fake_response = MagicMock()
     fake_response.__aenter__ = AsyncMock(return_value=fake_response)
     fake_response.__aexit__ = AsyncMock(return_value=None)
-    fake_response.json = AsyncMock(return_value={"ok": True})
+    fake_response.json = AsyncMock(side_effect=[
+        {"ok": True, "data": {"session_id": "session-1"}},
+        {"ok": True, "data": {}},
+    ])
 
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
@@ -356,8 +359,10 @@ async def test_async_main_dashboard_connect_starts_remote_run():
          patch("webbrowser.open"):
         await async_main()
 
-    fake_session.post.assert_called_once()
-    assert fake_session.post.call_args.args[0] == "http://127.0.0.1:9090/api/start"
+    assert [call.args[0] for call in fake_session.post.call_args_list] == [
+        "http://127.0.0.1:9090/api/v1/sessions",
+        "http://127.0.0.1:9090/api/v1/sessions/session-1/runs",
+    ]
 
 
 @pytest.mark.asyncio
@@ -367,7 +372,10 @@ async def test_async_main_dashboard_subcommand_opens_browser():
     fake_response = MagicMock()
     fake_response.__aenter__ = AsyncMock(return_value=fake_response)
     fake_response.__aexit__ = AsyncMock(return_value=None)
-    fake_response.json = AsyncMock(return_value={"ok": True})
+    fake_response.json = AsyncMock(side_effect=[
+        {"ok": True, "data": {"session_id": "session-1"}},
+        {"ok": True, "data": {}},
+    ])
 
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
@@ -381,9 +389,11 @@ async def test_async_main_dashboard_subcommand_opens_browser():
          patch("orb.cli.main.build_providers", side_effect=AssertionError("should not build providers")):
         await async_main()
 
-    fake_session.post.assert_called_once()
-    assert fake_session.post.call_args.args[0] == "http://127.0.0.1:9090/api/start"
-    open_browser.assert_called_once_with("http://127.0.0.1:9090")
+    assert [call.args[0] for call in fake_session.post.call_args_list] == [
+        "http://127.0.0.1:9090/api/v1/sessions",
+        "http://127.0.0.1:9090/api/v1/sessions/session-1/runs",
+    ]
+    open_browser.assert_called_once_with("http://127.0.0.1:9090?session=session-1")
 
 
 @pytest.mark.asyncio
@@ -562,17 +572,15 @@ async def test_async_main_daemon_restart_restarts_background_process():
          patch("orb.cli.main._stop_managed_daemon", new_callable=AsyncMock) as stop_daemon, \
          patch("orb.cli.main._start_managed_daemon", return_value={
              "pid": 5678,
-             "host": "0.0.0.0",
+             "host": "127.0.0.1",
              "port": DEFAULT_DAEMON_PORT,
              "workdir": "/tmp/orb-daemon-y",
          }) as start_daemon:
         await async_main()
 
     stop_daemon.assert_awaited_once()
-    # Default host is 0.0.0.0 per CLAUDE.md — binds all interfaces so the
-    # LAN-reachable dashboard works without an extra flag.
     start_daemon.assert_called_once_with(
-        "0.0.0.0",
+        "127.0.0.1",
         DEFAULT_DAEMON_PORT,
         None,
         local_only=False,
@@ -749,13 +757,8 @@ async def test_async_main_direct_run_uses_default_triad_topology():
     assert create_orchestrator.call_args.args[0] == "triad"
 
 
-def test_daemon_host_default_is_unspecified_binds_all_interfaces():
-    """CLAUDE.md's ``"Always run or restart the Orb daemon with host
-    0.0.0.0"`` rule requires ``daemon run/start/restart`` to default to
-    ``0.0.0.0`` — not ``127.0.0.1`` — so the dashboard and TUI are
-    reachable from other hosts on the LAN without a hidden extra flag.
-    Regression guard for the default drift we caught in the review.
-    """
+def test_daemon_host_default_is_localhost():
+    """Daemon run/start/restart default to localhost unless --host broadens it."""
     import sys
     from unittest.mock import patch
 
@@ -764,6 +767,6 @@ def test_daemon_host_default_is_unspecified_binds_all_interfaces():
     for subcmd in ("run", "start", "restart"):
         with patch.object(sys, "argv", ["orb", "daemon", subcmd]):
             args = parse_args()
-        assert args.host == "0.0.0.0", (
-            f"`orb daemon {subcmd}` should default --host to 0.0.0.0, got {args.host!r}"
+        assert args.host == "127.0.0.1", (
+            f"`orb daemon {subcmd}` should default --host to 127.0.0.1, got {args.host!r}"
         )

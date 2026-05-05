@@ -12,7 +12,7 @@ from aiohttp import web
 from json import JSONDecodeError
 
 from orb.runtime import GraphRuntime, RuntimeManager
-from .api_v1 import register_v1_routes
+from .api_v1 import MAX_JSON_BODY_BYTES, register_v1_routes
 from .state import DashboardState
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class DashboardServer:
     def __init__(
         self,
         state: DashboardState,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 8080,
         runtime: GraphRuntime | None = None,
     ) -> None:
@@ -56,7 +56,10 @@ class DashboardServer:
         # Bridge the default session's broadcasts through the manager too,
         # so v1 subscribers see everything.
         self.runtime.subscribe(self.manager._forward_broadcast)  # noqa: SLF001
-        self._app = web.Application(middlewares=[_no_cache_middleware])
+        self._app = web.Application(
+            middlewares=[_no_cache_middleware],
+            client_max_size=MAX_JSON_BODY_BYTES,
+        )
         self._clients: dict[web.WebSocketResponse, str | None] = {}
         self._runner: web.AppRunner | None = None
         self._catalog_refresh_task: asyncio.Task | None = None
@@ -323,7 +326,7 @@ class DashboardServer:
         Returns subdirectories of the given `?path=` (defaulting to the user's
         home directory). Files are filtered out because only folders can be a
         workdir. Paths are always resolved, so the client receives absolute
-        canonical paths it can send back to /api/session/new verbatim.
+        canonical paths it can send back to POST /api/v1/sessions.
         """
         raw = (request.rel_url.query.get("path") or "").strip()
         show_hidden = request.rel_url.query.get("hidden", "").lower() in ("1", "true", "yes")

@@ -6,7 +6,7 @@
 
 ## Rules
 1. For any change or fixes first write test, then make changes, and make sure to pass the test.
-4. Always run or restart the Orb daemon with host `0.0.0.0`.
+2. The Orb daemon defaults to `127.0.0.1` (loopback). Pass `--host 0.0.0.0` only when remote attach is required.
 
 Any feature, fix, or behaviour change that affects one must be applied to the other:
 - Message type changes (e.g. `MessageType.TASK` → `RESPONSE`)
