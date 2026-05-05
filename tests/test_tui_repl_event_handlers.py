@@ -976,6 +976,46 @@ def test_handle_message_finalizes_streaming_turn_when_chain_id_matches():
     assert tui.message_count == 1
 
 
+def test_handle_message_propagates_model_to_streamed_turn_on_finalize():
+    """Parity rule (CLAUDE.md): the dashboard's ``_finalizeStreamingBubble``
+    rewrites the bubble header with ``msg.model`` from the terminal
+    ``message`` event (web/static/app.js). The TUI must do the same — the
+    streaming Turn is mounted with ``model=""`` because the model is only
+    authoritative on the terminal event. Without this, every streamed turn
+    shows a permanently blank model lane, drifting from the dashboard.
+    """
+    from orb.cli.tui_repl import Turn
+
+    tui = _make_tui()
+    turn = Turn("coder", 0.0, "Hel", model="")
+    turn.update = MagicMock()
+    turn.set_body = MagicMock()
+    tui._streaming_turns[("chain-m", "coder")] = turn
+
+    tui._handle_message({
+        "type": "message",
+        "from": "coder",
+        "content": "Hello, world!",
+        "model": "claude-sonnet-4-6",
+        "chain_id": "chain-m",
+    })
+
+    # Streamed body still preserved — the finalize must not call set_body.
+    turn.set_body.assert_not_called()
+    # Model lane now reflects the terminal event's authoritative value.
+    assert turn.model == "claude-sonnet-4-6"
+    # And a missing/empty terminal model must not blow away an existing
+    # one (defensive — late events can carry None).
+    turn2 = Turn("coder", 0.0, "Hi", model="opus")
+    turn2.update = MagicMock()
+    tui._streaming_turns[("chain-n", "coder")] = turn2
+    tui._handle_message({
+        "type": "message", "from": "coder",
+        "content": "x", "chain_id": "chain-n",
+    })
+    assert turn2.model == "opus"
+
+
 def test_late_delta_after_finalize_is_dropped():
     """If a delta arrives AFTER the terminal ``message`` for the same
     (chain_id, from), the handler must ignore it instead of mounting a

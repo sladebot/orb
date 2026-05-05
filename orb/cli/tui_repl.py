@@ -558,6 +558,22 @@ class Turn(Static):
             self._body_markup = body_markup
         self._rebuild_turn_markup()
 
+    def set_model(self, model: str) -> None:
+        """Update only the model lane and re-render.
+
+        Used when the terminal ``message`` event closes a streaming chain:
+        the body is the accumulated streamed text (already correct), but
+        the model is only authoritative on that final event. This mirrors
+        the dashboard's ``_finalizeStreamingBubble`` step which rewrites
+        the header with ``msg.model``. An empty/missing ``model`` is a
+        no-op so a late event with no model field can't blank a
+        previously-set lane.
+        """
+        if not model:
+            return
+        self.model = model.strip()
+        self._rebuild_turn_markup()
+
 
 class Whisper(Static):
     """Compact single-line entry for internal events.
@@ -1395,14 +1411,16 @@ class OrbReplTUI(App[None]):
         speaker = str(data.get("from") or "")
         key = (chain_id, speaker) if chain_id and speaker else None
         if key is not None and key in self._streaming_turns:
-            self._streaming_turns.pop(key)
+            turn = self._streaming_turns.pop(key)
             # Tombstone the stream so a late delta (rare, but possible
             # with reordering / replay) is dropped instead of appended
             # to the now-finalized Turn.
             self._finalized_streams.setdefault(chain_id, set()).add(speaker)
             # Body already accumulated via ``_handle_message_delta``; don't
-            # overwrite. Optional polish (deferred): if the final content
-            # diverges non-trivially, render a "sent: <truncated>" affordance.
+            # overwrite. The model is only authoritative on the terminal
+            # event though — propagate it into the lane now, mirroring the
+            # dashboard's ``_finalizeStreamingBubble`` (web/static/app.js).
+            turn.set_model(data.get("model") or "")
         else:
             self._render_message(data)
         self.message_count += 1
