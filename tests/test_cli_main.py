@@ -791,3 +791,14 @@ def test_daemon_host_default_is_localhost():
         assert args.host == "127.0.0.1", (
             f"`orb daemon {subcmd}` should default --host to 127.0.0.1, got {args.host!r}"
         )
+
+
+def test_parse_args_memory_prune_keeps_parser_object(monkeypatch):
+    from orb.cli.main import parse_args
+
+    monkeypatch.setattr("sys.argv", ["orb", "memory", "prune", "Orb"] )
+    args = parse_args()
+    assert args.subcommand == "memory"
+    assert args.memory_action == "prune"
+    assert args.page_title == "Orb"
+    assert args.vault_path == "~/.orb/vault"

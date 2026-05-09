@@ -472,7 +472,7 @@ class Store:
         for md_file in sorted(wiki_dir.rglob("*.md")):
             text = md_file.read_text(encoding="utf-8")
             # Pattern for wikilinks pointing to this page (direct or with display text)
-            pattern = re.compile(r"\[\[(" + re.escape(canonical) + r"|.*\|" + re.escape(canonical) + r")\]\]")
+            pattern = re.compile(r"\[\[(" + re.escape(canonical) + r"|" + re.escape(canonical) + r"\|[^\]]+)\]\]")
             if not pattern.search(text):
                 continue
 

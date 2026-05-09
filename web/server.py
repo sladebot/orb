@@ -24,7 +24,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def _no_cache_middleware(request: web.Request, handler):
     response = await handler(request)
     if (
-        request.path == "/"
+        request.path in {"/", "/memory"}
         or request.path.startswith("/static/")
         or request.path.startswith("/api/")
     ):
@@ -68,6 +68,7 @@ class DashboardServer:
         # Handler methods are kept on this class because the v1 layer
         # still delegates to a few of them (git status, for instance).
         self._app.router.add_get("/", self._index_handler)
+        self._app.router.add_get("/memory", self._memory_handler)
         self._app.router.add_static("/static", STATIC_DIR)
 
         # v1 multi-tenant API — sits alongside the legacy routes during
@@ -156,27 +157,34 @@ class DashboardServer:
             self._clients.pop(ws, None)
 
     @staticmethod
-    def _read_index_assets() -> tuple[str, str]:
-        """Synchronous file I/O for the index page — call via asyncio.to_thread."""
-        build_ts = str(max(
-            int((STATIC_DIR / "style.css").stat().st_mtime),
-            int((STATIC_DIR / "graph.js").stat().st_mtime),
-            int((STATIC_DIR / "app.js").stat().st_mtime),
-            int((STATIC_DIR / "index.html").stat().st_mtime),
-        ))
-        html = (STATIC_DIR / "index.html").read_text()
+    def _read_static_page_assets(page_name: str, asset_names: tuple[str, ...]) -> tuple[str, str]:
+        """Synchronous file I/O for static HTML pages — call via asyncio.to_thread."""
+        paths = [STATIC_DIR / name for name in (*asset_names, page_name)]
+        build_ts = str(max(int(path.stat().st_mtime) for path in paths))
+        html = (STATIC_DIR / page_name).read_text()
         return build_ts, html
 
-    async def _index_handler(self, request: web.Request) -> web.Response:
-        build_ts, html = await asyncio.to_thread(self._read_index_assets)
-        html = html.replace("/static/style.css", f"/static/style.css?v={build_ts}")
-        html = html.replace("/static/graph.js", f"/static/graph.js?v={build_ts}")
-        html = html.replace("/static/app.js", f"/static/app.js?v={build_ts}")
+    @staticmethod
+    def _cache_bust_assets(html: str, build_ts: str, asset_names: tuple[str, ...]) -> str:
+        for asset_name in asset_names:
+            url = f"/static/{asset_name}"
+            html = html.replace(url, f"{url}?v={build_ts}")
+        return html
+
+    async def _static_html_response(self, page_name: str, asset_names: tuple[str, ...]) -> web.Response:
+        build_ts, html = await asyncio.to_thread(self._read_static_page_assets, page_name, asset_names)
+        html = self._cache_bust_assets(html, build_ts, asset_names)
         response = web.Response(text=html, content_type="text/html")
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         return response
+
+    async def _index_handler(self, request: web.Request) -> web.Response:
+        return await self._static_html_response("index.html", ("style.css", "graph.js", "app.js"))
+
+    async def _memory_handler(self, request: web.Request) -> web.Response:
+        return await self._static_html_response("memory.html", ("style.css", "memory.js"))
 
     async def _state_handler(self, request: web.Request) -> web.Response:
         session_id = request.rel_url.query.get("session", "").strip() or None

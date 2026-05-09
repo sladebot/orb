@@ -420,10 +420,12 @@ def parse_args() -> argparse.Namespace:
         default="~/.orb/vault",
         help="Path to the vault (default: ~/.orb/vault)",
     )
-    memory_sub.add_parser("status", help="Report vault health (page count, tags, last write)").add_argument(
+    status_p = memory_sub.add_parser("status", help="Report vault health (page count, tags, last write)")
+    status_p.add_argument(
         "--vault-path", type=str, default="~/.orb/vault", help="Path to the vault (default: ~/.orb/vault)",
     )
-    prune_p = memory_sub.add_parser("prune", help="Archive page(s) to memories/").add_argument(
+    prune_p = memory_sub.add_parser("prune", help="Archive page(s) to memories/")
+    prune_p.add_argument(
         "--vault-path", type=str, default="~/.orb/vault", help="Path to the vault (default: ~/.orb/vault)",
     )
     prune_p.add_argument("page_title", help="Page title to archive (matches wiki/*.md stem)")

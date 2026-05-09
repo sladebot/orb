@@ -599,3 +599,21 @@ class TestEdgeCases:
         assert store.all_pages() == []
         assert store.search_pages("query") == []
         assert store.read_index() == []
+
+
+def test_sync_inbound_links_matches_double_bracket_wikilinks(tmp_path):
+    from orb.memory_tools.models import MarkdownPage
+    from orb.memory_tools.store import Store
+
+    vault = tmp_path / "vault"
+    wiki = vault / "wiki" / "entity"
+    wiki.mkdir(parents=True)
+    source = wiki / "source.md"
+    source.write_text("---\ntitle: Source\ntype: entity\ntags: []\n---\nLinks to [[Canonical|Display]] and [[Canonical]].\n", encoding="utf-8")
+    (vault / "log.md").write_text("# Log\n---\n", encoding="utf-8")
+
+    Store(str(vault)).sync_inbound_links(MarkdownPage(title="Canonical", content="", type="entity"))
+
+    text = source.read_text(encoding="utf-8")
+    assert "[[Canonical|Display]]" not in text
+    assert text.count("[[Canonical]]") == 2

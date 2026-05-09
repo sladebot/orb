@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ORB · Memory Overview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="v2 memory-page">
+    <main class="memory-shell">
+        <header class="memory-hero">
+            <div>
+                <p class="memory-eyebrow">Orb persistent memory</p>
+                <h1>Memory Overview</h1>
+                <p id="memory-vault-path" class="memory-subtitle">Loading vault…</p>
+            </div>
+            <nav class="memory-actions" aria-label="Memory dashboard actions">
+                <a class="v2-btn" href="/">Workbench</a>
+                <button id="memory-refresh" class="v2-btn" type="button">Refresh</button>
+            </nav>
+        </header>
+
+        <section class="memory-grid" aria-label="Memory summary metrics">
+            <article class="memory-card metric"><span class="l">Wiki pages</span><strong id="memory-wiki-pages">—</strong></article>
+            <article class="memory-card metric"><span class="l">Archived memories</span><strong id="memory-archives">—</strong></article>
+            <article class="memory-card metric"><span class="l">Raw sources</span><strong id="memory-raw">—</strong></article>
+            <article class="memory-card metric"><span class="l">Page types</span><strong id="memory-types-count">—</strong></article>
+        </section>
+
+        <section class="memory-layout">
+            <article class="memory-card">
+                <h2>Page types</h2>
+                <div id="memory-page-types" class="memory-bars empty">No pages yet.</div>
+            </article>
+            <article class="memory-card">
+                <h2>Top tags</h2>
+                <div id="memory-tags" class="memory-tags empty">No tags yet.</div>
+            </article>
+            <article class="memory-card wide">
+                <h2>Recent pages</h2>
+                <div id="memory-recent" class="memory-list empty">No recent pages yet.</div>
+            </article>
+        </section>
+
+        <p id="memory-status" class="memory-status" role="status">Connecting to memory API…</p>
+    </main>
+    <script src="/static/memory.js"></script>
+</body>
+</html>
