@@ -410,6 +410,24 @@ def parse_args() -> argparse.Namespace:
     topologies_init = topologies_sub.add_parser("init", help="Create ~/.orb/topologies.yaml from the bundled sample")
     topologies_init.add_argument("--force", action="store_true", help="Overwrite ~/.orb/topologies.yaml if it already exists")
 
+    # ── memory subcommand ─────────────────────────────────────────────────────
+    memory_parser = subparsers.add_parser("memory", help="Manage the persistent memory vault")
+    memory_sub = memory_parser.add_subparsers(dest="memory_action")
+    init_p = memory_sub.add_parser("init", help="Initialize the memory vault structure")
+    init_p.add_argument(
+        "--vault-path",
+        type=str,
+        default="~/.orb/vault",
+        help="Path to the vault (default: ~/.orb/vault)",
+    )
+    memory_sub.add_parser("status", help="Report vault health (page count, tags, last write)").add_argument(
+        "--vault-path", type=str, default="~/.orb/vault", help="Path to the vault (default: ~/.orb/vault)",
+    )
+    prune_p = memory_sub.add_parser("prune", help="Archive page(s) to memories/").add_argument(
+        "--vault-path", type=str, default="~/.orb/vault", help="Path to the vault (default: ~/.orb/vault)",
+    )
+    prune_p.add_argument("page_title", help="Page title to archive (matches wiki/*.md stem)")
+
     sessions_parser = subparsers.add_parser("sessions", help="Manage Orb sessions (list, show, remove, prune)")
     sessions_parser.add_argument("--connect", type=str, default=None, help=f"Orb daemon URL (default: {DEFAULT_CONNECT_URL})")
     sessions_parser.add_argument("--port", type=int, default=None, help="Daemon port shorthand for localhost connects")
@@ -1128,6 +1146,12 @@ async def async_main() -> None:
             return
         print_error("Unknown topologies command")
         sys.exit(1)
+
+    # ── memory subcommand ─────────────────────────────────────────────────────
+    if args.subcommand == "memory":
+        from orb.memory_tools.cli import _handle_memory_command
+        _handle_memory_command(args)
+        return
 
     if args.subcommand == "sessions":
         await _cmd_sessions(args)
