@@ -9,6 +9,8 @@ def build_system_prompt(
     neighbors: dict[str, str],  # {node_id: role_description}
     topology: TopologyContext | None = None,
     enable_filesystem: bool = False,
+    enable_memory: bool = False,
+    memory_write_enabled: bool = False,
     suppress_context_guidelines: bool = False,
     workdir: str = "",
 ) -> str:
@@ -83,6 +85,32 @@ You have access to:
 - The sandbox is shared — all agents in this run see the same files.
 """
 
+    memory_section = ""
+    if enable_memory:
+        write_lines = ""
+        mode_line = "Memory is read-only for this agent; do not try to persist new memories."
+        if memory_write_enabled:
+            mode_line = "Memory writes are enabled; write only durable facts, project decisions, stable architecture notes, and reusable knowledge."
+            write_lines = """
+- `memory_write(title, content, page_type?, tags?, sources?)` — write or update a durable memory page
+- `memory_write_entity(entity, content, tags?, sources?)` — write or update an entity memory page
+"""
+        memory_section = f"""
+## Persistent Memory Tools
+You have access to Orb's persistent wiki memory vault. {mode_line}
+
+Available memory tools:
+- `memory_read(query, limit?)` — search memory pages and return compact snippets
+- `memory_read_entity(entity)` — read one page by title
+- `memory_read_tag(tag, limit?)` — list pages with a tag
+- `memory_list_pages(limit?, page_type?)` — list page titles and metadata without full content{write_lines}
+
+Guidelines:
+- Read memory when prior project facts, decisions, architecture, or terminology would improve your answer.
+- Keep memory results compact when sharing them with peers.
+- Treat writes as durable: do not store transient task progress, speculation, secrets, or noisy logs.
+"""
+
     context_guidelines = "" if suppress_context_guidelines else """
 ## Context Sharing Guidelines
 - **To a Reviewer**: share the file paths and the requirements/constraints you're working with.
@@ -105,7 +133,7 @@ You can communicate with these agents:
 - Share only the information your neighbor needs to do their job. Don't dump your full history.
 - When sharing code, include the file path — neighbors can read it with `read_file`.
 - When giving feedback, be specific and actionable.
-{context_guidelines}{filesystem_section}
+{context_guidelines}{filesystem_section}{memory_section}
 ## Completion
 - Call `complete_task` when you've finished your part and have no more contributions.
 - Don't call complete_task prematurely — wait until the work is genuinely done.

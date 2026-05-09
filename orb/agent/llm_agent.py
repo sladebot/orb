@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
 import time
@@ -25,7 +26,7 @@ from .request_context import (
     build_graph_context_block,
     build_request_messages_with_graph,
 )
-from .tools import send_message_tool, complete_task_tool, filesystem_tools
+from .tools import send_message_tool, complete_task_tool, filesystem_tools, memory_read_tools, memory_write_tools
 from .types import AgentConfig, AgentStatus, TopologyContext
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,7 @@ class LLMAgent(AgentNode):
         self._fs_cache: dict[tuple[str, str], str] = {}
         self._subgraph_store = None
         self._fact_extractor = None
+        self._memory_tools = None
 
     async def _emit(self, activity: str, details: dict | None = None) -> None:
         """Fire the activity callback if set."""
@@ -194,6 +196,8 @@ class LLMAgent(AgentNode):
             neighbors=all_neighbors,
             topology=topology_context,
             enable_filesystem=self.config.enable_filesystem,
+            enable_memory=self.config.enable_memory,
+            memory_write_enabled=self.config.memory_write_enabled,
             suppress_context_guidelines=self.config.suppress_context_guidelines,
             workdir=workdir,
         )
@@ -203,6 +207,17 @@ class LLMAgent(AgentNode):
         ]
         if self.config.enable_filesystem:
             self._tools.extend(filesystem_tools())
+        if self.config.enable_memory:
+            self._tools.extend(memory_read_tools())
+            if self.config.memory_write_enabled:
+                self._tools.extend(memory_write_tools())
+            from ..memory_tools.config import MemoryConfig
+            from ..memory_tools.memory_tools import MemoryTools
+            self._memory_tools = MemoryTools(MemoryConfig(
+                vault_path=self.config.memory_vault_path,
+                enabled=True,
+                auto_write=self.config.memory_write_enabled,
+            ))
 
     async def process(self, msg: Message) -> None:
         self.status = AgentStatus.RUNNING
@@ -490,8 +505,31 @@ class LLMAgent(AgentNode):
                     cmd = tc.input.get("command", "")[:200]
                     await self._emit(f"$ {cmd}")
                     await self._handle_run_command(tc.id, tc.input)
+                elif tc.name == "memory_read":
+                    query = tc.input.get("query", "")[:120]
+                    await self._emit(f"Searching memory: {query}")
+                    await self._handle_memory_read(tc.id, tc.input)
+                elif tc.name == "memory_read_entity":
+                    entity = tc.input.get("entity", "")[:120]
+                    await self._emit(f"Reading memory page: {entity}")
+                    await self._handle_memory_read_entity(tc.id, tc.input)
+                elif tc.name == "memory_read_tag":
+                    tag = tc.input.get("tag", "")[:120]
+                    await self._emit(f"Reading memory tag: {tag}")
+                    await self._handle_memory_read_tag(tc.id, tc.input)
+                elif tc.name == "memory_list_pages":
+                    await self._emit("Listing memory pages")
+                    await self._handle_memory_list_pages(tc.id, tc.input)
+                elif tc.name == "memory_write":
+                    title = tc.input.get("title", "")[:120]
+                    await self._emit(f"Writing memory page: {title}")
+                    await self._handle_memory_write(tc.id, tc.input)
+                elif tc.name == "memory_write_entity":
+                    entity = tc.input.get("entity", "")[:120]
+                    await self._emit(f"Writing memory entity: {entity}")
+                    await self._handle_memory_write_entity(tc.id, tc.input)
 
-            # After filesystem tool calls (no send/complete), loop back so the
+            # After local tool calls (no send/complete), loop back so the
             # agent can act on the results immediately (e.g. read → write → send)
             has_action = any(
                 tc.name in ("send_message", "complete_task")
@@ -500,10 +538,10 @@ class LLMAgent(AgentNode):
             if not has_action and response.tool_calls:
                 if len(response.tool_calls) == 1:
                     self._conversation.add_user(
-                        "Continue with the remaining filesystem work. Batch as many related tool calls "
-                        "as you can in your next response, and avoid repeating unchanged listings or reads."
+                        "Continue with the remaining local tool work. Batch as many related tool calls "
+                        "as you can in your next response, and avoid repeating unchanged listings, reads, or memory searches."
                     )
-                # All calls were filesystem ops — add results and let the model continue
+                # All calls were local tool ops — add results and let the model continue
                 request = CompletionRequest(
                     messages=build_request_messages_with_graph(
                         self._conversation.get_messages(),
@@ -765,6 +803,182 @@ class LLMAgent(AgentNode):
             return
         result = await self._sandbox().run_command(command)
         self._conversation.add_tool_result(tool_id, result)
+
+    def _memory_backend(self):
+        if not self.config.enable_memory or self._memory_tools is None:
+            raise RuntimeError("Persistent memory tools are disabled for this agent")
+        return self._memory_tools
+
+    @staticmethod
+    def _bounded_int(value: object, default: int, *, minimum: int = 1, maximum: int = 50) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
+
+    @staticmethod
+    def _page_title(page: dict) -> str:
+        fm = page.get("frontmatter") or {}
+        return str(fm.get("title") or page.get("title") or "")
+
+    @staticmethod
+    def _page_summary(page: dict, *, include_content: bool = False) -> dict:
+        fm = page.get("frontmatter") or {}
+        content = str(page.get("content") or "")
+        summary = {
+            "title": fm.get("title") or page.get("title") or "",
+            "type": fm.get("type") or "",
+            "tags": fm.get("tags") or [],
+            "sources": fm.get("sources") or [],
+            "updated": fm.get("updated") or "",
+            "path": page.get("path") or "",
+        }
+        if include_content:
+            summary["page_body"] = content[:8000]
+        else:
+            snippet = " ".join(content.split())[:500]
+            summary["snippet"] = snippet
+        return summary
+
+    def _memory_result(self, *, ok: bool, **payload) -> str:
+        return json.dumps({"ok": ok, **payload}, ensure_ascii=False, indent=2)
+
+    async def _handle_memory_read(self, tool_id: str, input_data: dict) -> None:
+        query = str(input_data.get("query") or "").strip()
+        if not query:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="query is required"))
+            return
+        limit = self._bounded_int(input_data.get("limit"), 5, maximum=20)
+        try:
+            backend = self._memory_backend()
+            results = backend.read(query)
+            if not results and " " in query:
+                seen: set[str] = set()
+                expanded: list[dict] = []
+                for token in query.split():
+                    if len(token) < 3:
+                        continue
+                    for page in backend.read(token):
+                        key = str(page.get("path") or self._page_title(page))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        expanded.append(page)
+                results = expanded
+            results = results[:limit]
+        except Exception as exc:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=str(exc)))
+            return
+        self._conversation.add_tool_result(
+            tool_id,
+            self._memory_result(ok=True, results=[self._page_summary(p) for p in results]),
+        )
+
+    async def _handle_memory_read_entity(self, tool_id: str, input_data: dict) -> None:
+        entity = str(input_data.get("entity") or "").strip()
+        if not entity:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="entity is required"))
+            return
+        try:
+            page = self._memory_backend().read_entity(entity)
+        except Exception as exc:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=str(exc)))
+            return
+        if page is None:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="memory page not found", entity=entity))
+            return
+        self._conversation.add_tool_result(
+            tool_id,
+            self._memory_result(ok=True, page=self._page_summary(page, include_content=True)),
+        )
+
+    async def _handle_memory_read_tag(self, tool_id: str, input_data: dict) -> None:
+        tag = str(input_data.get("tag") or "").strip()
+        if not tag:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="tag is required"))
+            return
+        limit = self._bounded_int(input_data.get("limit"), 10, maximum=50)
+        try:
+            pages = self._memory_backend().read_tag(tag)[:limit]
+        except Exception as exc:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=str(exc)))
+            return
+        self._conversation.add_tool_result(
+            tool_id,
+            self._memory_result(ok=True, tag=tag, results=[self._page_summary(p) for p in pages]),
+        )
+
+    async def _handle_memory_list_pages(self, tool_id: str, input_data: dict) -> None:
+        limit = self._bounded_int(input_data.get("limit"), 50, maximum=100)
+        page_type = str(input_data.get("page_type") or "").strip()
+        try:
+            backend = self._memory_backend()
+            pages = backend.store.all_pages() if backend.store is not None else []
+        except Exception as exc:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=str(exc)))
+            return
+        summaries = [self._page_summary(p) for p in pages]
+        if page_type:
+            summaries = [p for p in summaries if p.get("type") == page_type]
+        self._conversation.add_tool_result(
+            tool_id,
+            self._memory_result(ok=True, pages=summaries[:limit]),
+        )
+
+    async def _handle_memory_write(self, tool_id: str, input_data: dict) -> None:
+        if not (self.config.enable_memory and self.config.memory_write_enabled):
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="memory writes are disabled for this agent"))
+            return
+        title = str(input_data.get("title") or "").strip()
+        content = str(input_data.get("content") or "")
+        page_type = str(input_data.get("page_type") or "concept").strip() or "concept"
+        tags = input_data.get("tags") or []
+        sources = input_data.get("sources") or []
+        if not title or not content.strip():
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="title and content are required"))
+            return
+        if not isinstance(tags, list):
+            tags = []
+        if not isinstance(sources, list):
+            sources = []
+        try:
+            if tags:
+                from ..memory_tools.models import MarkdownPage, confidence_from_sources
+                page = MarkdownPage(
+                    title=title,
+                    content=content,
+                    type=page_type,
+                    tags=[str(t) for t in tags],
+                    sources=[str(s) for s in sources],
+                )
+                page.confidence = confidence_from_sources(len(page.sources), "[[" in content and "]]" in content)
+                backend = self._memory_backend()
+                if backend.store is None:
+                    raise RuntimeError("Store not initialized")
+                backend.store.write_page(page)
+                backend.store.log_split_warning(page)
+            elif sources:
+                page = self._memory_backend().write_with_sources(title, content, [str(s) for s in sources], page_type=page_type)
+            else:
+                page = self._memory_backend().write(title, content, page_type=page_type)
+        except Exception as exc:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=str(exc)))
+            return
+        self._conversation.add_tool_result(
+            tool_id,
+            self._memory_result(ok=True, page={"title": page.title, "type": page.type, "tags": page.tags, "sources": page.sources, "updated": page.updated}),
+        )
+
+    async def _handle_memory_write_entity(self, tool_id: str, input_data: dict) -> None:
+        entity = str(input_data.get("entity") or "").strip()
+        if not entity:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="entity is required"))
+            return
+        forwarded = dict(input_data)
+        forwarded["title"] = entity
+        forwarded["page_type"] = "entity"
+        await self._handle_memory_write(tool_id, forwarded)
 
     def _store_memory(self, msg: Message) -> None:
         self._memory_counter += 1
