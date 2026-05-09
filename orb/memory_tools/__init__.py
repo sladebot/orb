@@ -18,9 +18,11 @@ from .memory_tools import MemoryTools
 from .models import MarkdownPage
 from .store import Store
 
+__version__ = "0.1.0"
 __all__ = [
     "MemoryConfig",
     "MemoryTools",
     "MarkdownPage",
     "Store",
+    "__version__",
 ]

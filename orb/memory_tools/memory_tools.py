@@ -80,7 +80,7 @@ class MemoryTools:
         """Return vault index (index.md entries).
 
         Returns
-            List of index entries (``[{\"title\": \"...\", \"path\": \"...\"}]``).
+            List of index entries (``[{"title": "...", "path": "..."}]``).
             Returns ``[]`` when index.md is missing.
         """
         if self.store is None:

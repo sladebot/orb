@@ -176,7 +176,8 @@ class Store:
     def read_page(self, title: str) -> dict[str, Any] | None:
         """Read a single wiki page by title.
 
-        Searches ``wiki/`` subdirectories first (entity/, concept/,\n        analysis/, queries/), then falls back to the vault root.
+        Searches ``wiki/`` subdirectories first (entity/, concept/,
+        analysis/, queries/), then falls back to the vault root.
 
         Parameters
             title  : page title (case-insensitive match on filename stem).
