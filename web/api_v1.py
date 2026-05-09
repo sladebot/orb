@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from json import JSONDecodeError
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -95,6 +96,65 @@ def _session_summary(runtime: "GraphRuntime") -> dict:
     }
 
 
+
+def _memory_overview_sync(vault_path: str | None = None) -> dict:
+    """Return a side-effect-free summary of the llm-wiki memory vault."""
+    from orb.memory_tools.parsers import extract_frontmatter
+
+    vault = Path(vault_path or "~/.orb/vault").expanduser().resolve()
+    wiki_dir = vault / "wiki"
+    memories_dir = vault / "memories"
+    raw_dir = vault / "raw"
+    overview: dict[str, Any] = {
+        "vault_path": str(vault),
+        "exists": vault.exists(),
+        "wiki_pages": 0,
+        "memories": 0,
+        "raw_items": 0,
+        "page_types": {},
+        "top_tags": [],
+        "recent_pages": [],
+        "last_updated": None,
+    }
+    if not vault.exists():
+        return overview
+
+    page_types: Counter[str] = Counter()
+    tags: Counter[str] = Counter()
+    recent: list[dict[str, Any]] = []
+    latest_mtime = 0.0
+    if wiki_dir.is_dir():
+        for md_file in sorted(wiki_dir.rglob("*.md")):
+            try:
+                raw = md_file.read_text(encoding="utf-8")
+                stat = md_file.stat()
+            except OSError:
+                continue
+            latest_mtime = max(latest_mtime, stat.st_mtime)
+            fm = extract_frontmatter(raw)
+            title = str(fm.get("title") or md_file.stem)
+            page_type = str(fm.get("type") or md_file.parent.name or "unknown")
+            page_types[page_type] += 1
+            raw_tags = fm.get("tags") or []
+            if isinstance(raw_tags, str):
+                raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+            for tag in raw_tags:
+                tags[str(tag)] += 1
+            recent.append({
+                "title": title,
+                "type": page_type,
+                "path": str(md_file.relative_to(vault)),
+                "updated_at": stat.st_mtime,
+            })
+    overview["wiki_pages"] = sum(page_types.values())
+    overview["memories"] = len(list(memories_dir.rglob("*.md"))) if memories_dir.is_dir() else 0
+    overview["raw_items"] = sum(1 for p in raw_dir.rglob("*") if p.is_file()) if raw_dir.is_dir() else 0
+    overview["page_types"] = dict(sorted(page_types.items()))
+    overview["top_tags"] = [{"tag": tag, "count": count} for tag, count in tags.most_common(12)]
+    overview["recent_pages"] = sorted(recent, key=lambda item: item["updated_at"], reverse=True)[:10]
+    overview["last_updated"] = latest_mtime or None
+    return overview
+
 # ── Routes ───────────────────────────────────────────────────────────────
 
 
@@ -113,6 +173,13 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             "active_sessions": len(manager.list_sessions()),
             "active_runs": manager.active_session_count(),
         })
+
+    # ---- Memory overview ----
+
+    async def memory_overview(request: web.Request) -> web.Response:
+        raw = (request.rel_url.query.get("vault_path") or "").strip() or None
+        data = await asyncio.to_thread(_memory_overview_sync, raw)
+        return ok("MEMORY_OVERVIEW", data)
 
     # ---- Sessions ----
 
@@ -869,6 +936,7 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
     # ---- Route registration ----
 
     app.router.add_get("/api/v1/health", health)
+    app.router.add_get("/api/v1/memory/overview", memory_overview)
     app.router.add_post("/api/v1/sessions", create_session)
     app.router.add_get("/api/v1/sessions", list_sessions)
     app.router.add_get("/api/v1/sessions/{session_id}", get_session_info)

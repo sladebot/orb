@@ -239,6 +239,45 @@ class TestServerAPI:
         assert "/static/style.css?v=" in body
         assert "/static/graph.js?v=" in body
 
+
+    async def test_memory_dashboard_route_returns_cache_busted_html(self, client):
+        resp = await client.get("/memory")
+        assert resp.status == 200
+        body = await resp.text()
+        assert "Memory Overview" in body
+        assert "/static/style.css?v=" in body
+        assert "/static/memory.js?v=" in body
+
+    async def test_memory_overview_api_reports_vault_counts(self, client, tmp_path):
+        vault = tmp_path / "vault"
+        (vault / "wiki" / "entity").mkdir(parents=True)
+        (vault / "wiki" / "concept").mkdir(parents=True)
+        (vault / "memories").mkdir(parents=True)
+        (vault / "raw" / "articles").mkdir(parents=True)
+        (vault / "wiki" / "entity" / "orb.md").write_text("---\ntitle: Orb\ntype: entity\ntags: [project, agent]\n---\n# Orb\n[[Memory]]\n", encoding="utf-8")
+        (vault / "wiki" / "concept" / "memory.md").write_text("---\ntitle: Memory\ntype: concept\ntags: [agent]\n---\n# Memory\n", encoding="utf-8")
+        (vault / "memories" / "old.md").write_text("archived", encoding="utf-8")
+        (vault / "raw" / "articles" / "source.md").write_text("raw", encoding="utf-8")
+        resp = await client.get(f"/api/v1/memory/overview?vault_path={vault}")
+        assert resp.status == 200
+        env = await resp.json()
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["vault_path"] == str(vault.resolve())
+        assert data["wiki_pages"] == 2
+        assert data["memories"] == 1
+        assert data["raw_items"] == 1
+        assert data["page_types"] == {"concept": 1, "entity": 1}
+        assert data["top_tags"][0] == {"tag": "agent", "count": 2}
+
+    async def test_memory_overview_api_handles_missing_vault(self, client, tmp_path):
+        missing = tmp_path / "missing-vault"
+        resp = await client.get(f"/api/v1/memory/overview?vault_path={missing}")
+        assert resp.status == 200
+        env = await resp.json()
+        assert env["data"]["exists"] is False
+        assert env["data"]["wiki_pages"] == 0
+
     async def test_index_handler_does_not_block_event_loop(self, client):
         """Index handler must offload file I/O; a slow stat() must not starve other requests."""
         import threading
