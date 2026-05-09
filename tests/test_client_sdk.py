@@ -105,6 +105,18 @@ class TestRunControl:
         assert run.session_id == session.session_id
         assert run.session_turn == 1
 
+    async def test_start_run_can_request_eval_mode(self, live_client, tmp_path: Path):
+        client, server = live_client
+        session = await client.create_session(workdir=str(tmp_path))
+        runtime = server.manager.get_session(session.session_id)
+
+        async def fake_start(*args, **kwargs):
+            return 202, {"ok": True, "init": {"type": "init"}, "session_turn": 1}
+
+        with patch.object(runtime, "start_run", side_effect=fake_start) as start_run:
+            await session.start_run(query="hello", topology="auto", eval_mode=True)
+        assert start_run.call_args.kwargs["eval_mode"] is True
+
     async def test_empty_query_raises(self, live_client, tmp_path: Path):
         client, _ = live_client
         session = await client.create_session(workdir=str(tmp_path))

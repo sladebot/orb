@@ -191,7 +191,7 @@ class TestRunControl:
         async def fake_start_run(*args, **kwargs):
             return 202, {"ok": True, "init": {"type": "init"}, "session_turn": 1}
 
-        with patch.object(runtime, "start_run", side_effect=fake_start_run):
+        with patch.object(runtime, "start_run", side_effect=fake_start_run) as start_run:
             resp = await test_client.post(
                 f"/api/v1/sessions/{session_id}/runs",
                 json={"query": "hello", "topology": "auto"},
@@ -200,6 +200,24 @@ class TestRunControl:
         data = await resp.json()
         assert data["ok"] is True
         assert data["code"] == "RUN_STARTED"
+        assert "eval_mode" not in start_run.call_args.kwargs
+
+    async def test_start_run_passes_eval_mode_to_runtime(self, client):
+        test_client, server = client
+        create = await (await test_client.post("/api/v1/sessions", json={})).json()
+        session_id = create["data"]["session_id"]
+        runtime = server.manager.get_session(session_id)
+
+        async def fake_start_run(*args, **kwargs):
+            return 202, {"ok": True, "init": {"type": "init"}, "session_turn": 1}
+
+        with patch.object(runtime, "start_run", side_effect=fake_start_run) as start_run:
+            resp = await test_client.post(
+                f"/api/v1/sessions/{session_id}/runs",
+                json={"query": "hello", "topology": "auto", "eval_mode": True},
+            )
+        assert resp.status == 202
+        assert start_run.call_args.kwargs["eval_mode"] is True
 
     async def test_start_run_while_one_is_in_flight_returns_409(self, client):
         """Starting a second run while one is in flight must map to HTTP 409

@@ -11,6 +11,7 @@ class OrchestratorConfig:
     max_cooldown: int = 5
     entry_agent: str = "coder"
     synthesis_agent: str | None = None  # stays alive until all workers complete
+    eval_mode: bool = False  # disable persistent memory for benchmark/evaluation runs
 
 
 @dataclass
