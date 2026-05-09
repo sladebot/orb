@@ -1793,7 +1793,7 @@ class GraphRuntime:
         # Session topology lock — once the session has planned its first
         # run, follow-ups should reuse the same topology AND per-node model
         # map without re-running the classifier. This also handles the
-        # common UI case where a follow-up /api/start passes the locked
+        # common UI case where a follow-up v1 session run passes the locked
         # topology id explicitly rather than "auto": we still want to skip
         # re-classification in that case.
         explicit_topology = topology != "auto"

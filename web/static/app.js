@@ -1075,7 +1075,7 @@ class Dashboard {
             }
 
             // Reflect picked topology + manual agent_models for the FIRST
-            // /api/start on the fresh session; the server locks them in
+            // run on the fresh v1 session; the server locks them in
             // after planning, so subsequent messages reuse automatically.
             this._selectedTopology = this._sessionConfig.topology;
             this._userOverrodeTopology = this._sessionConfig.topology !== 'auto';

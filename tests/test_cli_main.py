@@ -335,6 +335,27 @@ def test_init_topologies_file_copies_sample_and_respects_force(tmp_path):
         assert target.read_text() == sample_text
 
 
+def test_dashboard_user_facing_references_do_not_name_dead_legacy_endpoints():
+    repo_root = Path(__file__).resolve().parents[1]
+    legacy_endpoints = ("/api/session" + "/new", "/api" + "/start")
+    scoped_paths = [
+        repo_root / "docs" / "architecture.html",
+        repo_root / "web" / "static" / "app.js",
+        repo_root / "web" / "server.py",
+        repo_root / "orb" / "runtime" / "graph_runtime.py",
+        repo_root / "orb" / "runtime" / "transcript.py",
+    ]
+
+    offenders = []
+    for path in scoped_paths:
+        text = path.read_text(encoding="utf-8")
+        for endpoint in legacy_endpoints:
+            if endpoint in text:
+                offenders.append(f"{path.relative_to(repo_root)} contains {endpoint}")
+
+    assert offenders == []
+
+
 @pytest.mark.asyncio
 async def test_async_main_dashboard_connect_starts_remote_run():
     args = _base_args(subcommand="dashboard", connect="http://127.0.0.1:9090", query="write hello world")

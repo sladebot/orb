@@ -41,7 +41,7 @@ class ConversationSession:
     # the daemon's current working directory at run time.
     workdir: str = ""
     # Topology + models pinned to the session after the first run completes.
-    # Follow-up /api/start calls reuse these unless the caller explicitly
+    # Follow-up v1 session runs reuse these unless the caller explicitly
     # supplies a different topology.
     locked_topology: str = ""
     locked_agent_models: dict[str, str] = field(default_factory=dict)
