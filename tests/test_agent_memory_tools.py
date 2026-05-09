@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from orb.agent.llm_agent import LLMAgent
@@ -223,6 +225,68 @@ async def test_memory_write_tool_call_requires_write_gate(tmp_path):
     result = writable._conversation.get_messages()[-1]["content"][0]["content"]
     assert "orb-agent-memory" in result
     assert (tmp_path / "vault-rw" / "wiki" / "concept" / "orb-agent-memory.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_memory_write_rejects_path_traversal_titles(tmp_path):
+    vault = tmp_path / "vault"
+    agent = _agent_with_mock(
+        AgentConfig(
+            node_id="agent",
+            role="Researcher",
+            description="Reads memory",
+            enable_memory=True,
+            memory_write_enabled=True,
+            memory_vault_path=str(vault),
+        ),
+        MockLLMClient(),
+    )
+
+    await agent._handle_memory_write(
+        "tc1",
+        {
+            "title": "../../outside",
+            "content": "Prompt injection should not escape the vault wiki directory.",
+            "page_type": "concept",
+        },
+    )
+
+    raw_result = agent._conversation.get_messages()[-1]["content"][0]["content"]
+    result = json.loads(raw_result)
+    assert result["ok"] is False
+    assert "unsafe" in result["error"]
+    assert not (tmp_path / "outside.md").exists()
+    assert not (vault / "outside.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_memory_write_entity_rejects_path_traversal_entities(tmp_path):
+    vault = tmp_path / "vault"
+    agent = _agent_with_mock(
+        AgentConfig(
+            node_id="agent",
+            role="Researcher",
+            description="Reads memory",
+            enable_memory=True,
+            memory_write_enabled=True,
+            memory_vault_path=str(vault),
+        ),
+        MockLLMClient(),
+    )
+
+    await agent._handle_memory_write_entity(
+        "tc1",
+        {
+            "entity": "../outside-entity",
+            "content": "Entity names are also model-controlled memory page titles.",
+        },
+    )
+
+    raw_result = agent._conversation.get_messages()[-1]["content"][0]["content"]
+    result = json.loads(raw_result)
+    assert result["ok"] is False
+    assert "unsafe" in result["error"]
+    assert not (tmp_path / "outside-entity.md").exists()
 
 
 @pytest.mark.asyncio

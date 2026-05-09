@@ -844,6 +844,25 @@ class LLMAgent(AgentNode):
     def _memory_result(self, *, ok: bool, **payload) -> str:
         return json.dumps({"ok": ok, **payload}, ensure_ascii=False, indent=2)
 
+    @staticmethod
+    def _memory_title_error(title: str) -> str | None:
+        """Return an error string when a model-supplied memory title is unsafe."""
+        if not title:
+            return "title is required"
+        if "\x00" in title or any(ch in title for ch in ("/", "\\")):
+            return "unsafe memory title: path separators are not allowed"
+        parts = PurePosixPath(title).parts
+        if title in {".", ".."} or any(part in {".", ".."} for part in parts):
+            return "unsafe memory title: dot path segments are not allowed"
+        return None
+
+    @staticmethod
+    def _memory_page_type_error(page_type: str) -> str | None:
+        allowed = {"entity", "concept", "analysis", "query"}
+        if page_type not in allowed:
+            return "unsafe memory page_type: expected one of analysis, concept, entity, query"
+        return None
+
     async def _handle_memory_read(self, tool_id: str, input_data: dict) -> None:
         query = str(input_data.get("query") or "").strip()
         if not query:
@@ -935,8 +954,16 @@ class LLMAgent(AgentNode):
         page_type = str(input_data.get("page_type") or "concept").strip() or "concept"
         tags = input_data.get("tags") or []
         sources = input_data.get("sources") or []
-        if not title or not content.strip():
-            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="title and content are required"))
+        if not content.strip():
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="content is required"))
+            return
+        title_error = self._memory_title_error(title)
+        if title_error:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=title_error))
+            return
+        page_type_error = self._memory_page_type_error(page_type)
+        if page_type_error:
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error=page_type_error))
             return
         if not isinstance(tags, list):
             tags = []
