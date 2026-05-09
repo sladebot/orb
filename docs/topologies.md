@@ -19,18 +19,9 @@ Visual previews:
 
 ## Selecting a topology
 
-```bash
-orb tui --topology solo
-orb tui --topology triad
-orb tui --topology dual-review
-orb tui --topology hierarchy
-```
+Pick a topology in the TUI startup picker or in the dashboard session modal. The TUI also exposes `/topology <id>` for unlocked sessions.
 
-Or let Orb choose automatically:
-
-```bash
-orb tui --topology auto
-```
+For automation, create or start a session through the daemon API with a `topology` value such as `solo`, `triad`, `dual-review`, `hierarchy`, or `auto`.
 
 ## Task classification
 

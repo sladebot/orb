@@ -57,13 +57,12 @@ orb dashboard --workdir ~/projects/url-shortener
 
 ```bash
 orb dashboard \
-  --topology triad \
   --agent-model coder=claude-opus-4-7 \
   --agent-model reviewer=claude-sonnet-4-6 \
   "add a rate limit to /shorten"
 ```
 
-The dashboard exposes the same three controls (workspace, topology, per-node model) from the **⊘ Session** button in the chrome.
+The dashboard exposes workspace, topology, and per-node model controls from the **⊘ Session** button in the chrome. The CLI supports `--workdir` and repeatable `--agent-model role=model_id` pins; choose topology in the dashboard session modal.
 
 ## Dashboard workflow
 
