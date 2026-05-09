@@ -228,11 +228,13 @@ class OrbSession:
         model: str = "auto",
         agent_models: dict[str, str] | None = None,
         workdir: str | None = None,
+        eval_mode: bool = False,
     ) -> RunSummary:
         body: dict[str, Any] = {
             "query": query,
             "topology": topology,
             "model": model,
+            "eval_mode": eval_mode,
         }
         if agent_models:
             body["agent_models"] = agent_models

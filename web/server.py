@@ -220,6 +220,7 @@ class DashboardServer:
         topology = (body.get("topology") or "auto").strip()
         model_pin = (body.get("model") or "auto").strip()
         workdir = (body.get("workdir") or "").strip() or None
+        eval_mode = body.get("eval_mode") is True
         raw_agent_models = body.get("agent_models") or {}
         if not isinstance(raw_agent_models, dict):
             return web.json_response(
@@ -247,12 +248,17 @@ class DashboardServer:
                 status=400,
             )
 
+        run_kwargs = {
+            "model_pin": model_pin,
+            "agent_models": agent_models,
+            "workdir": workdir,
+        }
+        if eval_mode:
+            run_kwargs["eval_mode"] = True
         status, payload = await self.runtime.start_run(
             query,
             topology,
-            model_pin=model_pin,
-            agent_models=agent_models,
-            workdir=workdir,
+            **run_kwargs,
         )
         return web.json_response(payload, status=status)
 

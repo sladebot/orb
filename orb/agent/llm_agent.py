@@ -190,14 +190,17 @@ class LLMAgent(AgentNode):
             "user": "Human operator — use to ask for clarification or report a blocker",
         }
         workdir = str(self.config.sandbox.root) if self.config.sandbox else ""
+        effective_memory_enabled = self.config.enable_memory and not self.config.eval_mode
+        effective_memory_write_enabled = self.config.memory_write_enabled and not self.config.eval_mode
         self._system_prompt = build_system_prompt(
             role=self.config.role,
             description=self.config.description,
             neighbors=all_neighbors,
             topology=topology_context,
             enable_filesystem=self.config.enable_filesystem,
-            enable_memory=self.config.enable_memory,
-            memory_write_enabled=self.config.memory_write_enabled,
+            enable_memory=effective_memory_enabled,
+            memory_write_enabled=effective_memory_write_enabled,
+            eval_mode=self.config.eval_mode,
             suppress_context_guidelines=self.config.suppress_context_guidelines,
             workdir=workdir,
         )
@@ -207,16 +210,16 @@ class LLMAgent(AgentNode):
         ]
         if self.config.enable_filesystem:
             self._tools.extend(filesystem_tools())
-        if self.config.enable_memory:
+        if effective_memory_enabled:
             self._tools.extend(memory_read_tools())
-            if self.config.memory_write_enabled:
+            if effective_memory_write_enabled:
                 self._tools.extend(memory_write_tools())
             from ..memory_tools.config import MemoryConfig
             from ..memory_tools.memory_tools import MemoryTools
             self._memory_tools = MemoryTools(MemoryConfig(
                 vault_path=self.config.memory_vault_path,
                 enabled=True,
-                auto_write=self.config.memory_write_enabled,
+                auto_write=effective_memory_write_enabled,
             ))
 
     async def process(self, msg: Message) -> None:
@@ -804,8 +807,11 @@ class LLMAgent(AgentNode):
         result = await self._sandbox().run_command(command)
         self._conversation.add_tool_result(tool_id, result)
 
+    def _memory_available(self) -> bool:
+        return self.config.enable_memory and not self.config.eval_mode
+
     def _memory_backend(self):
-        if not self.config.enable_memory or self._memory_tools is None:
+        if not self._memory_available() or self._memory_tools is None:
             raise RuntimeError("Persistent memory tools are disabled for this agent")
         return self._memory_tools
 
@@ -946,7 +952,10 @@ class LLMAgent(AgentNode):
         )
 
     async def _handle_memory_write(self, tool_id: str, input_data: dict) -> None:
-        if not (self.config.enable_memory and self.config.memory_write_enabled):
+        if not self._memory_available():
+            self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="memory is disabled for this agent"))
+            return
+        if not self.config.memory_write_enabled:
             self._conversation.add_tool_result(tool_id, self._memory_result(ok=False, error="memory writes are disabled for this agent"))
             return
         title = str(input_data.get("title") or "").strip()

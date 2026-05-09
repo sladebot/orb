@@ -112,6 +112,7 @@ def _build_from_schema(
             max_history=agent_schema.max_history,
             pinned_model=pinned_model,
             enable_filesystem=agent_schema.enable_filesystem,
+            eval_mode=config.eval_mode,
             suppress_context_guidelines=agent_schema.suppress_context_guidelines,
         )
 

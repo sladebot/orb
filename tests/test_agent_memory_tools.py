@@ -65,6 +65,7 @@ def test_agent_config_memory_is_opt_in_and_read_only_by_default():
     assert config.enable_memory is False
     assert config.memory_write_enabled is False
     assert config.memory_vault_path == "~/.orb/vault"
+    assert config.eval_mode is False
 
 
 def test_memory_tool_schemas_are_model_callable_and_write_tools_are_separate():
@@ -116,6 +117,28 @@ def test_initialize_exposes_memory_tools_only_when_enabled(tmp_path):
     )
     assert "memory_read" in _tool_names(writable)
     assert "memory_write" in _tool_names(writable)
+
+
+def test_eval_mode_suppresses_persistent_memory_even_if_enabled(tmp_path):
+    agent = _agent_with_mock(
+        AgentConfig(
+            node_id="agent",
+            role="Researcher",
+            description="Reads memory",
+            enable_memory=True,
+            memory_write_enabled=True,
+            memory_vault_path=str(tmp_path / "vault"),
+            eval_mode=True,
+        ),
+        MockLLMClient(),
+    )
+
+    tool_names = _tool_names(agent)
+    assert "memory_read" not in tool_names
+    assert "memory_write" not in tool_names
+    assert agent._memory_tools is None
+    assert "Persistent Memory Tools" not in agent._system_prompt
+    assert "Evaluation Mode" in agent._system_prompt
 
 
 def test_memory_prompt_guidance_only_renders_when_memory_enabled():

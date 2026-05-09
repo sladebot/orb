@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Awaitable, Callable
 from json import JSONDecodeError
 from pathlib import Path
@@ -1723,6 +1723,7 @@ class GraphRuntime:
         model_pin: str = "auto",
         agent_models: dict[str, str] | None = None,
         workdir: str | None = None,
+        eval_mode: bool = False,
     ) -> tuple[int, dict]:
         from orb.topologies import normalize_topology_id
 
@@ -1763,6 +1764,7 @@ class GraphRuntime:
                 topology=topology,
                 model_pin=model_pin,
                 agent_models=agent_models,
+                eval_mode=eval_mode,
             )
         except Exception as exc:
             logger.exception("start_run planning failed session=%s", self._conversation_session.session_id)
@@ -1776,6 +1778,7 @@ class GraphRuntime:
         topology: str,
         model_pin: str,
         agent_models: dict[str, str] | None,
+        eval_mode: bool = False,
     ) -> tuple[int, dict]:
         from orb.topologies import normalize_topology_id
         self.state.reset()
@@ -1977,6 +1980,7 @@ class GraphRuntime:
                 agent_complexity=agent_complexity,
                 agent_model_map=agent_model_map,
                 trace_recorder=self._last_trace,
+                eval_mode=eval_mode,
             )
         )
         # PLANNING → RUNNING. The orchestrator task now owns the lifecycle.
@@ -2712,6 +2716,7 @@ class GraphRuntime:
         agent_complexity: dict | None = None,
         agent_model_map: dict | None = None,
         trace_recorder: RunTrace | None = None,
+        eval_mode: bool = False,
     ) -> None:
         from web.bridge import DashboardBridge
         from web.state import ActivityRecord
@@ -2730,10 +2735,15 @@ class GraphRuntime:
         graph_view = self._topology_graph_view(topology)
 
         from orb.topologies import create_orchestrator
+        orchestrator_config = (
+            replace(self._config, eval_mode=eval_mode)
+            if self._config is not None
+            else None
+        )
         orchestrator = create_orchestrator(
             topology,
             providers=self._providers,
-            config=self._config,
+            config=orchestrator_config,
             model_overrides=effective_overrides or None,
             trace=False,
             trace_recorder=trace_recorder,

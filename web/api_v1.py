@@ -327,13 +327,19 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
             if str(r).strip() and str(m).strip()
         } or None
         workdir = (body.get("workdir") or "").strip() or None
+        eval_mode = body.get("eval_mode") is True
 
+        run_kwargs = {
+            "model_pin": model_pin,
+            "agent_models": agent_models,
+            "workdir": workdir,
+        }
+        if eval_mode:
+            run_kwargs["eval_mode"] = True
         status_code, payload = await runtime.start_run(
             query,
             topology,
-            model_pin=model_pin,
-            agent_models=agent_models,
-            workdir=workdir,
+            **run_kwargs,
         )
         if not payload.get("ok"):
             err_msg = str(payload.get("error") or "")

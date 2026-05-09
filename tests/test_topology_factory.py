@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from orb.llm.types import ModelConfig, ModelTier
+from orb.orchestrator.types import OrchestratorConfig
 from orb.topologies.factory import create_orchestrator
 
 
@@ -152,3 +153,15 @@ class TestCreateOrchestrator:
 
         coord_tools = {t["name"] for t in orch.agents["coordinator"]._tools}
         assert "write_file" not in coord_tools
+
+    def test_eval_mode_threads_to_agent_configs_and_prompts(self):
+        orch = create_orchestrator(
+            "triad",
+            _mock_providers(),
+            config=OrchestratorConfig(eval_mode=True),
+            model_overrides={t: ModelConfig(ModelTier.LOCAL_SMALL, "mock", "mock") for t in ModelTier},
+            trace=False,
+        )
+        for agent in orch.agents.values():
+            assert agent.config.eval_mode is True
+            assert "Evaluation Mode" in agent._system_prompt

@@ -11,6 +11,7 @@ def build_system_prompt(
     enable_filesystem: bool = False,
     enable_memory: bool = False,
     memory_write_enabled: bool = False,
+    eval_mode: bool = False,
     suppress_context_guidelines: bool = False,
     workdir: str = "",
 ) -> str:
@@ -111,6 +112,13 @@ Guidelines:
 - Treat writes as durable: do not store transient task progress, speculation, secrets, or noisy logs.
 """
 
+    eval_section = ""
+    if eval_mode:
+        eval_section = """
+## Evaluation Mode
+This run is being driven by an evaluation or benchmark harness. Persistent memory tools are disabled so benchmark cases do not read prior answers, leak state across runs, or write evaluation artifacts into the durable vault.
+"""
+
     context_guidelines = "" if suppress_context_guidelines else """
 ## Context Sharing Guidelines
 - **To a Reviewer**: share the file paths and the requirements/constraints you're working with.
@@ -133,7 +141,7 @@ You can communicate with these agents:
 - Share only the information your neighbor needs to do their job. Don't dump your full history.
 - When sharing code, include the file path — neighbors can read it with `read_file`.
 - When giving feedback, be specific and actionable.
-{context_guidelines}{filesystem_section}{memory_section}
+{context_guidelines}{filesystem_section}{memory_section}{eval_section}
 ## Completion
 - Call `complete_task` when you've finished your part and have no more contributions.
 - Don't call complete_task prematurely — wait until the work is genuinely done.

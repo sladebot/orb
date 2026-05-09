@@ -29,6 +29,7 @@ class AgentConfig:
     enable_memory: bool = False              # expose persistent memory read tools
     memory_write_enabled: bool = False       # expose persistent memory write tools
     memory_vault_path: str = "~/.orb/vault" # filesystem-backed memory vault root
+    eval_mode: bool = False                 # suppress persistent memory during benchmark/eval runs
     sandbox: "Sandbox | None" = None        # shared sandbox for this run
     suppress_context_guidelines: bool = False  # omit generic context-sharing hints from system prompt
 
