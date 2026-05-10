@@ -12,9 +12,8 @@ from .config import MemoryConfig
 # ── Vault layout constants ──────────────────────────────────────────────────
 
 WIKI_SUBDIRS = (
-    "wiki",
-    "wiki/entities",
-    "wiki/concepts",
+    "wiki/entity",
+    "wiki/concept",
     "wiki/analysis",
     "wiki/queries",
     "raw",

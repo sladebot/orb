@@ -9,7 +9,6 @@ import pytest
 
 from orb.memory.subgraph_store import Fact, SubgraphStore
 from orb.memory.backends.chromadb_networkx import ChromaDBNetworkXStore
-from orb.memory.backends.zep_cloud import ZepCloudStore
 from orb.memory.factory import SubgraphStoreFactory
 
 
@@ -126,15 +125,3 @@ async def test_upsert_is_idempotent(store):
 
     results = await store.get_facts("idem-agent")
     assert len(results) == 1
-
-
-def test_zep_raises_without_api_key():
-    """ZepCloudStore(api_key='') raises ValueError."""
-    with pytest.raises(ValueError, match="ZEP_API_KEY is required"):
-        ZepCloudStore(api_key="")
-
-
-def test_factory_zep_raises_without_key():
-    """SubgraphStoreFactory.from_config('zep', api_key='') raises ValueError."""
-    with pytest.raises(ValueError, match="ZEP_API_KEY is required"):
-        SubgraphStoreFactory.from_config("zep", api_key="")

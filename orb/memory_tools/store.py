@@ -1,10 +1,6 @@
 """Backend abstraction for the Orb vault — read and write operations.
 
-Phase 1 added read-only traversal.  Phase 2 extends ``Store`` with write
-methods: ``write_page``, ``update_index``, ``append_log``,
-``resolve_write_links``, and ``sync_inbound_links``.
-
-All public methods follow the same conventions as Phase 1:
+All public methods follow the same conventions:
 - Paths are resolved via ``_resolve_vault_path``.
 - Frontmatter is produced by ``models.page_to_frontmatter_text``.
 - Wikilinks use double-bracket syntax: ``[[page-title]]``.
@@ -125,6 +121,12 @@ def _update_index_file(vault_root: Path, all_pages: list[MarkdownPage]) -> None:
         "analysis": "Analysis",
         "query": "Queries",
     }
+    subdir_map = {
+        "entity": "entity",
+        "concept": "concept",
+        "analysis": "analysis",
+        "query": "queries",
+    }
     for page in all_pages:
         label = type_labels.get(page.type, f"{page.type}s")
         sections.setdefault(label, []).append(page)
@@ -143,7 +145,8 @@ def _update_index_file(vault_root: Path, all_pages: list[MarkdownPage]) -> None:
         parts.append(f"### {label}")
         parts.append("")
         for page in pages:
-            wiki_path = f"wiki/{page.type}/{page.title}.md"
+            sub = subdir_map.get(page.type, f"{page.type}s")
+            wiki_path = f"wiki/{sub}/{page.title}.md"
             parts.append(f"- [[{wiki_path}]] {page.title}")
         parts.append("")
 
@@ -153,7 +156,7 @@ def _update_index_file(vault_root: Path, all_pages: list[MarkdownPage]) -> None:
     (vault_root / "index.md").write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
-# ── Read operations (Phase 1 — preserved) ──────────────────────────────────────
+    # ── Read operations ──────────────────────────────────────────────────────
 
 
 class Store:

@@ -16,10 +16,9 @@ class MemoryConfig:
         vault_path: file-system location for the persistent vault.
         enabled: when False the tools are effectively no-ops.
         auto_write: when True every read side-effect (e.g. cache refresh)
-            triggers an implicit flush (future use — currently ignored because
-            Phase 1 is read-only).
+            triggers an implicit flush (future use).
         tag_taxonomy: allowed tag values as defined by SCHEMA.md. Pages with
-            tags outside this list will be flagged during linting (Phase 4).
+            tags outside this list will be flagged during linting.
     """
 
     vault_path: str = "~/.orb/vault"

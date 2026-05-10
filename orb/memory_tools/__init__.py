@@ -1,9 +1,5 @@
 """Orb memory tools — persistent memory vault for LLM conversations.
 
-Phase 0: config + CLI scaffold.
-Phase 1: read operations (Store + MemoryTools).
-Phase 2: write operations (MarkdownPage model, extended Store, extended MemoryTools).
-
 Public API:
 
     from orb.memory_tools import MemoryConfig, MemoryTools, MarkdownPage
