@@ -1,9 +1,8 @@
 """Data models for the Orb memory vault.
 
-Phase 2 write-engine dataclasses that represent parsed / constructed wiki pages.
-These are the public-facing types used by ``Store.write_page`` and
-``MemoryTools.write`` — they separate the in-memory representation from
-filesystem storage.
+These dataclasses represent parsed or constructed wiki pages — the
+in-memory representation used by ``Store.write_page`` and
+``MemoryTools.write``.
 """
 from __future__ import annotations
 

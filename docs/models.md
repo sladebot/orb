@@ -75,6 +75,8 @@ Provider settings live in `~/.orb/config.json`. See [install.md](install.md) for
 
 Orb persists structured memory into Chroma-backed stores organized by topology and cluster.
 
+See [Memory Tools](memory-tools.md) for the file-based vault.
+
 ```yaml
 persist_base: "~/.orb/chroma"
 

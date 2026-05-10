@@ -3,7 +3,8 @@
 High-level interface that agents call to read and write the vault.
 Wraps a ``Store`` instance and exposes a clean, discoverable set of methods.
 
-Phase 1: read operations only.  Phase 2: adds write operations.
+Both read (search, read_entity, list_pages) and write (write, write_entity,
+write_analysis, write_with_sources) operations are fully implemented.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ class MemoryTools:
         self.store: Store | None = None
         self._ensure_initialized()
 
-    # ── public read API (Phase 1 — unchanged) ────────────────────────────────
+    # ── public API (read + write) ────────────────────────────────────────────────
 
     def read(self, term: str) -> list[dict[str, Any]]:
         """Search by keyword across all wiki pages.
@@ -149,12 +150,12 @@ class MemoryTools:
 
     @staticmethod
     def _default_schema() -> str:
-        """Return default SCHEMA.md content (Phase 0 template)."""
+        """Return default SCHEMA.md content."""
         return (
             "---\ntitle: SCHEMA\ntype: meta\ntag_taxonomy:\n  - machine-learning\n  - software-engineering\n  - operations\n  - research\n  - design\n  - security\n  - data\n  - infrastructure\n---\n\n# Vault Schema\n\nTag taxonomy and conventions for the Orb memory vault.\n"
         )
 
-    # ── public write API (Phase 2 — new) ──────────────────────────────────────
+    # ── public API (read + write) ────────────────────────────────────────────────
 
     def write(self, entity: str, content: str, page_type: str = "concept") -> MarkdownPage:
         """Write a new or updated wiki page.
@@ -180,7 +181,6 @@ class MemoryTools:
         )
 
         # Determine confidence based on content length and link targets
-        outbound_links = []
         import re
         wikilink_re = re.compile(r"\[\[([^\]]+)\]\]")
         outbound_links = wikilink_re.findall(content)
