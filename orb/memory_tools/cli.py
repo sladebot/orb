@@ -17,8 +17,6 @@ WIKI_SUBDIRS = (
     "wiki/analysis",
     "wiki/queries",
     "raw",
-    "raw/articles",
-    "raw/transcripts",
     "memories",
 )
 
