@@ -300,6 +300,20 @@ class TestServerAPI:
         assert env["ok"] is False
         assert env["code"] == "PATH_TRAVERSAL"
 
+    async def test_memory_overview_api_allows_valid_subdirectories(self, client):
+        """Valid subdirectories of the default vault root should work normally."""
+        sub = _DEFAULT_VAULT_ROOT / "test_security_subdir"
+        sub.mkdir(parents=True, exist_ok=True)
+        try:
+            resp = await client.get(f"/api/v1/memory/overview?vault_path={sub}")
+            # The endpoint should return 200 with ok=True (subdir is a valid vault path)
+            assert resp.status == 200
+            env = await resp.json()
+            assert env["ok"] is True
+            assert env["data"]["vault_path"] == str(sub.resolve())
+        finally:
+            sub.rmdir()
+
     async def test_index_handler_does_not_block_event_loop(self, client):
         """Index handler must offload file I/O; a slow stat() must not starve other requests."""
         import threading
