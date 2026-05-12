@@ -11,6 +11,7 @@ from aiohttp import web
 
 from web.server import DashboardServer
 from web.state import DashboardState
+from web.api_v1 import _DEFAULT_VAULT_ROOT
 from orb.llm.types import (
     ANTHROPIC_HAIKU_MODEL,
     ANTHROPIC_OPUS_MODEL,
@@ -249,11 +250,14 @@ class TestServerAPI:
         assert "/static/memory.js?v=" in body
 
     async def test_memory_overview_api_reports_vault_counts(self, client, tmp_path):
-        vault = tmp_path / "vault"
-        (vault / "wiki" / "entity").mkdir(parents=True)
-        (vault / "wiki" / "concept").mkdir(parents=True)
-        (vault / "memories").mkdir(parents=True)
-        (vault / "raw" / "articles").mkdir(parents=True)
+        # The vault must be under _DEFAULT_VAULT_ROOT to pass the security
+        # check added for GH issue #30.  Create it there.
+        vault = _DEFAULT_VAULT_ROOT / "test_security_counts"
+        vault.mkdir(parents=True, exist_ok=True)
+        (vault / "wiki" / "entity").mkdir(parents=True, exist_ok=True)
+        (vault / "wiki" / "concept").mkdir(parents=True, exist_ok=True)
+        (vault / "memories").mkdir(parents=True, exist_ok=True)
+        (vault / "raw" / "articles").mkdir(parents=True, exist_ok=True)
         (vault / "wiki" / "entity" / "orb.md").write_text("---\ntitle: Orb\ntype: entity\ntags: [project, agent]\n---\n# Orb\n[[Memory]]\n", encoding="utf-8")
         (vault / "wiki" / "concept" / "memory.md").write_text("---\ntitle: Memory\ntype: concept\ntags: [agent]\n---\n# Memory\n", encoding="utf-8")
         (vault / "memories" / "old.md").write_text("archived", encoding="utf-8")
@@ -270,13 +274,45 @@ class TestServerAPI:
         assert data["page_types"] == {"concept": 1, "entity": 1}
         assert data["top_tags"][0] == {"tag": "agent", "count": 2}
 
-    async def test_memory_overview_api_handles_missing_vault(self, client, tmp_path):
-        missing = tmp_path / "missing-vault"
+    async def test_memory_overview_api_handles_missing_vault(self, client):
+        # Must be under _DEFAULT_VAULT_ROOT to pass the security check.
+        missing = _DEFAULT_VAULT_ROOT / "nonexistent_subdir"
         resp = await client.get(f"/api/v1/memory/overview?vault_path={missing}")
         assert resp.status == 200
         env = await resp.json()
         assert env["data"]["exists"] is False
         assert env["data"]["wiki_pages"] == 0
+
+    async def test_memory_overview_api_rejects_path_traversal(self, client):
+        """Path traversal via vault_path must be rejected (GH issue #30)."""
+        # /etc is outside the allowed root (~/.orb/vault)
+        resp = await client.get("/api/v1/memory/overview?vault_path=/etc")
+        assert resp.status == 403
+        env = await resp.json()
+        assert env["ok"] is False
+        assert env["code"] == "PATH_TRAVERSAL"
+
+    async def test_memory_overview_api_rejects_parent_directory_traversal(self, client):
+        """Traversing above the default vault root must be rejected."""
+        resp = await client.get("/api/v1/memory/overview?vault_path=/var/tmp/../../etc")
+        assert resp.status == 403
+        env = await resp.json()
+        assert env["ok"] is False
+        assert env["code"] == "PATH_TRAVERSAL"
+
+    async def test_memory_overview_api_allows_valid_subdirectories(self, client):
+        """Valid subdirectories of the default vault root should work normally."""
+        sub = _DEFAULT_VAULT_ROOT / "test_security_subdir"
+        sub.mkdir(parents=True, exist_ok=True)
+        try:
+            resp = await client.get(f"/api/v1/memory/overview?vault_path={sub}")
+            # The endpoint should return 200 with ok=True (subdir is a valid vault path)
+            assert resp.status == 200
+            env = await resp.json()
+            assert env["ok"] is True
+            assert env["data"]["vault_path"] == str(sub.resolve())
+        finally:
+            sub.rmdir()
 
     async def test_index_handler_does_not_block_event_loop(self, client):
         """Index handler must offload file I/O; a slow stat() must not starve other requests."""

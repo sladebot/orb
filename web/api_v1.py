@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import Counter
 from json import JSONDecodeError
 from pathlib import Path
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_JSON_BODY_BYTES = 1024 * 1024
+
+# Default vault root: all API-provided vault_path values are scoped
+# under this directory to prevent path-traversal attacks.
+_DEFAULT_VAULT_ROOT: Path = Path("~/.orb/vault").expanduser().resolve()
 
 
 # ── Envelope helpers ─────────────────────────────────────────────────────
@@ -50,6 +55,29 @@ def err(code: str, message: str, *, status: int = 400) -> web.Response:
         {"ok": False, "code": code, "error": message},
         status=status,
     )
+
+
+def _is_within_allowed_root(path: Path, allowed_root: Path) -> bool:
+    """Return True if *path* is under or equal to *allowed_root*.
+
+    Uses ``os.path.commonpath`` semantics: a path equals the root or
+    descends into it, but does NOT match when the user supplies a
+    completely unrelated path (e.g. ``/etc``) or a sibling directory
+    containing ``..`` traversal components.
+
+    Edge cases:
+    - ``allowed_root`` itself returns True (the default vault is allowed).
+    - Empty or None *path* is not validated (caller decides).
+    - ``OSError`` from ``commonpath`` (disjoint roots) is treated as
+      False — the path is not within the allowed root.
+    """
+    try:
+        common = str(allowed_root)
+        target = str(path)
+        os.path.commonpath([common, target])  # raises ValueError if disjoint
+        return target == common or target.startswith(common + os.sep)
+    except (ValueError, TypeError):
+        return False
 
 
 async def json_body(request: web.Request, *, empty_ok: bool = False) -> tuple[dict | None, web.Response | None]:
@@ -92,9 +120,30 @@ def _session_summary(runtime: "GraphRuntime") -> dict:
         "workdir": cs.workdir,
         "run_state": runtime.run_state.value,
         "turn": cs.user_turn_count(),
-        "locked_topology": cs.locked_topology,
     }
 
+
+def _is_within_allowed_root(path: Path, allowed_root: Path) -> bool:
+    """Return True if *path* is under or equal to *allowed_root*.
+
+    Uses ``os.path.commonpath`` semantics: a path equals the root or
+    descends into it, but does NOT match when the user supplies a
+    completely unrelated path (e.g. ``/etc``) or a sibling directory
+    containing ``..`` traversal components.
+
+    Edge cases:
+    - ``allowed_root`` itself returns True (the default vault is allowed).
+    - Empty or None *path* is not validated (caller decides).
+    - ``ValueError`` from ``commonpath`` (disjoint roots) is treated as
+      False — the path is not within the allowed root.
+    """
+    try:
+        os.path.commonpath([str(allowed_root), str(path)])  # raises ValueError if disjoint
+        # If we reach here, path starts with allowed_root.
+        # Verify it's actually a descendant or the root itself.
+        return str(path) == str(allowed_root) or str(path).startswith(str(allowed_root) + os.sep)
+    except ValueError:
+        return False
 
 
 def _memory_overview_sync(vault_path: str | None = None) -> dict:
@@ -178,6 +227,17 @@ def register_v1_routes(app: web.Application, manager: "RuntimeManager", server: 
 
     async def memory_overview(request: web.Request) -> web.Response:
         raw = (request.rel_url.query.get("vault_path") or "").strip() or None
+
+        # Validate vault_path: must not escape the allowed root (~/.orb/vault).
+        if raw is not None:
+            candidate = Path(raw).expanduser().resolve()
+            if not _is_within_allowed_root(candidate, _DEFAULT_VAULT_ROOT):
+                return err(
+                    "PATH_TRAVERSAL",
+                    f"vault_path must be within {_DEFAULT_VAULT_ROOT}",
+                    status=403,
+                )
+
         data = await asyncio.to_thread(_memory_overview_sync, raw)
         return ok("MEMORY_OVERVIEW", data)
 
