@@ -154,8 +154,6 @@ def _memory_overview_sync(vault_path: str | None = None) -> dict:
     wiki_dir = vault / "wiki"
     memories_dir = vault / "memories"
     raw_dir = vault / "raw"
-    memories_dir = vault / "memories"
-    raw_dir = vault / "raw"
     overview: dict[str, Any] = {
         "vault_path": str(vault),
         "exists": vault.exists(),
