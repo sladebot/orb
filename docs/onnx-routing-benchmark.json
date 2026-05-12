@@ -1,0 +1,27 @@
+{
+  "model_path": "models/routing_topology_v0.onnx",
+  "queries": [
+    "say hi",
+    "implement a parser and tests",
+    "review auth changes for security risk",
+    "research and compare model serving options",
+    "plan a migration for the runtime architecture",
+    "fix the failing dashboard test"
+  ],
+  "iterations_per_query": 250,
+  "python_surrogate": {
+    "count": 1500.0,
+    "mean_ms": 0.010864473724116882,
+    "p50_ms": 0.011124880984425545,
+    "p95_ms": 0.011499971151351929,
+    "max_ms": 0.0438750721514225
+  },
+  "onnx_runtime": {
+    "count": 1500.0,
+    "mean_ms": 0.2256490352253119,
+    "p50_ms": 0.22225012071430683,
+    "p95_ms": 0.25299983099102974,
+    "max_ms": 0.5130420904606581
+  },
+  "tradeoff": "This small linear prototype is faster than an LLM classifier but can only cover cheap, feature-based routing decisions. Keep the quality gate and fall back to Orb's existing classifier for pinned, ambiguous, or low-margin routes."
+}

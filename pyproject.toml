@@ -31,6 +31,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-aiohttp>=1.1.0",
 ]
+onnx-routing = [
+    "onnx>=1.16.0",
+    "onnxruntime>=1.17.0",
+]
 
 [project.scripts]
 orb = "orb.cli.main:main"
