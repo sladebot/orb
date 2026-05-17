@@ -104,7 +104,6 @@ class TestTrivialQueryShortCircuit:
         )
         assert result.task_type == "simple_direct"
         assert result.complexity <= 20
-        assert result.routing_mode == "heuristic"
 
     @pytest.mark.asyncio
     async def test_trivial_query_with_explicit_topology_honors_pin(

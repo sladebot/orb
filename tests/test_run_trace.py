@@ -14,7 +14,6 @@ class TestRunTrace:
             task_type="coding",
             candidates=["single_agent", "planner_executor_verifier"],
             data={
-                "routing_mode": "llm",
                 "classifier_model": "gpt-5.4-mini",
                 "classifier_provider": "openai-codex",
                 "escalation_allowed": True,
@@ -65,7 +64,6 @@ class TestRunTrace:
         assert trace.summary()["agent_ids"] == ["planner"]
         assert trace.summary()["task_type"] == "coding"
         assert trace.summary()["routing_reason"] == "risky task"
-        assert trace.summary()["routing_mode"] == "llm"
         assert trace.summary()["classifier_model"] == "gpt-5.4-mini"
         assert trace.summary()["classifier_provider"] == "openai-codex"
         assert trace.summary()["escalation_allowed"] is True

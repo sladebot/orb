@@ -624,7 +624,6 @@ class TestModelAllocation:
 
         assert predicted["agent_models"]["coder"] == ANTHROPIC_OPUS_MODEL
         assert predicted["task_type"] == "coding"
-        assert predicted["routing_mode"] == "llm"
         assert predicted["classifier_model"] == ANTHROPIC_HAIKU_MODEL
         assert predicted["classifier_provider"] == "anthropic"
         assert predicted["signals"]["word_count"] >= 4
@@ -663,7 +662,6 @@ class TestModelAllocation:
         predicted = await runtime.predict_topology("build a mobile app")
 
         assert predicted.get("topology") == "triad"
-        assert predicted.get("routing_mode") == "llm"
         assert predicted.get("classifier_model") == "gpt-4o"
         assert predicted.get("classifier_provider") == "openai"
         assert predicted["candidates"][0]["topology"] == "triad"
@@ -700,7 +698,6 @@ class TestModelAllocation:
                     escalation_reason="Escalate if the task grows beyond the initial decomposition.",
                     stop_early_reason="",
                     requested_topology=requested_topology,
-                    routing_mode="custom",
                     classifier_model="orb-lite-routing",
                     classifier_provider="orb",
                 )
@@ -710,7 +707,6 @@ class TestModelAllocation:
         predicted = await runtime.predict_topology("build a mobile app")
 
         assert predicted["topology"] == "triad"
-        assert predicted["routing_mode"] == "custom"
         assert predicted["reason"] == "custom:build a mobile app"
         assert predicted["classifier_model"] == "orb-lite-routing"
         assert predicted["classifier_provider"] == "orb"

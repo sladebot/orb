@@ -31,7 +31,6 @@ class TopologyClassification:
     escalation_reason: str = ""
     stop_early_reason: str = ""
     requested_topology: str = "auto"
-    routing_mode: str = "llm"
     signals: dict[str, object] = field(default_factory=dict)
     classifier_model: str = ""
     classifier_provider: str = ""
@@ -128,7 +127,6 @@ def _synth_trivial_classification(
         escalation_reason="",
         stop_early_reason="Trivial query — topology can terminate after first response.",
         requested_topology=requested_topology,
-        routing_mode="heuristic",
         signals=dict(signals),
         classifier_model="",
         classifier_provider="",
@@ -371,7 +369,6 @@ class ProviderBackedTopologyClassifier(TopologyClassifier):
             escalation_reason=str(parsed.get("escalation_reason") or ""),
             stop_early_reason=str(parsed.get("stop_early_reason") or ""),
             requested_topology=requested_topology,
-            routing_mode="pinned" if pinned else "llm",
             signals=dict(signals or {}),
             classifier_model=classifier_model,
             classifier_provider=classifier_provider,

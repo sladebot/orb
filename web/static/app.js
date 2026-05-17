@@ -1957,7 +1957,6 @@ class Dashboard {
         this._addPredictionCard({
             topology: this._plan.topology,
             task_type: routing.task_type || '',
-            routing_mode: routing.routing_mode || '',
             reason: routing.reason || '',
             summary: routing.summary || '',
             classifier_model: routing.classifier_model || '',
@@ -2913,10 +2912,6 @@ class Dashboard {
                 <div class="trace-detail-card">
                     <div class="trace-detail-label">Task Type</div>
                     <div class="trace-detail-value">${this._escapeHtml(summary.task_type || 'unknown')}</div>
-                </div>
-                <div class="trace-detail-card">
-                    <div class="trace-detail-label">Routing</div>
-                    <div class="trace-detail-value">${this._escapeHtml(summary.routing_mode || 'unknown')}</div>
                 </div>
                 <div class="trace-detail-card">
                     <div class="trace-detail-label">Classifier Model</div>
@@ -4425,7 +4420,7 @@ class Dashboard {
         const complexity = pred.complexity ?? Math.max(...Object.values(pred.agent_complexity || {}), 0);
         const barColor = complexity >= 75 ? '#cf222e' : complexity >= 50 ? '#9a6700' : '#1a7f37';
         const topology = pred.topology || {};
-        const routingMeta = [pred.task_type || '', pred.routing_mode || ''].filter(Boolean).join(' · ');
+        const routingMeta = pred.task_type || '';
         const classifierModel = pred.classifier_model || '';
         const classifierProvider = pred.classifier_provider || this._inferProvider(classifierModel);
         const classifierShort = this._shortModel(classifierModel);
