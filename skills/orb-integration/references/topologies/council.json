@@ -1,0 +1,165 @@
+{
+  "version": "1.0",
+  "id": "council",
+  "roles": {
+    "proposer_a": "Develop a supported proposal independently before seeing peers.",
+    "proposer_b": "Develop an alternative independently using different assumptions or expertise.",
+    "critic": "Challenge both proposals and specify evidence that would resolve disagreements.",
+    "reconciler": "Reconcile supported claims, preserve dissent, and report the decision; may be the host."
+  },
+  "visual": {
+    "nodes": {
+      "proposer_a": "Proposer A",
+      "proposer_b": "Proposer B",
+      "critic": "Critic",
+      "reconciler": "Reconciler"
+    },
+    "edges": [
+      [
+        "proposer_a",
+        "proposer_b"
+      ],
+      [
+        "proposer_b",
+        "proposer_a"
+      ],
+      [
+        "proposer_a",
+        "critic"
+      ],
+      [
+        "proposer_b",
+        "critic"
+      ],
+      [
+        "critic",
+        "proposer_a"
+      ],
+      [
+        "critic",
+        "proposer_b"
+      ],
+      [
+        "proposer_a",
+        "reconciler"
+      ],
+      [
+        "proposer_b",
+        "reconciler"
+      ],
+      [
+        "critic",
+        "reconciler"
+      ]
+    ]
+  },
+  "steps": [
+    {
+      "operation": "spawn",
+      "role": "proposer_a",
+      "inputs": [
+        "task",
+        "constraints",
+        "source evidence"
+      ]
+    },
+    {
+      "operation": "spawn",
+      "role": "proposer_b",
+      "inputs": [
+        "task",
+        "constraints",
+        "source evidence"
+      ]
+    },
+    {
+      "operation": "wait",
+      "for": [
+        "proposer_a",
+        "proposer_b"
+      ]
+    },
+    {
+      "operation": "collect",
+      "from": [
+        "proposer_a",
+        "proposer_b"
+      ]
+    },
+    {
+      "operation": "send",
+      "to": "proposer_a",
+      "inputs": [
+        "peer proposal",
+        "specific disputed claims"
+      ]
+    },
+    {
+      "operation": "send",
+      "to": "proposer_b",
+      "inputs": [
+        "peer proposal",
+        "specific disputed claims"
+      ]
+    },
+    {
+      "operation": "wait",
+      "for": [
+        "proposer_a",
+        "proposer_b"
+      ]
+    },
+    {
+      "operation": "collect",
+      "from": [
+        "proposer_a",
+        "proposer_b"
+      ]
+    },
+    {
+      "operation": "spawn",
+      "role": "critic",
+      "inputs": [
+        "task",
+        "proposals",
+        "rebuttals",
+        "evidence"
+      ]
+    },
+    {
+      "operation": "wait",
+      "for": [
+        "critic"
+      ]
+    },
+    {
+      "operation": "collect",
+      "from": [
+        "critic"
+      ]
+    },
+    {
+      "operation": "work",
+      "role": "reconciler",
+      "inputs": [
+        "claims",
+        "disagreements",
+        "evidence"
+      ],
+      "when": "run bounded evidence rounds from council protocol, then synthesize"
+    }
+  ],
+  "completion": {
+    "require": [
+      "independent proposals collected",
+      "material challenges evaluated",
+      "blocking disagreements resolved with evidence",
+      "remaining dissent disclosed",
+      "decision ledger validated"
+    ]
+  },
+  "deliberation": {
+    "max_rounds": 3,
+    "protocol": "../council.md"
+  }
+}

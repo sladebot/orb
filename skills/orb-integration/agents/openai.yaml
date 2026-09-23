@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orb Council"
+  short_description: "Adaptive agent councils and evidence-based decisions"
+  default_prompt: "Use $orb-integration to choose an interaction topology and available models, then reconcile independent proposals through evidence."

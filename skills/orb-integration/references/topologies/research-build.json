@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "id": "research-build",
+  "roles": {
+    "researcher": "Investigate requirements, architecture, risks, and relevant code without implementing.",
+    "implementer": "Implement from the research brief and validate the change.",
+    "reviewer": "Independently review the implementation against the task and research brief."
+  },
+  "visual": {
+    "nodes": {
+      "researcher": "Researcher",
+      "implementer": "Implementer",
+      "reviewer": "Reviewer"
+    },
+    "edges": [
+      ["researcher", "implementer"],
+      ["implementer", "reviewer"],
+      ["reviewer", "implementer"]
+    ]
+  },
+  "steps": [
+    {"operation": "spawn", "role": "researcher"},
+    {"operation": "wait", "for": ["researcher"]},
+    {"operation": "collect", "from": ["researcher"]},
+    {"operation": "spawn", "role": "implementer", "inputs": ["task", "research brief"]},
+    {"operation": "wait", "for": ["implementer"]},
+    {"operation": "collect", "from": ["implementer"]},
+    {"operation": "spawn", "role": "reviewer", "inputs": ["task", "research brief", "diff", "validation"]},
+    {"operation": "wait", "for": ["reviewer"]},
+    {"operation": "collect", "from": ["reviewer"]},
+    {"operation": "send", "to": "implementer", "when": "actionable findings exist"}
+  ],
+  "completion": {
+    "require": ["research brief collected", "implementation validated", "independent review collected", "actionable findings resolved"]
+  }
+}

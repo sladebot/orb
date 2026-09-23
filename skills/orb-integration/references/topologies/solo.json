@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "id": "solo",
+  "roles": {
+    "primary": "Complete the task directly and validate the result."
+  },
+  "visual": {
+    "nodes": {"primary": "Primary"},
+    "edges": []
+  },
+  "steps": [
+    {"operation": "work", "role": "primary"}
+  ],
+  "completion": {
+    "require": ["requested outcome completed", "relevant validation reported"]
+  }
+}
