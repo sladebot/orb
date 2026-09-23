@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "id": "parallel-review",
+  "roles": {
+    "implementer": "Implement and validate the requested high-risk change.",
+    "correctness_reviewer": "Independently inspect correctness, regressions, and maintainability.",
+    "risk_reviewer": "Independently inspect security, operational risk, and validation gaps."
+  },
+  "visual": {
+    "nodes": {
+      "implementer": "Implementer",
+      "correctness_reviewer": "Correctness reviewer",
+      "risk_reviewer": "Risk reviewer"
+    },
+    "edges": [
+      ["implementer", "correctness_reviewer"],
+      ["implementer", "risk_reviewer"],
+      ["correctness_reviewer", "implementer"],
+      ["risk_reviewer", "implementer"]
+    ]
+  },
+  "steps": [
+    {"operation": "spawn", "role": "implementer"},
+    {"operation": "wait", "for": ["implementer"]},
+    {"operation": "collect", "from": ["implementer"]},
+    {"operation": "spawn", "role": "correctness_reviewer", "inputs": ["task", "diff", "validation"]},
+    {"operation": "spawn", "role": "risk_reviewer", "inputs": ["task", "diff", "validation"]},
+    {"operation": "wait", "for": ["correctness_reviewer", "risk_reviewer"]},
+    {"operation": "collect", "from": ["correctness_reviewer", "risk_reviewer"]},
+    {"operation": "send", "to": "implementer", "when": "actionable findings exist"},
+    {"operation": "wait", "for": ["implementer"], "when": "revision requested"}
+  ],
+  "completion": {
+    "require": ["implementation validated", "both independent reviews collected", "actionable findings resolved"]
+  }
+}

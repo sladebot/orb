@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "id": "implement-review",
+  "roles": {
+    "implementer": "Implement the requested change and produce validation evidence.",
+    "reviewer": "Independently review correctness, regressions, and test coverage."
+  },
+  "visual": {
+    "nodes": {
+      "implementer": "Implementer",
+      "reviewer": "Reviewer"
+    },
+    "edges": [["implementer", "reviewer"], ["reviewer", "implementer"]]
+  },
+  "steps": [
+    {"operation": "spawn", "role": "implementer"},
+    {"operation": "wait", "for": ["implementer"]},
+    {"operation": "collect", "from": ["implementer"]},
+    {"operation": "spawn", "role": "reviewer", "inputs": ["task", "diff", "validation"]},
+    {"operation": "wait", "for": ["reviewer"]},
+    {"operation": "collect", "from": ["reviewer"]},
+    {"operation": "send", "to": "implementer", "when": "actionable findings exist"},
+    {"operation": "wait", "for": ["implementer"], "when": "revision requested"}
+  ],
+  "completion": {
+    "require": ["implementation validated", "independent review collected", "actionable findings resolved"]
+  }
+}

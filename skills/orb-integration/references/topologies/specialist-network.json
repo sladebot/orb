@@ -1,0 +1,130 @@
+{
+  "version": "1.0",
+  "id": "specialist-network",
+  "roles": {
+    "specialist_a": "Own one bounded subproblem and propose an interface independently.",
+    "specialist_b": "Own a complementary subproblem and propose an interface independently.",
+    "integrator": "Test cross-component assumptions and reconcile the combined result; may be the host."
+  },
+  "visual": {
+    "nodes": {
+      "specialist_a": "Specialist A",
+      "specialist_b": "Specialist B",
+      "integrator": "Integrator"
+    },
+    "edges": [
+      [
+        "specialist_a",
+        "specialist_b"
+      ],
+      [
+        "specialist_b",
+        "specialist_a"
+      ],
+      [
+        "specialist_a",
+        "integrator"
+      ],
+      [
+        "specialist_b",
+        "integrator"
+      ],
+      [
+        "integrator",
+        "specialist_a"
+      ],
+      [
+        "integrator",
+        "specialist_b"
+      ]
+    ]
+  },
+  "steps": [
+    {
+      "operation": "spawn",
+      "role": "specialist_a",
+      "inputs": [
+        "task",
+        "ownership",
+        "shared constraints"
+      ]
+    },
+    {
+      "operation": "spawn",
+      "role": "specialist_b",
+      "inputs": [
+        "task",
+        "ownership",
+        "shared constraints"
+      ]
+    },
+    {
+      "operation": "wait",
+      "for": [
+        "specialist_a",
+        "specialist_b"
+      ]
+    },
+    {
+      "operation": "collect",
+      "from": [
+        "specialist_a",
+        "specialist_b"
+      ]
+    },
+    {
+      "operation": "send",
+      "to": "specialist_a",
+      "inputs": [
+        "peer interface",
+        "relevant disputes"
+      ]
+    },
+    {
+      "operation": "send",
+      "to": "specialist_b",
+      "inputs": [
+        "peer interface",
+        "relevant disputes"
+      ]
+    },
+    {
+      "operation": "wait",
+      "for": [
+        "specialist_a",
+        "specialist_b"
+      ]
+    },
+    {
+      "operation": "collect",
+      "from": [
+        "specialist_a",
+        "specialist_b"
+      ]
+    },
+    {
+      "operation": "work",
+      "role": "integrator",
+      "inputs": [
+        "artifacts",
+        "evidence",
+        "disagreements"
+      ],
+      "when": "run bounded evidence rounds from council protocol, then verify integration"
+    }
+  ],
+  "completion": {
+    "require": [
+      "specialist outputs collected",
+      "cross-component assumptions checked",
+      "integration evidence collected",
+      "blocking disagreements resolved with evidence",
+      "remaining dissent disclosed",
+      "decision ledger validated"
+    ]
+  },
+  "deliberation": {
+    "max_rounds": 3,
+    "protocol": "../council.md"
+  }
+}
